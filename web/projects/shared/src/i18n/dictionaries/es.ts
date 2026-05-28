@@ -753,4 +753,5 @@ export default {
   840: 'Esta versión no incluye instrucciones. Por favor, actualice.',
   841: 'General',
   842: 'Datos del SO',
+  843: 'Duración',
 } satisfies i18n

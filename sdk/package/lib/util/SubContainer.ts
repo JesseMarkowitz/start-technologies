@@ -61,10 +61,12 @@ async function bind(
   await execFile('mount', [...args, from, to])
 }
 
-type MountsArg<Manifest extends T.SDKManifest, E extends T.Effects> =
-  E extends BackupEffects
-    ? Mounts<Manifest, { subpath: string | null; mountpoint: string }>
-    : Mounts<Manifest, never>
+type MountsArg<
+  Manifest extends T.SDKManifest,
+  E extends T.Effects,
+> = E extends BackupEffects
+  ? Mounts<Manifest, { subpath: string | null; mountpoint: string }>
+  : Mounts<Manifest, never>
 
 /**
  * Isolated container environment for running service processes.
@@ -264,12 +266,7 @@ export const SubContainer = {
     mounts: MountsArg<Manifest, Effects> | null,
     name: string,
   ): SubContainerLazy<Manifest, Effects> {
-    return new SubContainerLazy<Manifest, Effects>(
-      effects,
-      image,
-      mounts,
-      name,
-    )
+    return new SubContainerLazy<Manifest, Effects>(effects, image, mounts, name)
   },
 
   /**
@@ -362,7 +359,10 @@ export const SubContainer = {
 export class SubContainerEager<
   Manifest extends T.SDKManifest,
   Effects extends T.Effects = T.Effects,
-> extends Drop implements SubContainer<Manifest, Effects> {
+>
+  extends Drop
+  implements SubContainer<Manifest, Effects>
+{
   private destroyed = false
   private destroyPending = false
   private holdCount = 0
@@ -891,7 +891,10 @@ export class SubContainerEager<
 export class SubContainerLazy<
   Manifest extends T.SDKManifest,
   Effects extends T.Effects = T.Effects,
-> extends Drop implements SubContainer<Manifest, Effects> {
+>
+  extends Drop
+  implements SubContainer<Manifest, Effects>
+{
   readonly identity: symbol = Symbol('subcontainer')
   readonly imageId: keyof Manifest['images'] & T.ImageId
   readonly sharedRun: boolean
@@ -1114,9 +1117,7 @@ export class SubContainerLazy<
 
   onDrop(): void {
     if (this.materialized) {
-      this.materialized
-        .then((e) => e.destroy())
-        .catch((e) => console.error(e))
+      this.materialized.then((e) => e.destroy()).catch((e) => console.error(e))
     }
   }
 }

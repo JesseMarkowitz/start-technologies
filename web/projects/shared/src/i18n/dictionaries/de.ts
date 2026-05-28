@@ -753,4 +753,5 @@ export default {
   840: 'Diese Version enthält keine Anweisungen. Bitte aktualisieren.',
   841: 'Gesamt',
   842: 'Betriebssystemdaten',
+  843: 'Dauer',
 } satisfies i18n

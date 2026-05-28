@@ -753,4 +753,5 @@ export default {
   840: 'Ta wersja nie zawiera instrukcji. Proszę zaktualizować.',
   841: 'Łącznie',
   842: 'Dane systemu OS',
+  843: 'Czas trwania',
 } satisfies i18n
