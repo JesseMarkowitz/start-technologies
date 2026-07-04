@@ -563,8 +563,13 @@ struct LanIpv6SetRequest {
 
 #[derive(Serialize, Deserialize)]
 struct Port<Id = ProfileId> {
-    /// Security profile assigned to this port, if any
+    /// Security profile assigned to this port, if any (the Static-mode assignment)
     profile: Option<Id>,
+    /// Wired 802.1X authentication mode for this port. Defaults to `static` when
+    /// omitted. Read-only here: the mode is authored via `dot1x.set` (see §5b) and
+    /// overlaid onto this field for display. See `PortAuthMode` in §5b.
+    #[serde(default)]
+    auth_mode: PortAuthMode<Id>,
 }
 
 #[derive(Serialize)]
@@ -618,6 +623,78 @@ struct EthernetSetResult {
 ```
 
 Note: `ProfileId` and `ProfileIdOpt` are shared types defined at the top of the contract.
+
+### 5b. Wired 802.1X (`dot1x.*`)
+
+Wired port-based authentication. A router is a **Core** (holds the on-device RADIUS
+server, owns the profiles, authenticator on its LAN ports) or a **Satellite**
+(authenticator on its LAN ports, forwards auth upstream over a trusted 802.1Q trunk).
+The RADIUS user database is **derived** from the profile Wi-Fi passwords — the same
+secret authenticates a device on wired 802.1X and on Wi-Fi, landing it in the same
+profile. See `docs/design/wired-dot1x.md`.
+
+```rust
+// Shared type, also used by ethernet.Port.auth_mode (§5).
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+enum PortAuthMode<Id = ProfileId> {
+    Static,                           // fixed profile assignment (today's default)
+    Dot1xClient { guest: Id },        // per-device auth; guest = required fallback profile
+    SatelliteUplink,                  // trusted 802.1Q trunk to a paired Satellite
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpstreamInfo { identity: String, core_mgmt_addr: String, mgmt_vlan: u16 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Dot1xConfig {
+    enabled: bool,                    // whether wired 802.1X is on at all
+    role: Dot1xRole,                  // "core" | "satellite"
+    upstream: Option<UpstreamInfo>,   // Satellite-only, provisioned by pairing (read-only)
+    ports: BTreeMap<String, PortAuthMode>,
+}
+```
+
+### `dot1x.get`
+
+```rust
+// Request: {}
+// Response: Dot1xConfig  (read from UCI: startwrt `dot1x`/`dot1x_port`)
+```
+
+### `dot1x.set`
+
+```rust
+// Request: Dot1xConfig
+// Response: Dot1xConfig  (the re-read, canonical config)
+```
+
+Writes the `dot1x`/`dot1x_port` UCI sections and flips the `radius` server enable bit
+(Core only). A `Dot1xClient` port whose `guest` names no real profile is rejected.
+On an enabled Core it regenerates `/etc/radius/users` from the profile passwords and,
+when effectful, reloads `radius` + hostapd.
+
+### `dot1x.status`
+
+```rust
+// Request: {}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortStatus { port: String, present: bool, clients: Vec<String> }
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Dot1xStatus { enabled: bool, role: Dot1xRole, ports: Vec<PortStatus> }
+// Response: Dot1xStatus  (per Dot1xClient port, live hostapd clients via ubus)
+```
+
+### `dot1x.logs`
+
+```rust
+// Request: {}
+// Response: LogsResponse  (recent hostapd/RADIUS lines, same shape as system.logs)
+```
 
 ---
 

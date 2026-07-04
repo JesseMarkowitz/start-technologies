@@ -277,6 +277,26 @@ flow are one coupled decision, not three independent ones:
 
 ## 4. Backend Design (Rust, `backend/ctrl/`)
 
+> **Implementation status (backend, first slice — landed).** The `dot1x` module,
+> its `get`/`set`/`status`/`logs` endpoints (registered in `main_api`), the typed
+> `dot1x`/`dot1x_port`/`radius` UCI sections, RADIUS-user derivation from profile
+> passwords (`build_radius_users_json` + `write_radius_users`, atomic 0600), and the
+> `profiles.*` regeneration hooks are implemented and unit-tested (445 crate tests
+> green). Two decisions differ from / refine the sketch below:
+>
+> 1. **Single writer for per-port mode.** `dot1x.set` owns the `dot1x_port` sections;
+>    `ethernet.get` overlays them onto `Port.auth_mode` **read-only** (it does not
+>    persist auth mode). This avoids a two-writer race between `ethernet.set` and
+>    `dot1x.set`. The guest profile is stored as its VLAN tag and resolved back via
+>    `profiles::Lookup`.
+> 2. **Deferred to a device/frontend-validated slice:** the per-port hostapd-wired
+>    authenticator config generation + reload (§5 "Authenticator config"), Satellite
+>    pairing / the `/etc/radius/clients` file (§5a), boot-time user-DB regeneration,
+>    `firstboot_config/radius` staging + `stage-files.sh` `mkdir /etc/radius`, and the
+>    entire Angular frontend (§6). `dot1x.set`/`status` shell out to `radius`/hostapd
+>    only when `effectful()`, so they are inert until that runtime wiring lands.
+
+
 ### 4a. New module `dot1x.rs`
 
 Follows the handler convention (`backend/AGENTS.md`): export

@@ -596,6 +596,13 @@ pub async fn delete<C: CtrlContext>(ctx: C, id: ProfileIdOpt) -> Result<(), Erro
                 if let Err(e) = regenerate_schedule_crontab(&ctx).await {
                     tracing::error!("Failed to regenerate schedule crontab after profile delete: {e}");
                 }
+                // Keep the wired-802.1X RADIUS user DB in sync (no-op unless this is
+                // an enabled Core): the deleted profile's credential must drop out.
+                if ctx.effectful() {
+                    if let Err(e) = crate::dot1x::maybe_regenerate_radius_users(&ctx).await {
+                        tracing::error!("Failed to regenerate RADIUS users after profile delete: {e}");
+                    }
+                }
                 if ctx.effectful() {
                     let _ = crate::run_quiet_async(tokio::process::Command::new("/etc/init.d/cron").arg("restart")).await;
                 }
@@ -1074,6 +1081,13 @@ pub async fn set<C: CtrlContext>(
                     tracing::error!(
                         "Failed to regenerate schedule crontab after profile update: {e}"
                     );
+                }
+                // A changed credential/VLAN must be reflected in the wired-802.1X
+                // RADIUS user DB (no-op unless this is an enabled Core).
+                if ctx.effectful() {
+                    if let Err(e) = crate::dot1x::maybe_regenerate_radius_users(&ctx).await {
+                        tracing::error!("Failed to regenerate RADIUS users after profile update: {e}");
+                    }
                 }
                 if ctx.effectful() {
                     let _ = crate::run_quiet_async(

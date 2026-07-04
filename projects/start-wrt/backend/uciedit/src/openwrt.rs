@@ -507,3 +507,63 @@ pub struct DdnsService {
     pub lookup_host: Option<String>,
 }
 
+/// The on-device RADIUS server (`config radius`), used by a Core router to verify
+/// wired/wireless 802.1X credentials. Points at StartWRT's existing TLS certs for
+/// the PEAP tunnel; `users`/`clients` reference generated JSON databases. Disabled
+/// by default — enabled only when a router takes the Core role.
+#[derive(Debug, TypedSection, Default)]
+#[uci(ty = "radius")]
+pub struct RadiusConfig {
+    #[uci(default_value = true)]
+    pub disabled: bool,
+    #[uci(default)]
+    pub ipv6: Option<String>,
+    #[uci(default)]
+    pub log_level: Option<String>,
+    pub ca_cert: String,
+    pub cert: String,
+    pub key: String,
+    pub users: String,
+    pub clients: String,
+    #[uci(default)]
+    pub auth_port: Option<u16>,
+    #[uci(default)]
+    pub acct_port: Option<u16>,
+    #[uci(default)]
+    pub identity: Option<String>,
+}
+
+/// Global wired-802.1X settings, persisted as `config dot1x 'dot1x'` in
+/// `/etc/config/startwrt`. `disabled` defaults true so an un-provisioned router has
+/// 802.1X off. `role` is `"core"` or `"satellite"`. The `upstream_*` fields are
+/// Satellite-only, provisioned by pairing (§5a) rather than admin-entered, and are
+/// absent on a Core or an unpaired device.
+#[derive(Debug, TypedSection, Default)]
+#[uci(ty = "dot1x")]
+pub struct Dot1xGlobal {
+    #[uci(default_value = true)]
+    pub disabled: bool,
+    #[uci(default_value = "core".to_string())]
+    pub role: String,
+    #[uci(default)]
+    pub upstream_identity: Option<String>,
+    #[uci(default)]
+    pub core_mgmt_addr: Option<String>,
+    #[uci(default)]
+    pub mgmt_vlan: Option<u16>,
+}
+
+/// Per-LAN-port authentication mode, persisted as `config dot1x_port '<port>'` in
+/// `/etc/config/startwrt`. `port` is the interface name; `mode` is one of `static`
+/// | `dot1xClient` | `satelliteUplink` (matching the `PortAuthMode` serde tag).
+/// `guest_vlan` carries the `dot1xClient` fallback profile's VLAN tag (required for
+/// that mode, resolved back to a profile via `profiles::Lookup`).
+#[derive(Debug, TypedSection, Default)]
+#[uci(ty = "dot1x_port")]
+pub struct Dot1xPort {
+    pub port: String,
+    #[uci(default_value = "static".to_string())]
+    pub mode: String,
+    #[uci(default)]
+    pub guest_vlan: Option<u16>,
+}

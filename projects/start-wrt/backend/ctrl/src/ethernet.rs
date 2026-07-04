@@ -1,3 +1,4 @@
+use crate::dot1x::PortAuthMode;
 use crate::profiles::{self, ProfileId, ProfileIdOpt};
 use crate::utils::DeserializeStdin;
 use crate::utils::HandlerExtSerde;
@@ -9,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::invoke::Invoke;
 use std::time::Duration;
 use uciedit::openwrt::{
-    DeviceType, InterfaceProto, NetworkBridgeVlan, NetworkDevice, NetworkInterface,
+    DeviceType, Dot1xPort, InterfaceProto, NetworkBridgeVlan, NetworkDevice, NetworkInterface,
     NetworkVlanPort, NetworkVlanPortTagging,
 };
 use uciedit::{dump_all, parse_all, Arena, Configs};
@@ -36,7 +37,14 @@ pub const DEFAULT_WAN6_INTERFACE: &str = "wan6";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Port<Id: Ord = ProfileId> {
+    /// Static-mode profile assignment: the profile every device on this port lands
+    /// in when `auth_mode` is `Static`, or the previous assignment otherwise.
     pub profile: Option<Id>,
+    /// Wired 802.1X authentication mode for this port. Defaults to `Static` so
+    /// existing `Port` payloads (which omit it) deserialize unchanged. The guest
+    /// profile for a `Dot1xClient` port is carried inside the variant, not here.
+    #[serde(default = "crate::dot1x::default_auth_mode")]
+    pub auth_mode: PortAuthMode<Id>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,13 +157,23 @@ fn get_config(ctx: impl CtrlContext, cfgs: &Configs) -> Result<Ethernet, Error> 
                         .get(name)
                         .and_then(|(tag, _)| lookup.from_vlan(*tag))
                         .cloned(),
+                    auth_mode: PortAuthMode::Static,
                 },
             )
         })
         .collect();
     if let Some(ref wp) = wan_port {
-        ports.entry(wp.clone()).or_insert(Port { profile: None });
+        ports.entry(wp.clone()).or_insert(Port { profile: None, auth_mode: PortAuthMode::Static });
     }
+    // Overlay persisted wired-802.1X per-port auth modes. These live in the
+    // `startwrt` config as `dot1x_port` sections (written by `dot1x.set`); the
+    // default when a port has no section is `Static`, already set above.
+    cfgs["startwrt"].try_each(|_, p: Dot1xPort| {
+        if let Some(port) = ports.get_mut(&p.port) {
+            port.auth_mode = crate::dot1x::port_mode_from_uci(&p, &lookup)?;
+        }
+        Ok::<_, Error>(())
+    })?;
     for section in &cfgs["network"].sections {
         if section.name().as_deref() == Some(DEFAULT_WAN6_INTERFACE) {
             if let Some(iface) = section.get_typed::<NetworkInterface>()? {
@@ -261,6 +279,7 @@ pub async fn set<C: CtrlContext>(
                                 Some(id) => Some(lookup.resolve(id)?.clone()),
                                 None => None,
                             },
+                            auth_mode: PortAuthMode::Static,
                         },
                     ))
                 })
@@ -623,6 +642,7 @@ pub async fn edit<C: CtrlContext + Clone>(ctx: C) -> Result<(), Error> {
                     k,
                     Port {
                         profile: v.profile.map(Into::into),
+                        auth_mode: PortAuthMode::Static,
                     },
                 )
             })
@@ -820,6 +840,35 @@ config interface 'wan'
         assert_eq!(result.ports.len(), 2);
         assert!(result.ports.contains_key("eth0"));
         assert!(result.ports.contains_key("eth1"));
+    }
+
+    #[tokio::test]
+    async fn get_overlays_persisted_dot1x_auth_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_basic(dir.path());
+        // Append a dot1x_port section marking eth1 as a Dot1xClient port whose
+        // guest fallback is the Guest profile (VLAN 3). eth0 has no section.
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("startwrt"))
+            .unwrap();
+        write!(
+            f,
+            "\nconfig dot1x_port 'eth1'\n\toption port 'eth1'\n\toption mode 'dot1xClient'\n\toption guest_vlan '3'\n"
+        )
+        .unwrap();
+        let ctx = TestContext(dir.path().to_path_buf());
+
+        let result = get(ctx).await.unwrap();
+        assert!(
+            matches!(result.ports["eth0"].auth_mode, PortAuthMode::Static),
+            "eth0 has no dot1x_port section → Static"
+        );
+        match &result.ports["eth1"].auth_mode {
+            PortAuthMode::Dot1xClient { guest } => assert_eq!(guest.vlan_tag, 3),
+            other => panic!("expected eth1 Dot1xClient, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1048,6 +1097,7 @@ config interface 'wan'
                                     interface: Some(p.interface.clone()),
                                     vlan_tag: Some(p.vlan_tag),
                                 }),
+                                auth_mode: PortAuthMode::Static,
                             },
                         )
                     })
@@ -1090,6 +1140,7 @@ config interface 'wan'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            auth_mode: PortAuthMode::Static,
                         },
                     ),
                     (
@@ -1100,6 +1151,7 @@ config interface 'wan'
                                 interface: Some("guest".into()),
                                 vlan_tag: None,
                             }),
+                            auth_mode: PortAuthMode::Static,
                         },
                     ),
                 ]),
@@ -1139,9 +1191,10 @@ config interface 'wan'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            auth_mode: PortAuthMode::Static,
                         },
                     ),
-                    ("eth1".into(), Port { profile: None }),
+                    ("eth1".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
                 ]),
             }),
         ).await
@@ -1176,9 +1229,10 @@ config interface 'wan'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            auth_mode: PortAuthMode::Static,
                         },
                     ),
-                    ("eth1".into(), Port { profile: None }),
+                    ("eth1".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
                 ]),
             }),
         ).await
@@ -1214,10 +1268,11 @@ config interface 'wan'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            auth_mode: PortAuthMode::Static,
                         },
                     ),
-                    ("eth1".into(), Port { profile: None }),
-                    ("eth2".into(), Port { profile: None }),
+                    ("eth1".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
+                    ("eth2".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
                 ]),
             }),
         ).await
@@ -1240,7 +1295,7 @@ config interface 'wan'
                 wan_ipv6: false,
                 wan_port: Some("eth1".into()),
                 ports: BTreeMap::from([
-                    ("eth0".into(), Port { profile: None }),
+                    ("eth0".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
                     (
                         "eth1".into(),
                         Port {
@@ -1249,6 +1304,7 @@ config interface 'wan'
                                 interface: Some("guest".into()),
                                 vlan_tag: None,
                             }),
+                            auth_mode: PortAuthMode::Static,
                         },
                     ),
                 ]),
@@ -1278,7 +1334,7 @@ config interface 'wan'
                 wan_ipv6: false,
                 wan_port: Some("eth0".into()),
                 ports: BTreeMap::from([
-                    ("eth0".into(), Port { profile: None }),
+                    ("eth0".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
                     (
                         "eth1".into(),
                         Port {
@@ -1287,6 +1343,7 @@ config interface 'wan'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            auth_mode: PortAuthMode::Static,
                         },
                     ),
                     (
@@ -1297,6 +1354,7 @@ config interface 'wan'
                                 interface: Some("guest".into()),
                                 vlan_tag: None,
                             }),
+                            auth_mode: PortAuthMode::Static,
                         },
                     ),
                 ]),
@@ -1357,6 +1415,7 @@ config interface 'wan'
                                     interface: Some(p.interface.clone()),
                                     vlan_tag: Some(p.vlan_tag),
                                 }),
+                                auth_mode: PortAuthMode::Static,
                             },
                         )
                     })
@@ -1399,9 +1458,10 @@ config interface 'wan'
                                 interface: Some("guest".into()),
                                 vlan_tag: None,
                             }),
+                            auth_mode: PortAuthMode::Static,
                         },
                     ),
-                    ("eth1".into(), Port { profile: None }),
+                    ("eth1".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
                 ]),
             }),
         ).await
@@ -1476,6 +1536,7 @@ config interface 'guest'
                             interface: Some("guest".into()),
                             vlan_tag: None,
                         }),
+                        auth_mode: PortAuthMode::Static,
                     },
                 )]),
             }),
@@ -1530,8 +1591,8 @@ config interface 'guest'
             wan_ipv6: false,
             wan_port: None,
             ports: BTreeMap::from([
-                ("eth0".into(), Port { profile: None }),
-                ("eth1".into(), Port { profile: None }),
+                ("eth0".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
+                ("eth1".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
             ]),
         };
         set_from_config(&ctx, &mut cfgs, &ethernet).unwrap();
@@ -1564,8 +1625,8 @@ config interface 'guest'
             wan_ipv6: true,
             wan_port: Some("eth1".into()),
             ports: BTreeMap::from([
-                ("eth0".into(), Port { profile: None }),
-                ("eth1".into(), Port { profile: None }),
+                ("eth0".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
+                ("eth1".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
             ]),
         };
         set_from_config(&ctx, &mut cfgs, &ethernet).unwrap();
@@ -1604,8 +1665,8 @@ config interface 'guest'
             wan_ipv6: false,
             wan_port: Some("eth1".into()),
             ports: BTreeMap::from([
-                ("eth0".into(), Port { profile: None }),
-                ("eth1".into(), Port { profile: None }),
+                ("eth0".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
+                ("eth1".into(), Port { profile: None, auth_mode: PortAuthMode::Static }),
             ]),
         };
         set_from_config(&ctx, &mut cfgs, &ethernet).unwrap();
@@ -1685,6 +1746,7 @@ config interface 'guest'
                                 interface: Some("guest".into()),
                                 vlan_tag: None,
                             }),
+                            auth_mode: PortAuthMode::Static,
                         },
                     ),
                     (
@@ -1695,6 +1757,7 @@ config interface 'guest'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            auth_mode: PortAuthMode::Static,
                         },
                     ),
                 ]),

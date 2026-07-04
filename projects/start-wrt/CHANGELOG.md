@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Wired 802.1X port authentication (backend, in progress). A router can act as a
+  **Core** (on-device RADIUS server, owns the profiles, authenticator on its LAN
+  ports) or a **Satellite** (forwards wired auth upstream to the Core). Each LAN
+  port gains an authentication mode — `static` (today's fixed assignment),
+  `dot1xClient` (per-device auth with a required guest-fallback profile), or
+  `satelliteUplink` — set via the new `dot1x.get`/`set`/`status`/`logs` RPCs
+  (`startwrt dot1x …` CLI). The RADIUS user database is derived automatically from
+  the existing profile Wi-Fi passwords, so a device uses the same secret on wired
+  802.1X and on Wi-Fi and lands in the same security profile; it is kept in sync as
+  profiles change. See `docs/design/wired-dot1x.md`. (Frontend and the per-port
+  hostapd authenticator/runtime wiring are not yet included.)
+
 ### Fixed
 
 - Changing the admin password now enforces the 12-character minimum. The

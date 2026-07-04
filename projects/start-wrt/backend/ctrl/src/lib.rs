@@ -11,6 +11,7 @@ pub mod device_names;
 pub mod devices;
 pub mod diagnostics;
 pub mod dns;
+pub mod dot1x;
 pub mod eeprom;
 pub mod ethernet;
 pub mod exec;
@@ -401,6 +402,7 @@ pub fn main_api<C: CtrlContext + Clone>() -> ParentHandler<C> {
         .subcommand("auth", auth::auth::<C>())
         .subcommand("profiles", profiles::profiles::<C>())
         .subcommand("ethernet", ethernet::ethernet::<C>())
+        .subcommand("dot1x", dot1x::dot1x::<C>())
         .subcommand("wifi", wifi::wifi::<C>())
         .subcommand("vpn-server", vpn_server::vpn_server::<C>())
         .subcommand("vpn-client", vpn_client::vpn_client::<C>())
