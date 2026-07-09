@@ -885,6 +885,10 @@ image impact expected small but should be measured on the first image build.
 
 ## 11. Testing & Verification
 
+> The concrete, scenario-by-scenario validation plan (unit, CLI/config-level, and
+> on-device end-to-end, with a traceability matrix) lives in
+> [`wired-dot1x-testplan.md`](wired-dot1x-testplan.md). This section is the summary.
+
 **Host build / unit:**
 - `cargo build -p startwrt-core --bin startwrt`
 - `cargo test -p startwrt-core -p uciedit -p uciedit_macros`
