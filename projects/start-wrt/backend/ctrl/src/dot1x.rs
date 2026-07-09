@@ -159,20 +159,29 @@ pub async fn get<C: CtrlContext>(ctx: C) -> Result<Dot1xConfig, Error> {
 
 fn get_config(ctx: &impl CtrlContext, cfgs: &Configs) -> Result<Dot1xConfig, Error> {
     let lookup = profiles::Lookup::parse(ctx.clone(), cfgs)?;
+    // Absent `dot1x` section ⇒ un-provisioned router ⇒ 802.1X off. (We can't use
+    // `unwrap_or_default()`: `Dot1xGlobal::default()` gives `disabled = false` — the
+    // `#[uci(default_value = true)]` only applies when *reading* a present section
+    // that omits the field, not to Rust's `Default`.)
     let global = cfgs["startwrt"]
         .sections
         .iter()
         .find(|s| s.ty() == "dot1x")
         .map(|s| s.get::<Dot1xGlobal>())
-        .transpose()?
-        .unwrap_or_default();
-    let role = parse_role(&global.role);
-    let upstream = match (role, global.upstream_identity.clone()) {
-        (Dot1xRole::Satellite, Some(identity)) => Some(UpstreamInfo {
-            identity,
-            core_mgmt_addr: global.core_mgmt_addr.clone().unwrap_or_default(),
-            mgmt_vlan: global.mgmt_vlan.unwrap_or(0),
-        }),
+        .transpose()?;
+    let (enabled, role) = match &global {
+        Some(g) => (!g.disabled, parse_role(&g.role)),
+        None => (false, Dot1xRole::Core),
+    };
+    let upstream = match (role, global.as_ref().and_then(|g| g.upstream_identity.clone())) {
+        (Dot1xRole::Satellite, Some(identity)) => {
+            let g = global.as_ref();
+            Some(UpstreamInfo {
+                identity,
+                core_mgmt_addr: g.and_then(|g| g.core_mgmt_addr.clone()).unwrap_or_default(),
+                mgmt_vlan: g.and_then(|g| g.mgmt_vlan).unwrap_or(0),
+            })
+        }
         _ => None,
     };
     let mut ports = BTreeMap::new();
@@ -182,7 +191,7 @@ fn get_config(ctx: &impl CtrlContext, cfgs: &Configs) -> Result<Dot1xConfig, Err
         Ok::<_, Error>(())
     })?;
     Ok(Dot1xConfig {
-        enabled: !global.disabled,
+        enabled,
         role,
         upstream,
         ports,
@@ -614,6 +623,20 @@ config wifi-station
         assert_eq!(guest["vlan-id"], 101);
         assert_eq!(guest["methods"][0], "MSCHAPV2");
         assert_eq!(v["phase1"]["wildcard"][0]["methods"][0], "PEAP");
+    }
+
+    #[tokio::test]
+    async fn get_defaults_to_disabled_when_no_dot1x_section() {
+        // An un-provisioned router (no `config dot1x` section) must report 802.1X
+        // OFF — regression guard against `unwrap_or_default()` reading `disabled`
+        // as Rust's `false`.
+        let dir = tempfile::tempdir().unwrap();
+        setup_configs(dir.path());
+        let ctx = TestContext(dir.path().to_path_buf());
+        let cfg = get(ctx).await.unwrap();
+        assert!(!cfg.enabled, "no dot1x section ⇒ disabled");
+        assert_eq!(cfg.role, Dot1xRole::Core);
+        assert!(cfg.ports.is_empty());
     }
 
     #[tokio::test]
