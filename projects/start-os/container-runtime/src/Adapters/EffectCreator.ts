@@ -269,6 +269,11 @@ export function makeEffects(context: EffectContext): Effects {
         T.Effects["getSslKey"]
       >
     },
+    getUpsStatus(...[]: Parameters<T.Effects["getUpsStatus"]>) {
+      return rpcRound("get-ups-status", {}) as ReturnType<
+        T.Effects["getUpsStatus"]
+      >
+    },
     getSystemSmtp(...[options]: Parameters<T.Effects["getSystemSmtp"]>) {
       return rpcRound("get-system-smtp", {
         ...options,

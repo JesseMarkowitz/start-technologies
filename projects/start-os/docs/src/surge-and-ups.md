@@ -44,6 +44,18 @@ There are three common topologies. For a home server, **line-interactive** is th
 
 ## Automatic shutdown on low battery
 
-StartOS does not currently include built-in support for UPS monitoring (USB or network), so it cannot automatically shut down when the battery is low during an extended outage. The server will run until battery exhaustion and then power off uncleanly. This still carries some risk of data corruption, but it is dramatically less risky than facing the original surge, brownout, or sudden outage with no UPS at all.
+StartOS includes built-in UPS monitoring via [Network UPS Tools (NUT)](https://networkupstools.org/). Configure it under **System → Network UPS Tools**:
 
-If your area has frequent or long outages, size your UPS to give yourself time to shut down manually from the StartOS UI before the battery runs out.
+- **Direct UPS** — the UPS is connected to this server by USB. StartOS runs the NUT driver and server locally.
+- **Network UPS client** — the UPS is monitored by another host (another StartOS server or any NUT server) that StartOS connects to over the network.
+
+Once configured, StartOS reads the UPS state (online vs. on-battery, charge level, estimated runtime) and **shuts the server down gracefully before the battery is exhausted**, avoiding the unclean power-off that risks data corruption. In Direct UPS mode you can also enable **Allow network clients** so other machines on your network can monitor the same UPS.
+
+If your area has frequent or long outages, size your UPS to give yourself comfortable runtime, and verify the setup by briefly unplugging the UPS from the wall while the server runs — the current state is shown live on the Network UPS Tools screen.
+
+### Reading UPS status from services and the CLI
+
+The current UPS status is available to service packages and to `start-cli`, so monitoring, alerting, and integrations (for example a notification service, or Home Assistant) can be layered on top:
+
+- **CLI:** `start-cli nut-status` prints the live UPS variables (status, `battery.charge`, `battery.runtime`, input/output voltage, load, and more).
+- **Service packages:** the `getUpsStatus` effect returns the same variable set, so a package can poll the UPS and react to it (see the SDK effects reference).

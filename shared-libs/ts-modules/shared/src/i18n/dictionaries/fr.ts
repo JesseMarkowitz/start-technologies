@@ -813,6 +813,7 @@ export default {
   900: 'Client onduleur réseau',
   901: 'Hôte du serveur NUT',
   902: 'Port du serveur NUT',
+  904: 'Cible configurée',
   905: 'Aucune donnée d’onduleur disponible',
   906: 'État de l’onduleur indisponible',
   907: 'StartOS n’a pas pu lire l’état de l’onduleur avec la configuration NUT actuelle.',

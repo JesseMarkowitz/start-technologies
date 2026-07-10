@@ -5690,6 +5690,13 @@ about.network-commands:
   fr_FR: "Commandes réseau"
   pl_PL: "Polecenia sieciowe"
 
+about.nut-status:
+  en_US: "Show UPS status from NUT"
+  de_DE: "USV-Status von NUT anzeigen"
+  es_ES: "Mostrar estado del SAI desde NUT"
+  fr_FR: "Afficher l'état de l'onduleur via NUT"
+  pl_PL: "Pokaż stan UPS z NUT"
+
 about.package-s9pk-input-files-into-valid-s9pk:
   en_US: "Package input files into a valid s9pk"
   de_DE: "Eingabedateien in ein gültiges s9pk verpacken"

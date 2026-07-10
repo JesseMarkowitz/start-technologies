@@ -21,6 +21,7 @@ import {
   Manifest,
   HostnameInfo,
   Progress,
+  NutStatus,
 } from './osBindings'
 import {
   PackageId,
@@ -249,4 +250,6 @@ export type Effects = {
   // system
   /** Returns globally configured SMTP settings, if they exist */
   getSystemSmtp(options: { callback?: () => void }): Promise<SmtpValue | null>
+  /** Returns the live UPS status (upsc variables) for the host's configured NUT UPS */
+  getUpsStatus(): Promise<NutStatus>
 }

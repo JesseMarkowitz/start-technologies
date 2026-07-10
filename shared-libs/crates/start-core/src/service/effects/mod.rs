@@ -248,4 +248,8 @@ pub fn handler<C: Context>() -> ParentHandler<C> {
             "get-system-smtp",
             from_fn_async(system::get_system_smtp).no_cli(),
         )
+        .subcommand(
+            "get-ups-status",
+            from_fn_async(system::get_ups_status).no_cli(),
+        )
 }

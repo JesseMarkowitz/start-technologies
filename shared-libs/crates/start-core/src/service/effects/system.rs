@@ -1,3 +1,4 @@
+use crate::nut::{NutStatus, nut_status};
 use crate::service::effects::callbacks::CallbackHandler;
 use crate::service::effects::prelude::*;
 use crate::service::rpc::CallbackId;
@@ -34,4 +35,33 @@ pub async fn get_system_smtp(
     }
 
     Ok(res)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, Parser)]
+#[group(skip)]
+#[ts(export)]
+pub struct GetUpsStatusParams {}
+
+/// Returns the live UPS status (the `upsc` variable set) for the host's
+/// configured NUT UPS. Unlike `get_system_smtp`, this is live telemetry read on
+/// demand (no DB-backed reactive callback) — callers poll on their own cadence.
+pub async fn get_ups_status(
+    context: EffectContext,
+    _: GetUpsStatusParams,
+) -> Result<NutStatus, Error> {
+    let context = context.deref()?;
+
+    let config = context
+        .seed
+        .ctx
+        .db
+        .peek()
+        .await
+        .as_public()
+        .as_server_info()
+        .as_nut()
+        .de()
+        .unwrap_or_default();
+
+    nut_status(config).await
 }

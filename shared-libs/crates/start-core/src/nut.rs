@@ -266,7 +266,7 @@ async fn apply_nut(settings: NutSettings) -> Result<(), Error> {
     }
 }
 
-async fn nut_status(config: NutConfig) -> Result<NutStatus, Error> {
+pub(crate) async fn nut_status(config: NutConfig) -> Result<NutStatus, Error> {
     let target = upsc_target(&config)
         .ok_or_else(|| Error::new(eyre!("{}", t!("nut.disabled")), ErrorKind::InvalidRequest))?;
 

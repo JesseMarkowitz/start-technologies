@@ -52,7 +52,16 @@ impl<'de> Deserialize<'de> for HostId {
     where
         D: Deserializer<'de>,
     {
-        Ok(HostId(Deserialize::deserialize(deserializer)?))
+        // `HostId::default()` is the empty id, used deliberately for the server's
+        // own host (net_controller). `Id`'s deserialize rejects empty via ID_REGEX,
+        // so accept the empty string here as the default rather than erroring —
+        // otherwise any db containing the server host's default hostId fails to load.
+        let s: InternedString = Deserialize::deserialize(deserializer)?;
+        if s.is_empty() {
+            Ok(HostId(Id::default()))
+        } else {
+            Ok(HostId(Id::try_from(s).map_err(serde::de::Error::custom)?))
+        }
     }
 }
 impl AsRef<Path> for HostId {
