@@ -1901,6 +1901,104 @@ struct DiagnosticsCreateRes {
 
 ---
 
+## 17. Satellite Router
+
+Router **role** and the Core's **paired-satellite registry**. See
+`docs/design/satellite-router.md`. Foundation slice: `pair` records a satellite in the Core
+registry only — the WireGuard tunnel provisioning, enrollment-token validation, and Core→satellite
+config sync are follow-up work (`docs/design/satellite-router-next-steps.md`).
+
+### `satellite.get-role`
+
+```rust
+// Request: {}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoleMarker {
+    role: RouterRole,              // "core" | "satellite"
+    coreEndpoint: Option<String>, // satellite only: the Core's underlay endpoint
+}
+// Response: RoleMarker  (a router with no marker reads as "core")
+```
+
+### `satellite.set-role`
+
+```rust
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetRoleRequest {
+    role: String,                 // "core" | "satellite"
+    coreEndpoint: Option<String>,
+}
+// Response: null
+// Backend: writes /etc/startwrt/role.json (0600). Production flow sets this at
+//          flash time; role is immutable post-provision (reflash to change).
+```
+
+### `satellite.list`
+
+```rust
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairedSatellite {
+    name: String,               // admin label (unique)
+    publicKey: String,          // satellite WireGuard public key (base64), pinned at pairing
+    mgmtAddress: String,        // management address on the inter-router link
+    generationApplied: u64,     // config generation last acked (0 = never)
+    lastSeen: i64,              // unix seconds of last contact (0 = never)
+}
+// Response: Vec<PairedSatellite>
+// Core-only (Authorization error on a satellite).
+```
+
+### `satellite.pair`
+
+```rust
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairRequest {
+    name: String,
+    publicKey: String,
+    mgmtAddress: String,
+    enrollmentToken: Option<String>, // validation is follow-up work
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PairResponse {
+    name: String,
+    status: String,  // "registered"
+    note: String,    // states tunnel/sync are not yet provisioned
+}
+// Response: PairResponse. Core-only. Records the satellite in the registry;
+//           does NOT yet bring up tunnels or push config.
+```
+
+### `satellite.unpair`
+
+```rust
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnpairRequest { name: String }
+// Response: null. Core-only (NotFound if the name is not paired).
+```
+
+### `satellite.status`
+
+```rust
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SatelliteStatus {
+    role: RouterRole,
+    coreEndpoint: Option<String>,
+    satelliteCount: usize,
+    satellites: Vec<PairedSatellite>,
+}
+// Response: SatelliteStatus
+```
+
+---
+
 ## HTTP Routes
 
 Every RPC method above is a JSON-RPC 2.0 call to a single endpoint: **`POST /rpc/v1`**.

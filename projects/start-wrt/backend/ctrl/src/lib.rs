@@ -31,6 +31,7 @@ pub mod profiles;
 pub mod progress;
 pub mod published_ports;
 pub mod registry;
+pub mod satellite;
 pub mod setup;
 pub mod sign;
 pub mod ssh_keys;
@@ -461,6 +462,7 @@ pub fn main_api<C: CtrlContext + Clone>() -> ParentHandler<C> {
         .subcommand("lan", lan::lan::<C>())
         .subcommand("published-ports", published_ports::published_ports::<C>())
         .subcommand("ssh-keys", ssh_keys::ssh_keys::<C>())
+        .subcommand("satellite", satellite::satellite::<C>())
         .subcommand("activity", activity::activity::<C>())
         .subcommand("backup", backup::backup::<C>())
         .subcommand("diagnostics", diagnostics::diagnostics::<C>())
