@@ -19,9 +19,17 @@ Covers the foundation slice landed so far (`backend/ctrl/src/satellite.rs`):
 - ✅ `rejects_duplicate_name_and_key` — no duplicate label or public key in the registry.
 - ✅ `role_marker_round_trips` — role marker JSON serde round-trip.
 
-**To add as each phase lands:** `vpn_site` AllowedIPs/route generation (prefix, not `/32`); the
-routed-attachment source-rule + table-route emission in `profiles.rs`; the semantic-payload
-serializer/regenerator; the enrollment-token validation; generation-number monotonicity.
+Site-to-site config generation (`backend/ctrl/src/vpn_site.rs`):
+
+- ✅ `interface_name_is_prefixed` — Core tunnel interface naming.
+- ✅ `provisions_interface_peer_zone_and_rule` — parse→provision→assert: the `wg` interface (transit
+  `/32`), a subnet-advertising peer, profile-zone membership, and a transit-zone accept rule all
+  appear; metadata recorded.
+- ✅ `reprovision_is_idempotent` — re-provisioning does not duplicate the peer.
+
+**To add as each phase lands:** the routed-attachment source-rule + table-route emission in
+`profiles.rs`; the semantic-payload serializer/regenerator; the enrollment-token validation;
+generation-number monotonicity.
 
 ## Layer 2 — CLI / config-generation functional tests
 

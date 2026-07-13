@@ -16,6 +16,13 @@ networking, and a new Angular UI; it is deliberately staged.
   - RPC `satellite.{get-role,set-role,list,pair,unpair,status}`, registered in `lib.rs::main_api`.
   - Core-only capability gating (`ensure_core`) — a first slice of D7.
   - Unit tests (5) for the pure logic.
+- **Site-to-site config generation** — `backend/ctrl/src/vpn_site.rs` (Core side): a `wg`
+  interface (transit `/32`), a **subnet-advertising** peer (the satellite's whole `/24` in
+  `allowed_ips` + `route_allowed_ips=1`), profile firewall-zone membership, and a transit-zone
+  accept rule; the `UciVpnSite` metadata section; `provision_core_site_tunnel` (pure config-writer,
+  not yet called into effect); 3 tests incl. a parse→provision→assert integration test. In
+  `vpn_server.rs`: `ensure_firewall_zone` exposed and a source-zone-parameterized firewall-rule
+  helper added (existing `wan` callers unchanged).
 - **API contract** — `API_CONTRACT.md` section for `satellite.*`.
 
 > **Honest scope note.** `pair` currently records a satellite in the Core registry only; it does
@@ -33,13 +40,16 @@ networking, and a new Angular UI; it is deliberately staged.
 
 ## Phase 2 — Site-to-site transport (`vpn_site.rs`, new)  ★ top risk
 
-- ☐ New module + `vpn_site` UCI section type (`backend/uciedit/src/openwrt.rs`): a **subnet-advertising**
-  peer (prefix `AllowedIPs`, not `/32`), transit-underlay addressing **decoupled** from the profile
-  `/24`s, per-profile tunnel bring-up. Reuse `wg.rs`, `WgInterface`, and (refactored) helpers from
-  `vpn_server.rs`; **do not** reuse `allocate_peer_ip`/proxy-ARP/`/32` paths.
-- ☐ **Listen-port allocator** — pairing-time allocation of N free UDP ports on the Core (one per
-  per-profile tunnel); parameterize `vpn_server::ensure_wireguard_firewall_rule` off the hardcoded
-  `src:"wan"` to the transit-link zone.
+- ✅ **Core-side config generation** (`vpn_site.rs`): subnet-advertising peer (prefix `allowed_ips`,
+  not `/32`), transit-underlay addressing decoupled from the profile `/24`s, per-profile tunnel
+  interface + peer + zone membership + accept rule; `UciVpnSite` metadata. Reuses `WgInterface` and
+  the refactored `vpn_server` helpers; does **not** touch the `allocate_peer_ip`/proxy-ARP/`/32`
+  host paths.
+- ✅ Source-zone-parameterized WG accept rule (`vpn_server::ensure_wireguard_firewall_rule_in_zone`).
+- ☐ **Wire it into effect** — nothing calls `provision_core_site_tunnel` yet; the pairing flow (D4)
+  will, once transit addressing/keys are allocated.
+- ☐ **Listen-port + transit-subnet allocator** — pairing-time allocation of N free UDP ports and a
+  transit `/30`/`/31` per satellite link on the Core.
 - ☐ **Satellite side** — reuse `vpn_client.rs` interface/peer construction to dial the Core; add
   **WAN-less egress** (D3): pin the Core-endpoint `/32` via the local transit link (not WAN),
   re-point DNS, neutralize the kill-switch `unreachable` fallback. **Validate on hardware early.**

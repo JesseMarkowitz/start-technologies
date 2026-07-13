@@ -1904,7 +1904,7 @@ fn set_vpn_server_metadata(
     Ok(())
 }
 
-fn ensure_firewall_zone(
+pub(crate) fn ensure_firewall_zone(
     cfgs: &mut Configs,
     wg_interface_name: &str,
     profile_interface: &str,
@@ -1976,6 +1976,19 @@ fn ensure_wireguard_firewall_rule(
     wg_interface_name: &str,
     listen_port: u16,
 ) -> Result<(), Error> {
+    ensure_wireguard_firewall_rule_in_zone(cfgs, wg_interface_name, listen_port, "wan")
+}
+
+/// Like `ensure_wireguard_firewall_rule` but parameterized on the source firewall
+/// zone the handshake arrives on. Inbound VPN servers listen on "wan"; a
+/// locally-attached satellite (satellite-router design) dials the Core across the
+/// transit link, so its handshake arrives on that link's zone instead.
+pub(crate) fn ensure_wireguard_firewall_rule_in_zone(
+    cfgs: &mut Configs,
+    wg_interface_name: &str,
+    listen_port: u16,
+    src_zone: &str,
+) -> Result<(), Error> {
     use uciedit::openwrt::{FirewallRule, FirewallTarget};
 
     let rule_name = wireguard_rule_name(wg_interface_name);
@@ -1988,8 +2001,9 @@ fn ensure_wireguard_firewall_rule(
         };
 
         if rule.name == rule_name {
-            // Update existing rule with new port if changed
+            // Update existing rule with new port / source zone if changed
             rule.dest_port = Some(port_str.clone());
+            rule.src = src_zone.to_string();
             section.set(&rule)?;
             return Ok(());
         }
@@ -1998,7 +2012,7 @@ fn ensure_wireguard_firewall_rule(
     // Create new rule
     let rule = FirewallRule {
         name: rule_name.clone(),
-        src: "wan".to_string(),
+        src: src_zone.to_string(),
         src_ip: None,
         src_mac: None,
         src_port: None,

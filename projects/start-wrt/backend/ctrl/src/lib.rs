@@ -43,6 +43,7 @@ pub mod utils;
 pub mod verify;
 pub mod vpn_client;
 pub mod vpn_server;
+pub mod vpn_site;
 pub mod wan;
 pub mod wg;
 pub mod wifi;
