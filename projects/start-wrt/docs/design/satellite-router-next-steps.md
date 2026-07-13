@@ -23,6 +23,10 @@ networking, and a new Angular UI; it is deliberately staged.
   not yet called into effect); 3 tests incl. a parse→provision→assert integration test. In
   `vpn_server.rs`: `ensure_firewall_zone` exposed and a source-zone-parameterized firewall-rule
   helper added (existing `wan` callers unchanged).
+- **Config-sync contract + pairing primitives** — in `satellite.rs`: the semantic snapshot types
+  (`SyncSnapshot`/`ProfileSpec`/`PasswordSpec`/`PortSpec`, camelCase, with a monotonic
+  `generation`), a pure free-UDP-port allocator (`allocate_listen_ports`), and the reserved
+  inter-router transit block + `transit_addrs(index)`. 4 tests.
 - **API contract** — `API_CONTRACT.md` section for `satellite.*`.
 
 > **Honest scope note.** `pair` currently records a satellite in the Core registry only; it does

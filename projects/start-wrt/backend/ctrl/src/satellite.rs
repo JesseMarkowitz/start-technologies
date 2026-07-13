@@ -23,6 +23,7 @@
 //!   a satellite in the registry only; it does **not** yet bring up tunnels or
 //!   push config, and says so in its response rather than implying otherwise.
 
+use std::net::Ipv4Addr;
 use std::path::Path;
 
 use clap::Parser;
@@ -77,6 +78,88 @@ pub struct PairedSatellite {
     /// Unix seconds of last successful contact (0 = never).
     #[serde(default)]
     pub last_seen: i64,
+}
+
+// ── Config-sync payload (Core → satellite, design D5) ───────────────────────
+//
+// The Core pushes this *semantic* snapshot (not raw UCI, not a full backup); the
+// satellite regenerates its own subnet/DHCP/zone/routing locally from it. This
+// sidesteps clobbering satellite-local identity and is the minimal cross-router
+// set the design identified. The transport (push over the management tunnel) and
+// the Core-side builder from `profiles`/`wifi`/`ethernet` are follow-up work; the
+// types + allocators below are the contract and the pairing primitives.
+
+/// A complete, Core-authored config snapshot. `generation` is monotonic — a
+/// satellite rejects a snapshot older than the one it has applied (anti-rollback).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncSnapshot {
+    pub generation: u64,
+    pub ssid: String,
+    pub admin_key: String,
+    pub profiles: Vec<ProfileSpec>,
+    pub passwords: Vec<PasswordSpec>,
+    pub ports: Vec<PortSpec>,
+}
+
+/// One profile as the satellite needs to reconstruct it locally.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSpec {
+    pub interface: String,
+    pub vlan_tag: u16,
+    /// The satellite-local `/24` (CIDR) the Core allocated for this profile here.
+    pub subnet: String,
+    pub wan_access: String,
+    pub outbound: String,
+}
+
+/// One Wi-Fi password → profile mapping (per-PSK dynamic VLAN, no RADIUS).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordSpec {
+    pub label: String,
+    pub key: String,
+    pub vlan_tag: u16,
+}
+
+/// One Ethernet port → profile mapping on the satellite.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortSpec {
+    pub port: String,
+    pub vlan_tag: u16,
+}
+
+/// Reserved inter-router transit block. Each satellite link gets its own `/24`
+/// slice here (`10.42.<index>.0/24`), deliberately disjoint from any profile
+/// `/24` so the underlay never collides with a profile subnet.
+pub const TRANSIT_BASE: [u8; 2] = [10, 42];
+
+/// The (Core, satellite) transit addresses for satellite `index`
+/// (`10.42.<index>.1` / `.2`). Supports up to 254 satellites.
+pub fn transit_addrs(index: u8) -> (Ipv4Addr, Ipv4Addr) {
+    (
+        Ipv4Addr::new(TRANSIT_BASE[0], TRANSIT_BASE[1], index, 1),
+        Ipv4Addr::new(TRANSIT_BASE[0], TRANSIT_BASE[1], index, 2),
+    )
+}
+
+/// Allocate `count` free UDP listen ports for a satellite's per-profile tunnels,
+/// starting at `base` and skipping any already in `used`. Pure.
+pub fn allocate_listen_ports(used: &[u16], count: usize, base: u16) -> Vec<u16> {
+    let mut out = Vec::with_capacity(count);
+    let mut p = base;
+    while out.len() < count {
+        if !used.contains(&p) && !out.contains(&p) {
+            out.push(p);
+        }
+        match p.checked_add(1) {
+            Some(next) => p = next,
+            None => break, // exhausted the port space
+        }
+    }
+    out
 }
 
 // ── RPC surface ─────────────────────────────────────────────────────────────
@@ -432,5 +515,58 @@ mod tests {
         let back: RoleMarker = serde_json::from_str(&json).unwrap();
         assert_eq!(back.role, RouterRole::Satellite);
         assert_eq!(back.core_endpoint.as_deref(), Some("10.0.0.1:51820"));
+    }
+
+    #[test]
+    fn allocate_ports_skips_used() {
+        assert_eq!(
+            allocate_listen_ports(&[51900, 51901], 3, 51900),
+            vec![51902, 51903, 51904]
+        );
+    }
+
+    #[test]
+    fn allocate_ports_count_zero() {
+        assert!(allocate_listen_ports(&[], 0, 51900).is_empty());
+    }
+
+    #[test]
+    fn transit_addrs_are_disjoint_per_index() {
+        let (c0, s0) = transit_addrs(0);
+        let (c1, _s1) = transit_addrs(1);
+        assert_eq!(c0.to_string(), "10.42.0.1");
+        assert_eq!(s0.to_string(), "10.42.0.2");
+        assert_eq!(c1.to_string(), "10.42.1.1");
+        assert_ne!(c0, c1);
+    }
+
+    #[test]
+    fn sync_snapshot_round_trips() {
+        let snap = SyncSnapshot {
+            generation: 7,
+            ssid: "Home".into(),
+            admin_key: "adminpw".into(),
+            profiles: vec![ProfileSpec {
+                interface: "guest".into(),
+                vlan_tag: 101,
+                subnet: "192.168.130.0/24".into(),
+                wan_access: "all".into(),
+                outbound: "wan".into(),
+            }],
+            passwords: vec![PasswordSpec {
+                label: "Guest".into(),
+                key: "guestpw".into(),
+                vlan_tag: 101,
+            }],
+            ports: vec![PortSpec {
+                port: "lan2".into(),
+                vlan_tag: 101,
+            }],
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: SyncSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, back);
+        assert!(json.contains("\"adminKey\""));
+        assert!(json.contains("\"vlanTag\""));
     }
 }
