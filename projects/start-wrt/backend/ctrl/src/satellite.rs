@@ -215,6 +215,12 @@ pub fn satellite<C: CtrlContext>() -> ParentHandler<C> {
                 .no_display()
                 .with_call_remote::<CliContext>(),
         )
+        .subcommand(
+            "provision-satellite-profile",
+            from_fn_async_local(provision_satellite_profile)
+                .no_display()
+                .with_call_remote::<CliContext>(),
+        )
 }
 
 #[instrument(skip_all)]
@@ -557,6 +563,72 @@ pub async fn provision_satellite_tunnel(
         "provision-satellite-tunnel",
         true,
         &format!("Provisioned satellite tunnel to Core for profile '{}'", p.profile),
+        None,
+    );
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize, Parser)]
+#[serde(rename_all = "camelCase")]
+#[command(rename_all = "kebab-case")]
+pub struct ProvisionSatelliteProfileParams {
+    /// The network interface name to create on the satellite (e.g. "psat_guest").
+    profile: String,
+    #[clap(long)]
+    vlan_tag: u16,
+    /// The satellite's gateway address for the profile /24 (its .1).
+    #[clap(long)]
+    gateway: String,
+    /// A satellite LAN port to place on the profile VLAN (untagged).
+    #[clap(long)]
+    port: String,
+    #[clap(long, default_value = "lan")]
+    firewall_zone_member: String,
+}
+
+#[instrument(skip_all)]
+pub async fn provision_satellite_profile(
+    _ctx: ServerContext,
+    p: ProvisionSatelliteProfileParams,
+) -> Result<(), Error> {
+    ensure_satellite()?;
+    let gateway: Ipv4Addr = p.gateway.parse().map_err(|_| {
+        Error::new(
+            eyre!("invalid gateway '{}'", p.gateway),
+            ErrorKind::InvalidRequest,
+        )
+    })?;
+
+    let mut retries = 4;
+    loop {
+        let arena = Arena::new();
+        let mut cfgs =
+            parse_all("/etc/config", &arena, &["network", "startwrt", "firewall", "dhcp"]).await?;
+        let params = crate::vpn_site::SatelliteLocalProfileParams {
+            profile_interface: &p.profile,
+            vlan_tag: p.vlan_tag,
+            gateway,
+            port: &p.port,
+            firewall_zone_member: &p.firewall_zone_member,
+        };
+        crate::vpn_site::provision_satellite_local_profile(&mut cfgs, &params)?;
+        match dump_all("/etc/config", cfgs).await {
+            Err(uciedit::Error::Conflict { .. }) if retries > 0 => {
+                retries -= 1;
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+            Ok(()) => {
+                crate::profiles::reload_system().await?;
+                break;
+            }
+        }
+    }
+    crate::activity::log(
+        "satellite",
+        "provision-satellite-profile",
+        true,
+        &format!("Provisioned local profile '{}' (vlan {})", p.profile, p.vlan_tag),
         None,
     );
     Ok(())

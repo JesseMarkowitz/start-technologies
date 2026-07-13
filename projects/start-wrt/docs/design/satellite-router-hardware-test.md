@@ -108,8 +108,32 @@ Extra checks:
 - Tighten the `guest` profile's WAN access on C1 and confirm S1's egress is filtered the same way
   (proves policy is enforced at the Core, not bypassed).
 
+## Step 5 — a real client behind the satellite (next rung)
+
+The self-ping proves the tunnel + egress. To prove a **downstream device** lands on the profile,
+have S1 serve the profile `/24` on one of its ports.
+
+1. **Core:** provision with the whole `/24` routed to the satellite (not just the `/32`):
+   re-run Step 2 with `--satellite-allowed-ip 192.168.130.0/24`.
+2. **Satellite:** serve the profile `/24` locally on a port (say `lan2`):
+
+   ```
+   startwrt satellite provision-satellite-profile psat_guest \
+     --vlan-tag 130 --gateway 192.168.130.1 --port lan2 --firewall-zone-member lan
+   ```
+
+   This creates interface `psat_guest` (`br-lan.130`, `192.168.130.1/24`), a DHCP pool, puts `lan2`
+   on VLAN 130, and joins the `lan` zone.
+3. **Verify:** plug a laptop into S1 `lan2`. It should get a `192.168.130.x` lease, reach the
+   Internet (through the tunnel → Core → Core WAN), and be subject to the `guest` profile's policy.
+
+> **Addressing caveat (validate on hardware):** the tunnel's own wg address must not overlap the
+> served `/24` — for Step 5 give the tunnel a dedicated `/32` (e.g. re-run Step 3 with
+> `--sat-wg-addr` outside `192.168.130.0/24`) so `192.168.130.x` routes to the local bridge, not the
+> tunnel interface. This is exactly the kind of detail the hardware test exists to shake out.
+
 ## What this does NOT yet cover (see `satellite-router-next-steps.md`)
 
-Downstream client behind S1 (S1 serving the profile `/24` to its own LAN/Wi-Fi via config sync),
-MSS/MTU clamp, pairing/auth, per-VLAN VPN-routed profiles, roaming, and the UI. Those are the later
-phases; this runbook validates the foundation the rest builds on.
+Wi-Fi entry on the satellite (per-PSK), MSS/MTU clamp, automatic pairing/auth, config sync (so
+profiles/passwords propagate without manual commands), per-VLAN VPN-routed profiles, roaming, and
+the UI. Those are the later phases; this runbook validates the foundation the rest builds on.

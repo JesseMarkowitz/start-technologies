@@ -24,6 +24,10 @@
 
 use std::net::Ipv4Addr;
 
+use uciedit::openwrt::{
+    Dhcp, InterfaceProto, NetworkBridgeVlan, NetworkInterface, NetworkVlanPort,
+    NetworkVlanPortTagging,
+};
 use uciedit::{Arena, Configs, Line, LineComment, Section, Token, TypedSection};
 
 use crate::prelude::*;
@@ -382,6 +386,130 @@ fn add_sat_peer<'a>(
     Ok(())
 }
 
+// ── Satellite local profile network (so a downstream client lands on the profile) ──
+
+/// Inputs for a satellite's LOCAL serving of one profile: a VLAN interface with
+/// the profile's satellite-local `/24`, a DHCP pool, a LAN port assigned to the
+/// VLAN, and firewall-zone membership. A client on that port then routes out the
+/// tunnel to the Core (which applies the profile's policy). This is a manual
+/// stand-in for what the config-sync flow (D5) will do automatically.
+pub struct SatelliteLocalProfileParams<'p> {
+    /// The network interface name to create on the satellite (e.g. "psat_guest").
+    pub profile_interface: &'p str,
+    pub vlan_tag: u16,
+    /// The satellite's gateway address for this profile `/24` (its `.1`).
+    pub gateway: Ipv4Addr,
+    /// A satellite LAN port to place on this profile's VLAN (untagged).
+    pub port: &'p str,
+    /// A local interface whose firewall zone this profile joins (same as the
+    /// tunnel's, so intra-zone forwarding + the default route via the tunnel egress).
+    pub firewall_zone_member: &'p str,
+}
+
+/// Write the satellite-local serving config for one profile. Idempotent.
+pub fn provision_satellite_local_profile(
+    cfgs: &mut Configs,
+    params: &SatelliteLocalProfileParams,
+) -> Result<(), Error> {
+    set_local_profile_interface(cfgs, params)?;
+    set_local_profile_bridge_vlan(cfgs, params)?;
+    set_local_profile_dhcp(cfgs, params)?;
+    ensure_firewall_zone(cfgs, params.profile_interface, params.firewall_zone_member)?;
+    Ok(())
+}
+
+fn set_local_profile_interface(
+    cfgs: &mut Configs,
+    params: &SatelliteLocalProfileParams,
+) -> Result<(), Error> {
+    let device = format!("br-lan.{}", params.vlan_tag);
+    let netmask = Ipv4Addr::new(255, 255, 255, 0);
+    for section in &mut cfgs["network"].sections {
+        if section.name().as_deref() != Some(params.profile_interface) {
+            continue;
+        }
+        if let Ok(mut ni) = section.get::<NetworkInterface>() {
+            ni.device = device.clone();
+            ni.proto = InterfaceProto::STATIC;
+            ni.ipaddr = Some(params.gateway);
+            ni.netmask = Some(netmask);
+            section.set(&ni)?;
+            return Ok(());
+        }
+    }
+    let ni = NetworkInterface {
+        device,
+        proto: InterfaceProto::STATIC,
+        ipaddr: Some(params.gateway),
+        netmask: Some(netmask),
+        ..Default::default()
+    };
+    cfgs["network"].append(&ni, Some(params.profile_interface))?;
+    Ok(())
+}
+
+fn set_local_profile_bridge_vlan(
+    cfgs: &mut Configs,
+    params: &SatelliteLocalProfileParams,
+) -> Result<(), Error> {
+    for section in &mut cfgs["network"].sections {
+        if let Ok(mut bv) = section.get::<NetworkBridgeVlan>() {
+            if bv.device == "br-lan" && bv.vlan == params.vlan_tag {
+                if !bv.ports.iter().any(|p| p.port == params.port) {
+                    bv.ports.push(NetworkVlanPort {
+                        port: params.port.to_string(),
+                        tagging: Some(NetworkVlanPortTagging::PRIMARY),
+                    });
+                    section.set(&bv)?;
+                }
+                return Ok(());
+            }
+        }
+    }
+    let bv = NetworkBridgeVlan {
+        device: "br-lan".to_string(),
+        vlan: params.vlan_tag,
+        ports: vec![NetworkVlanPort {
+            port: params.port.to_string(),
+            tagging: Some(NetworkVlanPortTagging::PRIMARY),
+        }],
+    };
+    let section_name = format!("bv_{}", params.vlan_tag);
+    cfgs["network"].append(&bv, Some(section_name.as_str()))?;
+    Ok(())
+}
+
+fn set_local_profile_dhcp(
+    cfgs: &mut Configs,
+    params: &SatelliteLocalProfileParams,
+) -> Result<(), Error> {
+    for section in &mut cfgs["dhcp"].sections {
+        if section.name().as_deref() != Some(params.profile_interface) {
+            continue;
+        }
+        if let Ok(mut d) = section.get::<Dhcp>() {
+            d.interface = params.profile_interface.to_string();
+            d.start = 2;
+            d.limit = 200;
+            d.leasetime = "12h".to_string();
+            section.set(&d)?;
+            return Ok(());
+        }
+    }
+    let d = Dhcp {
+        interface: params.profile_interface.to_string(),
+        start: 2,
+        limit: 200,
+        leasetime: "12h".to_string(),
+        ra: None,
+        dhcpv6: None,
+        ra_management: None,
+        ra_default: None,
+    };
+    cfgs["dhcp"].append(&d, Some(params.profile_interface))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +537,7 @@ mod tests {
              \toption input 'ACCEPT'\n\toption output 'ACCEPT'\n\toption forward 'ACCEPT'\n",
         )
         .unwrap();
+        std::fs::write(dir.join("dhcp"), "").unwrap();
     }
 
     fn params<'p>() -> SiteTunnelParams<'p> {
@@ -570,5 +699,61 @@ mod tests {
             .find(|z| z.name == "lan")
             .expect("lan zone should exist");
         assert!(zone.network.iter().any(|n| n == "sat_s1_guest"));
+    }
+
+    #[tokio::test]
+    async fn provisions_satellite_local_profile_network() {
+        let dir = tempfile::tempdir().unwrap();
+        write_base(dir.path());
+        let arena = Arena::new();
+        let mut cfgs = parse_all(dir.path(), &arena, &["network", "startwrt", "firewall", "dhcp"])
+            .await
+            .unwrap();
+
+        let params = SatelliteLocalProfileParams {
+            profile_interface: "psat_guest",
+            vlan_tag: 130,
+            gateway: "192.168.130.1".parse().unwrap(),
+            port: "lan2",
+            firewall_zone_member: "lan",
+        };
+        provision_satellite_local_profile(&mut cfgs, &params).unwrap();
+
+        let ni = cfgs["network"]
+            .sections
+            .iter()
+            .filter_map(|s| {
+                (s.name().as_deref() == Some("psat_guest"))
+                    .then(|| s.get::<NetworkInterface>().ok())
+                    .flatten()
+            })
+            .next()
+            .expect("profile interface should exist");
+        assert_eq!(ni.device, "br-lan.130");
+        assert_eq!(ni.ipaddr, Some("192.168.130.1".parse().unwrap()));
+
+        let bv = cfgs["network"]
+            .sections
+            .iter()
+            .filter_map(|s| s.get::<NetworkBridgeVlan>().ok())
+            .find(|b| b.vlan == 130)
+            .expect("bridge-vlan should exist");
+        assert!(bv.ports.iter().any(|p| p.port == "lan2"));
+
+        let dhcp = cfgs["dhcp"]
+            .sections
+            .iter()
+            .filter_map(|s| s.get::<Dhcp>().ok())
+            .find(|d| d.interface == "psat_guest")
+            .expect("dhcp pool should exist");
+        assert_eq!(dhcp.start, 2);
+
+        let zone = cfgs["firewall"]
+            .sections
+            .iter()
+            .filter_map(|s| s.get::<FirewallZone>().ok())
+            .find(|z| z.name == "lan")
+            .expect("lan zone should exist");
+        assert!(zone.network.iter().any(|n| n == "psat_guest"));
     }
 }

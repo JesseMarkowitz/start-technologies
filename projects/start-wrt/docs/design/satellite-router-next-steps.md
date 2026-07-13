@@ -28,6 +28,11 @@ networking, and a new Angular UI; it is deliberately staged.
   RPC commands `satellite.provision-core-tunnel` / `provision-satellite-tunnel` that apply the
   generators to `/etc/config` and bring the tunnel up (role-gated). This makes the **basic
   hardware bring-up test executable** — runbook in `satellite-router-hardware-test.md`.
+- **Satellite local profile serving** — `vpn_site.rs` `provision_satellite_local_profile`
+  (interface `br-lan.<vlan>` + `/24` + DHCP pool + a LAN port on the VLAN + zone membership) and the
+  `satellite.provision-satellite-profile` RPC. Lets a **downstream client** plugged into the
+  satellite land on the profile and egress via the Core (runbook Step 5). Wi-Fi (per-PSK) entry and
+  automatic sync of these from the Core are still follow-ups.
 - **Config-sync contract + pairing primitives** — in `satellite.rs`: the semantic snapshot types
   (`SyncSnapshot`/`ProfileSpec`/`PasswordSpec`/`PortSpec`, camelCase, with a monotonic
   `generation`), a pure free-UDP-port allocator (`allocate_listen_ports`), and the reserved
