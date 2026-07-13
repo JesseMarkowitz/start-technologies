@@ -1997,6 +1997,49 @@ struct SatelliteStatus {
 // Response: SatelliteStatus
 ```
 
+### `satellite.provision-core-tunnel` (manual / hardware bring-up)
+
+```rust
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProvisionCoreParams {
+    satellite: String,
+    profile: String,             // profile interface the tunnel carries
+    coreTransitAddr: String,     // the Core wg interface address
+    satelliteAllowedIp: String,  // CIDR routed to the satellite (its /24, or a /32 for self-ping)
+    satellitePublicKey: String,
+    presharedKey: String,
+    listenPort: u16,
+    transitZone: String,         // firewall zone the handshake arrives on
+    corePrivateKey: String,
+}
+// Response: null. Core-only. Writes the wg interface + subnet peer + profile-zone
+// membership + transit-zone accept rule to /etc/config and brings the tunnel up.
+// Manual bring-up path for the hardware runbook; pairing (D4) will call the same
+// generator with allocated keys/ports.
+```
+
+### `satellite.provision-satellite-tunnel` (manual / hardware bring-up)
+
+```rust
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProvisionSatelliteParams {
+    satellite: String,
+    profile: String,
+    satWgAddr: String,           // the satellite wg interface address
+    corePublicKey: String,
+    coreEndpointHost: String,    // the Core underlay address to dial
+    coreEndpointPort: u16,
+    presharedKey: String,
+    satPrivateKey: String,
+    allowedIp: Vec<String>,      // routed via the tunnel; default ["0.0.0.0/0"] (egress via Core)
+    firewallZoneMember: String,  // local iface whose zone the tunnel joins (default "lan")
+}
+// Response: null. Satellite-only. Writes the dialing wg interface + peer + zone
+// membership and brings the tunnel up (WAN-less egress via the Core).
+```
+
 ---
 
 ## HTTP Routes

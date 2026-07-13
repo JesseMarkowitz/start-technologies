@@ -232,6 +232,156 @@ fn add_site_peer<'a>(
     Ok(())
 }
 
+// ── Satellite side (dials the Core) ─────────────────────────────────────────
+
+/// Inputs for the satellite end of a per-profile tunnel. The satellite dials the
+/// Core over the local transit link, then routes `allowed_ips` (e.g. `0.0.0.0/0`
+/// for full egress-via-Core, since a satellite has no WAN) through the tunnel.
+pub struct SatelliteTunnelParams<'p> {
+    pub satellite: &'p str,
+    pub profile_interface: &'p str,
+    /// The satellite end's WireGuard address (a host in the profile `/24`).
+    pub sat_wg_addr: Ipv4Addr,
+    /// The Core's WireGuard public key.
+    pub core_public_key: &'p str,
+    /// The Core's underlay endpoint host to dial (its transit address).
+    pub core_endpoint_host: &'p str,
+    /// The Core's listen port for this tunnel.
+    pub core_endpoint_port: u16,
+    pub preshared_key: &'p str,
+    pub sat_private_key: &'p str,
+    /// CIDRs to route through the tunnel. Full egress via the Core: `["0.0.0.0/0"]`.
+    pub allowed_ips: &'p [String],
+    /// A local interface whose firewall zone the tunnel joins (e.g. "lan"), so
+    /// replies to the satellite and forwarding from its LAN are permitted.
+    pub firewall_zone_member: &'p str,
+}
+
+/// Write the satellite-side config for one per-profile tunnel. Idempotent.
+pub fn provision_satellite_site_tunnel<'a>(
+    cfgs: &mut Configs<'a>,
+    arena: &'a Arena,
+    params: &SatelliteTunnelParams,
+) -> Result<(), Error> {
+    let iface = site_interface_name(params.satellite, params.profile_interface);
+    set_sat_interface(cfgs, &iface, params)?;
+    add_sat_peer(cfgs, &iface, params, arena)?;
+    ensure_firewall_zone(cfgs, &iface, params.firewall_zone_member)?;
+    Ok(())
+}
+
+fn set_sat_interface(
+    cfgs: &mut Configs,
+    interface_name: &str,
+    params: &SatelliteTunnelParams,
+) -> Result<(), Error> {
+    let addresses = vec![format!("{}/32", params.sat_wg_addr)];
+    for section in &mut cfgs["network"].sections {
+        if section.name().as_deref() != Some(interface_name) {
+            continue;
+        }
+        let Ok(mut wg) = section.get::<WgInterface>() else {
+            continue;
+        };
+        if !wg.is_wireguard() {
+            continue;
+        }
+        wg.private_key = params.sat_private_key.to_string();
+        wg.listen_port = None; // the satellite dials out; it does not listen
+        wg.addresses = addresses.clone();
+        section.set(&wg)?;
+        return Ok(());
+    }
+    let new_iface = WgInterface {
+        proto: "wireguard".to_string(),
+        private_key: params.sat_private_key.to_string(),
+        listen_port: None,
+        addresses,
+        disabled: None,
+        mtu: None,
+    };
+    cfgs["network"].append(&new_iface, Some(interface_name))?;
+    Ok(())
+}
+
+fn add_sat_peer<'a>(
+    cfgs: &mut Configs<'a>,
+    interface_name: &str,
+    params: &SatelliteTunnelParams,
+    arena: &'a Arena,
+) -> Result<(), Error> {
+    let peer_type = format!("wireguard_{interface_name}");
+    let peer_type_str: &str = arena.alloc(peer_type);
+    cfgs["network"].sections.retain(|s| s.ty() != peer_type_str);
+
+    let peer_name_str: &str = arena.alloc(format!("{interface_name}_peer"));
+    let mut lines = vec![Line::Section {
+        ty: Token::from_str(peer_type_str, arena),
+        name: Some(Token::from_str(peer_name_str, arena)),
+        comment: LineComment::None,
+    }];
+
+    let pub_key_str: &str = arena.alloc(params.core_public_key.to_string());
+    lines.push(Line::Option {
+        option: Token::from_str("public_key", arena),
+        value: Token::from_str(pub_key_str, arena),
+        comment: LineComment::None,
+    });
+
+    let desc_str: &str = arena.alloc(format!("core ({})", params.profile_interface));
+    lines.push(Line::Option {
+        option: Token::from_str("description", arena),
+        value: Token::from_str(desc_str, arena),
+        comment: LineComment::None,
+    });
+
+    let psk_str: &str = arena.alloc(params.preshared_key.to_string());
+    lines.push(Line::Option {
+        option: Token::from_str("preshared_key", arena),
+        value: Token::from_str(psk_str, arena),
+        comment: LineComment::None,
+    });
+
+    // Endpoint to dial (OpenWrt wireguard peer options).
+    let host_str: &str = arena.alloc(params.core_endpoint_host.to_string());
+    lines.push(Line::Option {
+        option: Token::from_str("endpoint_host", arena),
+        value: Token::from_str(host_str, arena),
+        comment: LineComment::None,
+    });
+    let port_str: &str = arena.alloc(params.core_endpoint_port.to_string());
+    lines.push(Line::Option {
+        option: Token::from_str("endpoint_port", arena),
+        value: Token::from_str(port_str, arena),
+        comment: LineComment::None,
+    });
+
+    lines.push(Line::Option {
+        option: Token::from_str("persistent_keepalive", arena),
+        value: Token::from_str("25", arena),
+        comment: LineComment::None,
+    });
+
+    // Install routes for the tunneled prefixes (the satellite's uplink).
+    lines.push(Line::Option {
+        option: Token::from_str("route_allowed_ips", arena),
+        value: Token::from_str("1", arena),
+        comment: LineComment::None,
+    });
+
+    for cidr in params.allowed_ips {
+        let cidr_str: &str = arena.alloc(cidr.clone());
+        lines.push(Line::List {
+            list: Token::from_str("allowed_ips", arena),
+            item: Token::from_str(cidr_str, arena),
+            comment: LineComment::None,
+        });
+    }
+
+    cfgs["network"].sections.push(Section { arena, lines });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +404,8 @@ mod tests {
         std::fs::write(
             dir.join("firewall"),
             "config zone\n\toption name 'vlan_guest'\n\tlist network 'guest'\n\
+             \toption input 'ACCEPT'\n\toption output 'ACCEPT'\n\toption forward 'ACCEPT'\n\
+             \nconfig zone\n\toption name 'lan'\n\tlist network 'lan'\n\
              \toption input 'ACCEPT'\n\toption output 'ACCEPT'\n\toption forward 'ACCEPT'\n",
         )
         .unwrap();
@@ -363,5 +515,60 @@ mod tests {
             .filter(|s| s.ty() == "wireguard_sat_s1_guest")
             .count();
         assert_eq!(peers, 1, "re-provision must not duplicate the peer");
+    }
+
+    fn sat_params<'p>(allowed: &'p [String]) -> SatelliteTunnelParams<'p> {
+        SatelliteTunnelParams {
+            satellite: "s1",
+            profile_interface: "guest",
+            sat_wg_addr: "192.168.130.2".parse().unwrap(),
+            core_public_key: "COREPUB",
+            core_endpoint_host: "10.42.0.1",
+            core_endpoint_port: 51900,
+            preshared_key: "PSK",
+            sat_private_key: "SATPRIV",
+            allowed_ips: allowed,
+            firewall_zone_member: "lan",
+        }
+    }
+
+    #[tokio::test]
+    async fn provisions_satellite_side_tunnel() {
+        let dir = tempfile::tempdir().unwrap();
+        write_base(dir.path());
+        let arena = Arena::new();
+        let mut cfgs = parse_all(dir.path(), &arena, &["network", "startwrt", "firewall"])
+            .await
+            .unwrap();
+
+        let allowed = vec!["0.0.0.0/0".to_string()];
+        provision_satellite_site_tunnel(&mut cfgs, &arena, &sat_params(&allowed)).unwrap();
+
+        // Client interface: no listen_port (it dials), correct wg address.
+        let iface = cfgs["network"]
+            .sections
+            .iter()
+            .filter_map(|s| {
+                (s.name().as_deref() == Some("sat_s1_guest"))
+                    .then(|| s.get::<WgInterface>().ok())
+                    .flatten()
+            })
+            .next()
+            .expect("wg interface should exist");
+        assert_eq!(iface.listen_port, None);
+        assert!(iface.addresses.iter().any(|a| a == "192.168.130.2/32"));
+
+        // Peer exists and the tunnel joined the local lan zone.
+        assert!(cfgs["network"]
+            .sections
+            .iter()
+            .any(|s| s.ty() == "wireguard_sat_s1_guest"));
+        let zone = cfgs["firewall"]
+            .sections
+            .iter()
+            .filter_map(|s| s.get::<FirewallZone>().ok())
+            .find(|z| z.name == "lan")
+            .expect("lan zone should exist");
+        assert!(zone.network.iter().any(|n| n == "sat_s1_guest"));
     }
 }

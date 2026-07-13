@@ -23,6 +23,11 @@ networking, and a new Angular UI; it is deliberately staged.
   not yet called into effect); 3 tests incl. a parse→provision→assert integration test. In
   `vpn_server.rs`: `ensure_firewall_zone` exposed and a source-zone-parameterized firewall-rule
   helper added (existing `wan` callers unchanged).
+- **Executable manual provisioning + satellite-side tunnel** — `vpn_site.rs`
+  `provision_satellite_site_tunnel` (the satellite dials the Core, full egress-via-Core); and the
+  RPC commands `satellite.provision-core-tunnel` / `provision-satellite-tunnel` that apply the
+  generators to `/etc/config` and bring the tunnel up (role-gated). This makes the **basic
+  hardware bring-up test executable** — runbook in `satellite-router-hardware-test.md`.
 - **Config-sync contract + pairing primitives** — in `satellite.rs`: the semantic snapshot types
   (`SyncSnapshot`/`ProfileSpec`/`PasswordSpec`/`PortSpec`, camelCase, with a monotonic
   `generation`), a pure free-UDP-port allocator (`allocate_listen_ports`), and the reserved
@@ -50,10 +55,14 @@ networking, and a new Angular UI; it is deliberately staged.
   the refactored `vpn_server` helpers; does **not** touch the `allocate_peer_ip`/proxy-ARP/`/32`
   host paths.
 - ✅ Source-zone-parameterized WG accept rule (`vpn_server::ensure_wireguard_firewall_rule_in_zone`).
-- ☐ **Wire it into effect** — nothing calls `provision_core_site_tunnel` yet; the pairing flow (D4)
-  will, once transit addressing/keys are allocated.
-- ☐ **Listen-port + transit-subnet allocator** — pairing-time allocation of N free UDP ports and a
-  transit `/30`/`/31` per satellite link on the Core.
+- ✅ **Satellite-side generator** (`provision_satellite_site_tunnel`) + **executable manual
+  provisioning** (`satellite.provision-{core,satellite}-tunnel`, apply + `ifup` + reload). Enough to
+  run the **basic hardware bring-up test** (`satellite-router-hardware-test.md`).
+- ☐ **Automatic (paired) provisioning** — the pairing flow (D4) calls the same generators with
+  allocated keys/ports instead of hand-entered ones.
+- ☐ **Underlay automation** — the transit-port IP + `transit` firewall zone are operator-manual in
+  the runbook today; automate at pairing.
+- ☐ **MSS/MTU clamp** on the Core ingress; validate downstream-host (not just self-ping) egress.
 - ☐ **Satellite side** — reuse `vpn_client.rs` interface/peer construction to dial the Core; add
   **WAN-less egress** (D3): pin the Core-endpoint `/32` via the local transit link (not WAN),
   re-point DNS, neutralize the kill-switch `unreachable` fallback. **Validate on hardware early.**

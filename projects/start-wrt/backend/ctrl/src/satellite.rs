@@ -27,9 +27,10 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 
 use clap::Parser;
-use rpc_toolkit::{from_fn_async, HandlerExt, ParentHandler};
+use rpc_toolkit::{from_fn_async, from_fn_async_local, HandlerExt, ParentHandler};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
+use uciedit::{dump_all, parse_all, Arena};
 
 use crate::prelude::*;
 use crate::utils::HandlerExtSerde;
@@ -200,6 +201,18 @@ pub fn satellite<C: CtrlContext>() -> ParentHandler<C> {
             "status",
             from_fn_async(status)
                 .with_display_serializable()
+                .with_call_remote::<CliContext>(),
+        )
+        .subcommand(
+            "provision-core-tunnel",
+            from_fn_async_local(provision_core_tunnel)
+                .no_display()
+                .with_call_remote::<CliContext>(),
+        )
+        .subcommand(
+            "provision-satellite-tunnel",
+            from_fn_async_local(provision_satellite_tunnel)
+                .no_display()
                 .with_call_remote::<CliContext>(),
         )
 }
@@ -374,6 +387,181 @@ pub async fn status(_ctx: ServerContext) -> Result<StatusResponse, Error> {
     })
 }
 
+// ── Manual tunnel provisioning (for the basic hardware bring-up test) ────────
+//
+// These apply the `vpn_site` config generators to `/etc/config` and bring the
+// tunnel up. They are the executable path for the hardware runbook
+// (`docs/design/satellite-router-hardware-test.md`): an operator generates keys,
+// picks a transit subnet, and runs these on each router. The eventual pairing
+// flow (D4) will call the same generators with allocated keys/ports.
+
+#[derive(Deserialize, Serialize, Parser)]
+#[serde(rename_all = "camelCase")]
+#[command(rename_all = "kebab-case")]
+pub struct ProvisionCoreParams {
+    satellite: String,
+    profile: String,
+    #[clap(long)]
+    core_transit_addr: String,
+    /// CIDR to route to the satellite over the tunnel (e.g. the satellite's /24,
+    /// or its wg host /32 for a self-ping test).
+    #[clap(long)]
+    satellite_allowed_ip: String,
+    #[clap(long)]
+    satellite_public_key: String,
+    #[clap(long)]
+    preshared_key: String,
+    #[clap(long)]
+    listen_port: u16,
+    /// Firewall zone the handshake arrives on (the transit-link zone).
+    #[clap(long)]
+    transit_zone: String,
+    #[clap(long)]
+    core_private_key: String,
+}
+
+#[instrument(skip_all)]
+pub async fn provision_core_tunnel(
+    _ctx: ServerContext,
+    p: ProvisionCoreParams,
+) -> Result<(), Error> {
+    ensure_core()?;
+    let core_transit_addr: Ipv4Addr = p.core_transit_addr.parse().map_err(|_| {
+        Error::new(
+            eyre!("invalid core_transit_addr '{}'", p.core_transit_addr),
+            ErrorKind::InvalidRequest,
+        )
+    })?;
+    let iface = crate::vpn_site::site_interface_name(&p.satellite, &p.profile);
+
+    let mut retries = 4;
+    loop {
+        let arena = Arena::new();
+        let mut cfgs = parse_all("/etc/config", &arena, &["network", "startwrt", "firewall"]).await?;
+        let params = crate::vpn_site::SiteTunnelParams {
+            satellite: &p.satellite,
+            profile_interface: &p.profile,
+            core_transit_addr,
+            satellite_subnet: &p.satellite_allowed_ip,
+            satellite_public_key: &p.satellite_public_key,
+            preshared_key: &p.preshared_key,
+            listen_port: p.listen_port,
+            transit_zone: &p.transit_zone,
+            core_private_key: &p.core_private_key,
+        };
+        crate::vpn_site::provision_core_site_tunnel(&mut cfgs, &arena, &params)?;
+        match dump_all("/etc/config", cfgs).await {
+            Err(uciedit::Error::Conflict { .. }) if retries > 0 => {
+                retries -= 1;
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+            Ok(()) => {
+                let _ = crate::run_quiet_async(tokio::process::Command::new("ifup").arg(&iface)).await;
+                crate::profiles::reload_system().await?;
+                break;
+            }
+        }
+    }
+    crate::activity::log(
+        "satellite",
+        "provision-core-tunnel",
+        true,
+        &format!(
+            "Provisioned Core tunnel for satellite '{}' profile '{}'",
+            p.satellite, p.profile
+        ),
+        None,
+    );
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize, Parser)]
+#[serde(rename_all = "camelCase")]
+#[command(rename_all = "kebab-case")]
+pub struct ProvisionSatelliteParams {
+    satellite: String,
+    profile: String,
+    #[clap(long)]
+    sat_wg_addr: String,
+    #[clap(long)]
+    core_public_key: String,
+    #[clap(long)]
+    core_endpoint_host: String,
+    #[clap(long)]
+    core_endpoint_port: u16,
+    #[clap(long)]
+    preshared_key: String,
+    #[clap(long)]
+    sat_private_key: String,
+    /// Repeatable. What to route through the tunnel; defaults to full egress via
+    /// the Core (`0.0.0.0/0`) when omitted.
+    #[clap(long)]
+    allowed_ip: Vec<String>,
+    /// A local interface whose firewall zone the tunnel joins.
+    #[clap(long, default_value = "lan")]
+    firewall_zone_member: String,
+}
+
+#[instrument(skip_all)]
+pub async fn provision_satellite_tunnel(
+    _ctx: ServerContext,
+    p: ProvisionSatelliteParams,
+) -> Result<(), Error> {
+    ensure_satellite()?;
+    let sat_wg_addr: Ipv4Addr = p.sat_wg_addr.parse().map_err(|_| {
+        Error::new(
+            eyre!("invalid sat_wg_addr '{}'", p.sat_wg_addr),
+            ErrorKind::InvalidRequest,
+        )
+    })?;
+    let allowed = if p.allowed_ip.is_empty() {
+        vec!["0.0.0.0/0".to_string()]
+    } else {
+        p.allowed_ip.clone()
+    };
+    let iface = crate::vpn_site::site_interface_name(&p.satellite, &p.profile);
+
+    let mut retries = 4;
+    loop {
+        let arena = Arena::new();
+        let mut cfgs = parse_all("/etc/config", &arena, &["network", "startwrt", "firewall"]).await?;
+        let params = crate::vpn_site::SatelliteTunnelParams {
+            satellite: &p.satellite,
+            profile_interface: &p.profile,
+            sat_wg_addr,
+            core_public_key: &p.core_public_key,
+            core_endpoint_host: &p.core_endpoint_host,
+            core_endpoint_port: p.core_endpoint_port,
+            preshared_key: &p.preshared_key,
+            sat_private_key: &p.sat_private_key,
+            allowed_ips: &allowed,
+            firewall_zone_member: &p.firewall_zone_member,
+        };
+        crate::vpn_site::provision_satellite_site_tunnel(&mut cfgs, &arena, &params)?;
+        match dump_all("/etc/config", cfgs).await {
+            Err(uciedit::Error::Conflict { .. }) if retries > 0 => {
+                retries -= 1;
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+            Ok(()) => {
+                let _ = crate::run_quiet_async(tokio::process::Command::new("ifup").arg(&iface)).await;
+                crate::profiles::reload_system().await?;
+                break;
+            }
+        }
+    }
+    crate::activity::log(
+        "satellite",
+        "provision-satellite-tunnel",
+        true,
+        &format!("Provisioned satellite tunnel to Core for profile '{}'", p.profile),
+        None,
+    );
+    Ok(())
+}
+
 // ── Load / persist ──────────────────────────────────────────────────────────
 
 /// Read the persisted role, defaulting to Core when the marker is absent or
@@ -430,6 +618,16 @@ fn ensure_core() -> Result<(), Error> {
     if load_role().role == RouterRole::Satellite {
         return Err(Error::new(
             eyre!("this operation is only available on a Core router"),
+            ErrorKind::Authorization,
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_satellite() -> Result<(), Error> {
+    if load_role().role != RouterRole::Satellite {
+        return Err(Error::new(
+            eyre!("this operation is only available on a Satellite router"),
             ErrorKind::Authorization,
         ));
     }
