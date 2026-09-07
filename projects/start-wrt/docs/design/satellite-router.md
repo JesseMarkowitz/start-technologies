@@ -107,6 +107,9 @@ state; they reconcile on reconnect after any missed edit.
 | D8 | Subnet/VLAN coordination | `vlan_tag` **globally identical**; **Core-central** `/24` allocation per satellite; teach the two subnet guards about satellite subnets | recommended |
 | D9 | DNS & DHCP split | **Satellite-local** DHCP and DNS per profile (mirrors the current per-gateway model) | recommended |
 | D10 | Packaging / image | WireGuard already ships; **no RADIUS**; verify `wireguard-tools`/`kmod-wireguard` only | recommended |
+| D11 | Satellite IPv6 addressing | **Prefixes arrive as delegated state over the authenticated tunnel, never in the semantic payload** (§13). Mechanism: DHCPv6-PD on the management tunnel | invariant ✅ locked; mechanism recommended |
+| D12 | Automatic port forwarding behind a satellite | **Satellite relays, Core authorizes** (§15); absent from v1 behind an explicit refusal | ✅ locked |
+| D13 | Satellite device registry | **Satellite reports device facts; Core owns per-device policy** (§14) — shared substrate for D11, D12, and the device UI | requirement ✅ locked; shape recommended |
 
 ---
 
@@ -182,6 +185,23 @@ state; they reconcile on reconnect after any missed edit.
    naming, and the config generator all assume one host in the profile `/24`. *Mitigation:* a **new
    `vpn_site.rs`** module + `vpn_site` UCI type for subnet peers, reusing only the crypto/interface/
    firewall-rule primitives — don't overload the road-warrior path.
+9. **DHCPv6-PD over a WireGuard interface is unproven here — GATES D11's mechanism.** Nothing in
+   this codebase has ever run RA or DHCPv6 over a `wg_*` interface (`vpn_server.rs` / `vpn_client.rs`
+   set no `ra`/`dhcpv6`/`ip6assign`), and a WG interface is a NOARP point-to-point device with no
+   automatic link-local, while DHCPv6 solicits over link-local multicast to `ff02::1:2`.
+   *Mitigation:* **a bench spike before D11's mechanism is locked** — two WG peers, `odhcpd`
+   delegating on one, a DHCPv6 client requesting a prefix on the other, `ff02::1:2` inside
+   `allowed_ips`. Needs no satellite and no K1, just two Linux boxes. If it fails, fall back to
+   Core-central `/64` allocation pushed as delegated state (§13). **Must be validated before the v6
+   phase starts.**
+10. **IPv6 PD size is an external ceiling.** `profiles × (1 + satellites)` `/64`s are needed; a
+    `/60` ISP delegation cannot cover a modest deployment and a `/64`-only one cannot do GUA at all.
+    *Mitigation:* none available to us — inherit the ULA→GUA/NAT66 work and document the PD-size
+    requirement as a satellite prerequisite (§13).
+11. **The upstream channel is a new direction of trust.** D5 made the satellite a pure follower;
+    D12 and D13 require device facts and forward requests flowing satellite→Core, which §12's threat
+    table was not written against. *Mitigation:* the bounding invariant — a satellite may only report
+    or affect addresses inside the subnets the Core allocated it (D8) — plus threat #11 below.
 
 ---
 
@@ -204,6 +224,10 @@ state; they reconcile on reconnect after any missed edit.
 | `API_CONTRACT.md` | Document the `satellite.*` module | Medium |
 | `web/` — `app.routes.ts` / `routes/settings` + new `routes/satellites`, `api.service.ts` + `live-api` + `mock-api` | New "Satellites" surface (list, pair dialog, status); pattern-match `published-ports` | **Large (new UI)** |
 | `build/openwrt.diffconfig` | Verify WireGuard packages present | Small (verify) |
+| **IPv6 (D11)** — `vpn_site.rs`, `profiles.rs`, satellite `reqprefix` on the mgmt tunnel | Prefix delegation over the tunnel; interface-keyed `rule6` attachment; revisit `heal_ipv6_state` | **Large (new)** |
+| **Device registry (D13)** — new upstream sync direction + `devices.rs` / `device_ident.rs` / `ipv6_tracker.rs` read paths | Satellite reports device facts; Core renders them and owns policy | **Large (new)** |
+| **Port-forward relay (D12)** — satellite-side `port_control.rs` listener + Core-side authorize path | Terminate PCP/UPnP locally, relay upward; replace `arrival_matches` with the tunnel+subnet check | **Large (new)** |
+| v1 refusal path (D12) — satellite `port_control.rs` + `web/` | Explicit PCP error / UPnP fault + UI note that the feature is unavailable behind a satellite | Small |
 
 ---
 
@@ -220,6 +244,14 @@ state; they reconcile on reconnect after any missed edit.
 5. **Config sync** (D5) — semantic push + satellite regenerate; verify same-password-same-profile
    across routers end-to-end.
 6. **Capability gating** (D7) + **UI** (satellites page, pairing flow).
+7. **v1 refusal path** (D12) — explicit PCP/UPnP refusal + UI note. Small, and it belongs *in* v1:
+   without it the failure is silent.
+8. **Device registry** (D13) — satellite reports device facts; Core renders them in the device list.
+   Unblocks the per-device toggle, D12's authorization, and v6 published ports at once.
+9. **IPv6** (D11) — run the risk #9 spike first, then prefix delegation + the interface-keyed
+   `rule6` attachment. Reuses phase 3's zone/table plumbing.
+10. **Automatic port forwarding** (D12) — satellite-side listener relaying to the Core authorizer.
+    Requires phase 8.
 
 ---
 
@@ -233,6 +265,10 @@ state; they reconcile on reconnect after any missed edit.
 - **Runtime role changes** — role is fixed at flash.
 - **Wi-Fi backhaul** — v1 backhaul is cable/LAN; wireless backhaul is a documented **future
   enhancement** (§11), security-neutral but deferred for performance/bootstrap reasons.
+- **IPv6 on satellites in v1** — v1 serves IPv4 only. *Deferred, not excluded*: v6 is a requirement
+  (§13, D11) and the v1 data shapes already carry it without a schema migration.
+- **Automatic port forwarding on satellites in v1** — deferred (§15, D12), and v1 must **refuse it
+  explicitly** rather than fail silently. Required for full release, not for a proof of concept.
 
 ---
 
@@ -330,6 +366,7 @@ adequately mitigated.
 | 8 | Cross-profile isolation over the tunnel | Reused zone model (satellite separates profiles by VLAN; Core enforces cross-router forwarding) | Standard — mitigate with explicit isolation tests |
 | 9 | Availability (Core down → satellite island) | Inherent to Core-only-WAN | Availability property, not a breach |
 | 10 | WG listen port on LAN/Wi-Fi | WG silent to unauthenticated packets | Negligible |
+| 11 | **Upstream channel abuse** (a paired satellite reporting bogus devices, or requesting forwards for addresses it does not serve) | Core authorizes, never the satellite (D12); every report and request bounded to subnets the Core allocated that satellite (D8/D13); arrival on satellite X's tunnel proves X sent it | **Moderate** — new trust direction; review alongside #2 and #7 |
 
 **Bottom line.** Appropriate for the intended home/SMB use. The two items warranting focused security
 review are the **enrollment bootstrap (#2)** and the **satellite RPC authorization boundary (#7)**.
@@ -340,7 +377,151 @@ so an operator understands the trade.
 
 ---
 
-## 13. Notes / implications
+## 13. IPv6 addressing (D11)
+
+**Status:** the invariant is **locked**; the mechanism is **recommended**, pending a bench spike
+(risk #9).
+
+Satellite profiles are **dual-stack**. A profile means the same thing on every router (§1), so a
+satellite client that gets IPv4-only service while a Core client using the same password gets
+dual-stack breaks the design's driving constraint. v1 ships IPv4-only (§9) — designed for v6, not
+excluding it.
+
+**The invariant (locked).** IPv6 prefixes reach a satellite as **delegated state carried over the
+authenticated tunnel, with a lifetime** — never as semantic-payload configuration. D5's payload
+stays *meaning* (`vlan_tag`, passwords, ports); an address is not meaning, and a prefix an ISP can
+renumber out from under us must not be frozen into a config push. The delegation rides the
+**management tunnel**, not the raw transit link: §11 makes the underlay untrusted by design, so
+addressing taken from the bare link would arrive unauthenticated.
+
+**Why the v6 attachment is simpler than the v4 one.** The v4 routed attachment (D1) needs a source
+ip-rule (`src <remote/24> lookup <vlan_tag>`) plus a table route. The v6 path needs neither, because
+it was already built prefix-agnostic: `profiles.rs rewrite_routing` installs `prl6_<iface>` /
+`prr6_<iface>` keyed on **ingress interface**, explicitly because "LAN `/64`s are dynamic under
+DHCPv6-PD". A satellite's per-profile tunnel is an interface in the profile's zone, so v6 policy
+routing attaches with an interface-named `rule6` and nothing prefix-shaped.
+
+> **Design rule.** The v6 attachment is **interface-keyed**; the v4 attachment is **prefix-keyed**.
+> Don't build the v4 source-rule machinery as though prefix matching were the only attachment
+> mechanism, or v6 will look like a special case when it is in fact the simpler one.
+
+**What does not work today.** A satellite has no WAN, therefore no delegated prefix, therefore no
+pool for `ip6assign`. Under D5 the satellite regenerates locally through the same `profiles.rs`
+chain, and that chain writes `ip6assign 64` on every profile interface whenever IPv6 is on — against
+an empty pool on a satellite. The failure is silent: satellite clients simply have no v6 while Core
+clients do.
+
+**Mechanism (recommended).** The satellite requests a prefix on the management tunnel (`reqprefix`,
+the same `NetworkInterface` field the WAN already uses) and the Core's `odhcpd` delegates from its
+own PD. The satellite's existing per-profile `ip6assign 64` then works **unchanged** — netifd carves
+`/64`s exactly as it does on the Core — and an ISP renumber propagates by protocol instead of
+through our sync. In v6 terms the management tunnel simply *is* the satellite's uplink.
+
+*Fallback if the spike fails:* the Core allocates `/64`s centrally (mirroring D8's `/24` allocation)
+and pushes them over the management RPC as delegated state carrying a lifetime. Same invariant,
+hand-rolled renumbering.
+
+**PD size is the ceiling, and it is the ISP's, not ours.** Each profile consumes a `/64`, so
+satellites scale demand from `profiles` to `profiles × (1 + satellites)` — 6 profiles and 2
+satellites is 18. A `/56` is comfortable, a `/60` (16) is not enough, and a `/64`-only ISP cannot do
+GUA at all. This ceiling **already exists for profiles today**: see `profiles.rs`
+`TODO(ipv6/nat66)` — on a `/64`-only ISP the single GUA `/64` goes to the admin LAN and every other
+profile gets a ULA with no v6 internet path. The satellite design does **not** solve NAT66; it
+inherits whatever the ULA→GUA redesign lands. Document the PD-size requirement as a satellite
+prerequisite.
+
+**Revisit list.** `profiles.rs heal_ipv6_state` reconciles v6 *toward off* and carries a NOTE that it
+must be revisited if per-profile v6 states ever become legitimate. "Core v6 on, satellite v6 off" is
+exactly such a state, so that heal must be revisited when satellite v6 lands.
+
+---
+
+## 14. Satellite device registry (D13)
+
+**Status:** the requirement is **locked**; the shape is **recommended**.
+
+**The design is unidirectional today.** D5 is a Core→satellite push, and a satellite "never authors
+profile state". But four separate capabilities all need the opposite direction — device *facts*
+flowing satellite→Core:
+
+| Capability | Why it needs the registry |
+|---|---|
+| The Devices page showing satellite clients | the Core enumerates from `ip neigh show` plus the dnsmasq lease files (`devices.rs`), both strictly local |
+| The "Allow automatic port forwarding" toggle | it is a per-device control on the device detail page, and a satellite device has no page |
+| Automatic port forwarding authorization (§15) | `port_control.rs resolve_client` needs a MAC and an interface it can trust |
+| IPv6 published ports | `ipv6_tracker` elects a device's stable GUA from `ip -6 monitor neigh`, Core-local |
+
+The registry is therefore **not a cost of D12 alone** — it is shared substrate under D11, D12, and
+the device UI. That is the argument for building it once, deliberately, rather than three times by
+accident.
+
+**Shape (recommended).** A satellite reports, per device it serves: MAC, current addresses (v4 and
+v6), the profile it is on, hostname / DHCP fingerprint, and last-seen. The Core stores these against
+the reporting satellite and renders them in the device list, marked with which satellite they are
+behind. Per-device **settings** — name, the PCP toggle, reservations — remain **Core-authoritative**
+and travel *down* in the D5 payload. The satellite reports facts; the Core owns policy. That keeps
+D5 intact: a report is an observation, not a configuration.
+
+**Bounding invariant.** A satellite may only report — and may only affect — addresses inside the
+subnets the Core allocated to it. D8 already makes the Core the allocator, so this is checkable
+without trusting the satellite. A compromised satellite can then misbehave only toward its own
+clients, which it can do anyway by virtue of being their gateway.
+
+**Eventual consistency.** The registry is exactly as stale as §10's credential replication, and
+bounded the same way: reconcile on reconnect, generation numbers, and a UI indicator for a satellite
+that has not acked. Note that `device_ident.rs` derives OS and vendor from the DHCP exchange — which
+under D9 happens **on the satellite** — so a satellite identifies its own clients locally and ships
+the result up, rather than the Core guessing about a device it cannot see.
+
+---
+
+## 15. Automatic port forwarding behind a satellite (D12)
+
+**Status:** **locked** — the satellite relays, the Core authorizes. Deferred out of v1 (§9) behind an
+explicit refusal.
+
+**PCP and UPnP are link-scoped by design.** A PCP client sends to its own default gateway; UPnP is
+discovered by SSDP multicast on the local segment. A device on S1 sends both to **S1**, never to the
+Core, whatever we build — so a satellite must terminate these protocols locally. The only real
+question is where authorization lives.
+
+**D12 (locked): the satellite relays, the Core authorizes.** The satellite terminates the protocol
+and forwards the request, plus device identity, up the management tunnel; the Core decides using the
+§14 registry and owns the resulting forward. The Core stays the single arbiter of external ports —
+which it must be, since it already refuses ports the router itself answers on and resolves
+manual-rule overlaps. The alternative (satellite authorizes, Core installs) is rejected: it would let
+a compromised satellite authorize a device the admin never permitted, contradicting D5.
+
+**A security check is being replaced, not reused.** The Core's cross-segment spoof defence cannot
+apply to a routed client: `port_control.rs arrival_matches` requires the arrival ifindex to equal the
+interface the neighbor table places the claimed source on, and a satellite client appears in neither.
+The sound substitute is two facts taken together — **arrival on satellite X's tunnel proves satellite
+X sent it** (the tunnel is authenticated), **and the claimed device must live in a subnet the Core
+allocated to X** (§14). Flag this explicitly in the D4 security review; it is a replacement, not an
+inheritance.
+
+**Link-drop policy.** Lease bookkeeping is deliberately in-memory at the Core, and clients renew
+every few minutes. When a satellite's tunnel drops, renewals stop. Forwards should **survive the drop
+and expire on the normal sweep**: the device is unreachable anyway, so a stale forward costs nothing,
+while dropping one immediately breaks a device that was only briefly disconnected. The sweep's
+existing address-binding rule still applies — a forward whose owning MAC no longer holds the address
+it points at is collected regardless.
+
+**SNI hostname routes** ride the same path once identity is solved; routing a hostname to a satellite
+device is a DNAT to a routed address. One documented wrinkle compounds: a *local* client reaching a
+routed hostname already appears in the device's logs as the router's own address, and behind a
+satellite that is a second hop of address rewriting.
+
+**v1 behavior (locked): explicit refusal.** A v1 satellite does not support automatic port
+forwarding, and must **say so** — a PCP error response and a UPnP fault indicating the feature is
+unavailable behind a satellite, plus a visible note in the UI — never silence. Left alone the request
+dies at the Core as `NOT_AUTHORIZED` behind a `tracing::debug!`: a StartOS server behind a satellite
+would silently fail to configure its own ports, with nothing anywhere saying why. That is the worst
+available outcome and the one thing v1 must not ship.
+
+---
+
+## 16. Notes / implications
 
 - **Credential replication & eventual consistency.** Each satellite holds a copy of the password set
   (same plaintext-in-config posture as one router today); edits/revocations propagate on sync — no
