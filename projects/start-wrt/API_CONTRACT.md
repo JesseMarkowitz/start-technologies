@@ -2006,7 +2006,9 @@ struct ProvisionCoreParams {
     satellite: String,
     profile: String,             // profile interface the tunnel carries
     coreTransitAddr: String,     // the Core wg interface address
-    satelliteAllowedIp: String,  // CIDR routed to the satellite (its /24, or a /32 for self-ping)
+    satelliteAllowedIp: Vec<String>, // repeatable; CIDR(s) routed to the satellite (its /24, or
+                                 // a /32 for self-ping). One per address family when the
+                                 // profile is dual-stack (D11).
     satellitePublicKey: String,
     presharedKey: String,
     listenPort: u16,
@@ -2038,6 +2040,26 @@ struct ProvisionSatelliteParams {
 }
 // Response: null. Satellite-only. Writes the dialing wg interface + peer + zone
 // membership and brings the tunnel up (WAN-less egress via the Core).
+```
+
+### `satellite.provision-satellite-profile` (manual / hardware bring-up)
+
+```rust
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProvisionSatelliteProfileParams {
+    profile: String,             // network interface to create (e.g. "psat_guest")
+    vlanTag: u16,
+    gateway: String,             // the satellite's IPv4 gateway for this profile /24 (its .1)
+    port: String,                // a satellite LAN port to place on the VLAN (untagged)
+    ip6assign: Option<u8>,       // IPv6 prefix length carved from the prefix delegated to
+                                 // the satellite (D11); omit for v4-only, which is all of v1
+    firewallZoneMember: String,  // local iface whose zone this profile joins (default "lan")
+}
+// Response: null. Satellite-only. Writes the VLAN interface, bridge-vlan port, DHCP
+// pool and firewall-zone membership so the satellite serves one profile locally; a
+// client on that port then routes out the tunnel to the Core, which applies policy.
+// Manual stand-in for what config sync (D5) will do automatically.
 ```
 
 ---

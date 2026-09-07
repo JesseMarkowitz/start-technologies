@@ -23,7 +23,7 @@
 //!   a satellite in the registry only; it does **not** yet bring up tunnels or
 //!   push config, and says so in its response rather than implying otherwise.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 
 use clap::Parser;
@@ -109,8 +109,14 @@ pub struct SyncSnapshot {
 pub struct ProfileSpec {
     pub interface: String,
     pub vlan_tag: u16,
-    /// The satellite-local `/24` (CIDR) the Core allocated for this profile here.
+    /// The satellite-local IPv4 `/24` (CIDR) the Core allocated for this profile here.
     pub subnet: String,
+    /// IPv6 prefix length to carve for this profile from the prefix delegated to the
+    /// satellite (D11), or `None` for v4-only — all of v1. Deliberately a *length*, not
+    /// a prefix: D11 keeps IPv6 addressing out of the semantic payload, so this says
+    /// only "serve v6 here" and the prefix itself arrives by delegation.
+    #[serde(default)]
+    pub ip6assign: Option<u8>,
     pub wan_access: String,
     pub outbound: String,
 }
@@ -409,10 +415,11 @@ pub struct ProvisionCoreParams {
     profile: String,
     #[clap(long)]
     core_transit_addr: String,
-    /// CIDR to route to the satellite over the tunnel (e.g. the satellite's /24,
-    /// or its wg host /32 for a self-ping test).
+    /// Repeatable. CIDR(s) to route to the satellite over the tunnel (e.g. the
+    /// satellite's /24, or its wg host /32 for a self-ping test). Repeat once per
+    /// address family for a dual-stack profile (D11).
     #[clap(long)]
-    satellite_allowed_ip: String,
+    satellite_allowed_ip: Vec<String>,
     #[clap(long)]
     satellite_public_key: String,
     #[clap(long)]
@@ -432,7 +439,7 @@ pub async fn provision_core_tunnel(
     p: ProvisionCoreParams,
 ) -> Result<(), Error> {
     ensure_core()?;
-    let core_transit_addr: Ipv4Addr = p.core_transit_addr.parse().map_err(|_| {
+    let core_transit_addr: IpAddr = p.core_transit_addr.parse().map_err(|_| {
         Error::new(
             eyre!("invalid core_transit_addr '{}'", p.core_transit_addr),
             ErrorKind::InvalidRequest,
@@ -448,7 +455,7 @@ pub async fn provision_core_tunnel(
             satellite: &p.satellite,
             profile_interface: &p.profile,
             core_transit_addr,
-            satellite_subnet: &p.satellite_allowed_ip,
+            satellite_subnets: &p.satellite_allowed_ip,
             satellite_public_key: &p.satellite_public_key,
             preshared_key: &p.preshared_key,
             listen_port: p.listen_port,
@@ -515,7 +522,7 @@ pub async fn provision_satellite_tunnel(
     p: ProvisionSatelliteParams,
 ) -> Result<(), Error> {
     ensure_satellite()?;
-    let sat_wg_addr: Ipv4Addr = p.sat_wg_addr.parse().map_err(|_| {
+    let sat_wg_addr: IpAddr = p.sat_wg_addr.parse().map_err(|_| {
         Error::new(
             eyre!("invalid sat_wg_addr '{}'", p.sat_wg_addr),
             ErrorKind::InvalidRequest,
@@ -582,6 +589,11 @@ pub struct ProvisionSatelliteProfileParams {
     /// A satellite LAN port to place on the profile VLAN (untagged).
     #[clap(long)]
     port: String,
+    /// IPv6 prefix length to carve for this profile from the satellite's delegated
+    /// prefix (D11). Omit for v4-only, which is all of v1 — a satellite has no WAN, so
+    /// nothing delegates a prefix until D11's mechanism lands.
+    #[clap(long)]
+    ip6assign: Option<u8>,
     #[clap(long, default_value = "lan")]
     firewall_zone_member: String,
 }
@@ -608,6 +620,7 @@ pub async fn provision_satellite_profile(
             profile_interface: &p.profile,
             vlan_tag: p.vlan_tag,
             gateway,
+            ip6assign: p.ip6assign,
             port: &p.port,
             firewall_zone_member: &p.firewall_zone_member,
         };
@@ -820,6 +833,7 @@ mod tests {
                 interface: "guest".into(),
                 vlan_tag: 101,
                 subnet: "192.168.130.0/24".into(),
+                ip6assign: None,
                 wan_access: "all".into(),
                 outbound: "wan".into(),
             }],

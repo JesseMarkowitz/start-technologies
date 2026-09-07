@@ -22,7 +22,7 @@
 //! source-rule for VPN-routed profiles in `profiles.rs`. `provision_core_site_tunnel`
 //! is a pure config-writer; nothing calls it into effect yet.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use uciedit::openwrt::{
     Dhcp, InterfaceProto, NetworkBridgeVlan, NetworkInterface, NetworkVlanPort,
@@ -45,8 +45,11 @@ pub struct UciVpnSite {
     pub profile_interface: String,
     /// The satellite this tunnel belongs to (its registry name).
     pub satellite: String,
-    /// The satellite's downstream subnet for this profile (CIDR, e.g. "192.168.130.0/24").
-    pub subnet: String,
+    /// The satellite's downstream subnets for this profile (CIDRs, any family — its
+    /// IPv4 "/24" and, once D11 lands, the IPv6 "/64" delegated to it). A list, because
+    /// a dual-stack profile carries one prefix per family over the same tunnel.
+    #[uci(default)]
+    pub subnets: Vec<String>,
     /// UDP listen port on the Core for this tunnel.
     pub listen_port: u16,
 }
@@ -58,10 +61,12 @@ pub struct SiteTunnelParams<'p> {
     pub satellite: &'p str,
     /// Profile interface name the tunnel carries.
     pub profile_interface: &'p str,
-    /// The Core end's transit address on this tunnel (an underlay `/32` on the wg iface).
-    pub core_transit_addr: Ipv4Addr,
-    /// The satellite's downstream subnet carried over the tunnel (CIDR "a.b.c.0/24").
-    pub satellite_subnet: &'p str,
+    /// The Core end's transit address on this tunnel (a host address on the wg iface).
+    /// `IpAddr`, not `Ipv4Addr`: the underlay family is independent of what the tunnel
+    /// carries, so a v6 transit link stays possible (D11).
+    pub core_transit_addr: IpAddr,
+    /// The satellite's downstream subnets carried over the tunnel (CIDRs, any family).
+    pub satellite_subnets: &'p [String],
     /// The satellite's WireGuard public key (base64), pinned at pairing.
     pub satellite_public_key: &'p str,
     /// Pre-shared key (base64).
@@ -72,6 +77,15 @@ pub struct SiteTunnelParams<'p> {
     pub transit_zone: &'p str,
     /// The Core's WireGuard private key for this interface (base64).
     pub core_private_key: &'p str,
+}
+
+/// A single-host CIDR for `addr` — `/32` for IPv4, `/128` for IPv6. A tunnel interface
+/// carries only a host address; peer reachability comes from `allowed_ips`.
+fn host_cidr(addr: IpAddr) -> String {
+    match addr {
+        IpAddr::V4(a) => format!("{a}/32"),
+        IpAddr::V6(a) => format!("{a}/128"),
+    }
 }
 
 /// The Core-side WireGuard interface name for a satellite's per-profile tunnel.
@@ -105,9 +119,9 @@ fn set_site_interface(
     interface_name: &str,
     params: &SiteTunnelParams,
 ) -> Result<(), Error> {
-    // Transit /32 on the interface; the satellite subnet is reached via the peer's
-    // allowed_ips (cryptokey routing), not the interface address.
-    let addresses = vec![format!("{}/32", params.core_transit_addr)];
+    // A single host address on the interface (/32 or /128); the satellite's subnets are
+    // reached via the peer's allowed_ips (cryptokey routing), not the interface address.
+    let addresses = vec![host_cidr(params.core_transit_addr)];
 
     for section in &mut cfgs["network"].sections {
         if section.name().as_deref() != Some(interface_name) {
@@ -152,7 +166,7 @@ fn set_site_metadata(
         }
         meta.profile_interface = params.profile_interface.to_string();
         meta.satellite = params.satellite.to_string();
-        meta.subnet = params.satellite_subnet.to_string();
+        meta.subnets = params.satellite_subnets.to_vec();
         meta.listen_port = params.listen_port;
         section.set(&meta)?;
         return Ok(());
@@ -162,7 +176,7 @@ fn set_site_metadata(
         interface: interface_name.to_string(),
         profile_interface: params.profile_interface.to_string(),
         satellite: params.satellite.to_string(),
-        subnet: params.satellite_subnet.to_string(),
+        subnets: params.satellite_subnets.to_vec(),
         listen_port: params.listen_port,
     };
     cfgs["startwrt"].append(&meta, Some(interface_name))?;
@@ -224,13 +238,16 @@ fn add_site_peer<'a>(
         comment: LineComment::None,
     });
 
-    // Site-to-site: the satellite advertises its whole per-profile subnet, NOT a /32 host.
-    let subnet_str: &str = arena.alloc(params.satellite_subnet.to_string());
-    lines.push(Line::List {
-        list: Token::from_str("allowed_ips", arena),
-        item: Token::from_str(subnet_str, arena),
-        comment: LineComment::None,
-    });
+    // Site-to-site: the satellite advertises its whole per-profile subnet(s), NOT a /32
+    // host. One entry per address family once the profile is dual-stack (D11).
+    for subnet in params.satellite_subnets {
+        let subnet_str: &str = arena.alloc(subnet.clone());
+        lines.push(Line::List {
+            list: Token::from_str("allowed_ips", arena),
+            item: Token::from_str(subnet_str, arena),
+            comment: LineComment::None,
+        });
+    }
 
     cfgs["network"].sections.push(Section { arena, lines });
     Ok(())
@@ -244,8 +261,9 @@ fn add_site_peer<'a>(
 pub struct SatelliteTunnelParams<'p> {
     pub satellite: &'p str,
     pub profile_interface: &'p str,
-    /// The satellite end's WireGuard address (a host in the profile `/24`).
-    pub sat_wg_addr: Ipv4Addr,
+    /// The satellite end's WireGuard address (a host address on the tunnel). `IpAddr`
+    /// for the same reason as `core_transit_addr` (D11).
+    pub sat_wg_addr: IpAddr,
     /// The Core's WireGuard public key.
     pub core_public_key: &'p str,
     /// The Core's underlay endpoint host to dial (its transit address).
@@ -279,7 +297,7 @@ fn set_sat_interface(
     interface_name: &str,
     params: &SatelliteTunnelParams,
 ) -> Result<(), Error> {
-    let addresses = vec![format!("{}/32", params.sat_wg_addr)];
+    let addresses = vec![host_cidr(params.sat_wg_addr)];
     for section in &mut cfgs["network"].sections {
         if section.name().as_deref() != Some(interface_name) {
             continue;
@@ -397,8 +415,15 @@ pub struct SatelliteLocalProfileParams<'p> {
     /// The network interface name to create on the satellite (e.g. "psat_guest").
     pub profile_interface: &'p str,
     pub vlan_tag: u16,
-    /// The satellite's gateway address for this profile `/24` (its `.1`).
+    /// The satellite's IPv4 gateway address for this profile `/24` (its `.1`). Stays
+    /// `Ipv4Addr`: this is OpenWrt's `ipaddr`, which is v4 by definition.
     pub gateway: Ipv4Addr,
+    /// IPv6 prefix length to carve for this profile from the prefix delegated to the
+    /// satellite, written as the interface's `ip6assign` (D11). `None` leaves the
+    /// interface v4-only, which is all of v1. The satellite has no WAN, so there is no
+    /// pool to carve from until delegation over the management tunnel lands — setting
+    /// this before then produces an `ip6assign` against an empty pool.
+    pub ip6assign: Option<u8>,
     /// A satellite LAN port to place on this profile's VLAN (untagged).
     pub port: &'p str,
     /// A local interface whose firewall zone this profile joins (same as the
@@ -433,6 +458,7 @@ fn set_local_profile_interface(
             ni.proto = InterfaceProto::STATIC;
             ni.ipaddr = Some(params.gateway);
             ni.netmask = Some(netmask);
+            ni.ip6assign = params.ip6assign.map(|n| n.to_string());
             section.set(&ni)?;
             return Ok(());
         }
@@ -442,6 +468,7 @@ fn set_local_profile_interface(
         proto: InterfaceProto::STATIC,
         ipaddr: Some(params.gateway),
         netmask: Some(netmask),
+        ip6assign: params.ip6assign.map(|n| n.to_string()),
         ..Default::default()
     };
     cfgs["network"].append(&ni, Some(params.profile_interface))?;
@@ -540,12 +567,12 @@ mod tests {
         std::fs::write(dir.join("dhcp"), "").unwrap();
     }
 
-    fn params<'p>() -> SiteTunnelParams<'p> {
+    fn params<'p>(subnets: &'p [String]) -> SiteTunnelParams<'p> {
         SiteTunnelParams {
             satellite: "s1",
             profile_interface: "guest",
             core_transit_addr: "10.42.0.1".parse().unwrap(),
-            satellite_subnet: "192.168.130.0/24",
+            satellite_subnets: subnets,
             satellite_public_key: "PUBKEY",
             preshared_key: "PSK",
             listen_port: 51900,
@@ -568,7 +595,8 @@ mod tests {
             .await
             .unwrap();
 
-        provision_core_site_tunnel(&mut cfgs, &arena, &params()).unwrap();
+        let subnets = vec!["192.168.130.0/24".to_string()];
+        provision_core_site_tunnel(&mut cfgs, &arena, &params(&subnets)).unwrap();
 
         // Interface exists, transit /32, correct listen port.
         let iface = cfgs["network"]
@@ -622,7 +650,7 @@ mod tests {
             .filter_map(|s| s.get::<UciVpnSite>().ok())
             .find(|m| m.interface == "sat_s1_guest")
             .expect("vpn_site metadata should exist");
-        assert_eq!(meta.subnet, "192.168.130.0/24");
+        assert_eq!(meta.subnets, vec!["192.168.130.0/24".to_string()]);
         assert_eq!(meta.satellite, "s1");
     }
 
@@ -635,8 +663,9 @@ mod tests {
             .await
             .unwrap();
 
-        provision_core_site_tunnel(&mut cfgs, &arena, &params()).unwrap();
-        provision_core_site_tunnel(&mut cfgs, &arena, &params()).unwrap();
+        let subnets = vec!["192.168.130.0/24".to_string()];
+        provision_core_site_tunnel(&mut cfgs, &arena, &params(&subnets)).unwrap();
+        provision_core_site_tunnel(&mut cfgs, &arena, &params(&subnets)).unwrap();
 
         let peers = cfgs["network"]
             .sections
@@ -714,6 +743,7 @@ mod tests {
             profile_interface: "psat_guest",
             vlan_tag: 130,
             gateway: "192.168.130.1".parse().unwrap(),
+            ip6assign: None,
             port: "lan2",
             firewall_zone_member: "lan",
         };
