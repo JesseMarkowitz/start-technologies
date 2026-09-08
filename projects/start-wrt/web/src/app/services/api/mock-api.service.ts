@@ -26,6 +26,7 @@ import {
   VpnServerSetArgs,
   VpnServers,
   WifiConfig,
+  RouterRoleRes,
   ScheduleWindow,
   ProfileId,
   ProfileIdOpt,
@@ -522,6 +523,12 @@ export class MockApiService extends ApiService {
         password: 'guestpass456',
       },
     ],
+  }
+
+  async satelliteGetRole(): Promise<RouterRoleRes> {
+    await pauseFor(100)
+    // The mock router is a standalone Core, matching the common case.
+    return { role: 'core' }
   }
 
   async wifiGet(): Promise<WifiConfig> {

@@ -38,6 +38,13 @@ networking, and a new Angular UI; it is deliberately staged.
   `generation`), a pure free-UDP-port allocator (`allocate_listen_ports`), and the reserved
   inter-router transit block + `transit_addrs(index)`. 4 tests.
 - **API contract** — `API_CONTRACT.md` section for `satellite.*`.
+- **Automatic port forwarding refused, explicitly (D12, phase 7)** — `port_control.rs`: a Satellite
+  refuses every PCP/UPnP mapping request at `Via::is_known_client`, the single chokepoint the shared
+  core consults before MAP, the SNI path, and all three UPnP actions. The client gets a PCP
+  `NOT_AUTHORIZED` / UPnP fault 606 (both already emitted by the shared core), and the daemon logs
+  it at `warn`, throttled to one line per client per 5 minutes. Paired with a note on the Published
+  Ports page (`web/routes/published-ports/index.ts` + the `api.service` trio), because the automatic
+  section is hidden when the list is empty — which on a Satellite it always is. 1 test.
 
 > **Honest scope note.** `pair` currently records a satellite in the Core registry only; it does
 > **not** yet establish tunnels, validate an enrollment token, or push config — and its response
@@ -52,7 +59,7 @@ networking, and a new Angular UI; it is deliberately staged.
 - ☐ **Set role at flash** — capture the role choice in the setup wizard and write it in
   `setup.rs::run_setup_flash_inner` (extend `SetupStatusRes`); role is immutable post-flash (D6).
 
-## Phase 2 — Site-to-site transport (`vpn_site.rs`, new)  ★ top risk
+## Phase 2 — Site-to-site transport (`vpn_site.rs`, new) ★ top risk
 
 - ✅ **Core-side config generation** (`vpn_site.rs`): subnet-advertising peer (prefix `allowed_ips`,
   not `/32`), transit-underlay addressing decoupled from the profile `/24`s, per-profile tunnel
@@ -77,12 +84,12 @@ networking, and a new Angular UI; it is deliberately staged.
 
 - ☐ Attach a satellite `/24` to its profile: add the tunnel interface to the `vlan_<iface>` zone
   (Vec `network`), and — for VPN-routed profiles — emit a source ip-rule (`src <remote/24> lookup
-  <vlan_tag>`) + a route in the per-VLAN table (generalize `prr_`/`plr_`).
+<vlan_tag>`) + a route in the per-VLAN table (generalize `prr_`/`plr_`).
 - ☐ Extend `sync_cross_subnet_routes` / `sync_vpn_peer_cross_routes` to enumerate satellite subnets.
 - ☐ Teach `guard_subnet_collision` / `validate_profile_block` about Core-central satellite subnet
   allocation (D8); keep `vlan_tag` globally identical across routers.
 
-## Phase 4 — Pairing & remote-peer auth (`satellite.rs` + `middleware/auth.rs`)  ★ security review
+## Phase 4 — Pairing & remote-peer auth (`satellite.rs` + `middleware/auth.rs`) ★ security review
 
 - ☐ Enrollment: single-use, short-lived, admin-initiated token; key-fingerprint confirmation;
   reuse `sign/ed25519` + `registry/device_info` for signed identity.
@@ -106,6 +113,35 @@ networking, and a new Angular UI; it is deliberately staged.
   `vpn_server`, `published-ports`) read-only/disabled; keep `system`/`lan`/`devices` local.
 - ☐ Angular "Satellites" surface (`web/`): pair dialog + registry/status list (pattern-match
   `routes/published-ports`); wire `api.service.ts` + `live-api` + `mock-api`; `app.routes.ts`/settings.
+
+## Phase 7 — v1 refusal path (D12) ✅ done
+
+- ✅ Satellite refuses PCP/UPnP explicitly (protocol error + `warn` log, throttled per client).
+- ✅ Published Ports page states the feature is unavailable on a Satellite and points at the Core.
+- ☐ **Not yet exercised on hardware** — the refusal is unit-tested and the servers are unchanged on
+  a Core, but no PCP/UPnP client has been pointed at a Satellite. Fold into the hardware suite.
+
+## Phase 8 — Device registry (D13)
+
+- ☐ Satellite reports device facts upstream (the first satellite→Core direction; see design §14 and
+  threat #11); Core owns policy and renders them in the device list. Unblocks the per-device toggle,
+  D12's authorization, and IPv6 published ports at once.
+
+## Phase 9 — IPv6 (D11) ★ gated on a spike
+
+- ☐ **Run the risk #9 bench spike first** — DHCPv6-PD over a WireGuard interface has no precedent in
+  this codebase (NOARP p2p device, no automatic link-local, DHCPv6 solicits to `ff02::1:2`). Two
+  Linux boxes, `odhcpd` one side, a DHCPv6 client the other, `ff02::1:2` in `allowed_ips`. Needs no
+  satellite and no K1. If it fails, fall back to Core-central `/64` allocation pushed as delegated
+  state (design §13).
+- ☐ Then: prefix delegation over the management tunnel + the interface-keyed `rule6` attachment.
+  The v1 data shapes already carry v6 (`subnets`, `ip6assign`, `IpAddr`), so no schema migration.
+
+## Phase 10 — Automatic port forwarding (D12, full)
+
+- ☐ Satellite-side listener relaying to the Core authorizer. **Requires phase 8.** Replaces phase
+  7's refusal. The `arrival_matches` substitute is a _replacement, not an inheritance_ — flag it in
+  the phase 4 security review (design §15).
 
 ## Cross-cutting / packaging
 

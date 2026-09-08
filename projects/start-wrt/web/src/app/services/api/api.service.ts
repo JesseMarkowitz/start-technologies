@@ -27,6 +27,7 @@ export abstract class ApiService {
     params: VpnServerPeerAddArgs,
   ): Promise<VpnServerPeerAddResponse>
   abstract vpnServerPeerDelete(params: VpnServerPeerDeleteArgs): Promise<null>
+  abstract satelliteGetRole(): Promise<RouterRoleRes>
   abstract wifiGet(): Promise<WifiConfig>
   abstract wifiSet(params: WifiConfig): Promise<WifiSetResult>
   abstract wifiGeneratePassword(): Promise<string>
@@ -766,4 +767,12 @@ export interface ActivityListResponse {
 export interface ActivityListParams {
   offset?: number
   limit?: number
+}
+
+/// `satellite.get-role`. A router with no role marker is a standalone Core,
+/// which is the common case — so anything other than an explicit 'satellite'
+/// must be treated as a Core.
+export interface RouterRoleRes {
+  role: 'core' | 'satellite'
+  coreEndpoint?: string
 }

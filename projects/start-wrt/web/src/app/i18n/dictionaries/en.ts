@@ -552,4 +552,5 @@ export const ENGLISH: Record<string, number> = {
   'Country': 555,
   'Select the country this router operates in to unlock the Wi-Fi channels and transmit power permitted there. Until then it uses a conservative worldwide subset.': 556,
   'Not set': 557,
+  'Not available on a satellite router. Devices here cannot open their own ports via UPnP or PCP, and requests to do so are refused. To expose a device behind this router, add the port by hand on the core router.': 558,
 }

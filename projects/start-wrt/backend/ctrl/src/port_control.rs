@@ -77,6 +77,26 @@
 //! to copy for the same-segment case. The per-device default-off permission
 //! bounds the residual blast radius to devices a user explicitly trusted and
 //! placed on a shared segment with an attacker.
+//!
+//! # Satellite routers refuse, explicitly (D12)
+//!
+//! PCP and UPnP are link-scoped: a device behind a satellite sends them to the
+//! *satellite*, never to the core, so a satellite must terminate both protocols
+//! locally whatever we eventually build. v1 does not implement the relay, so a
+//! satellite answers every mapping request with a protocol error — PCP
+//! `NOT_AUTHORIZED`, UPnP fault 606 — and logs it at `warn`.
+//!
+//! Refusing is not the notable part; *saying so* is. Left alone the request
+//! would die as an ordinary unauthorized client behind a `tracing::debug!`,
+//! indistinguishable from the fixable case of a device whose per-device toggle
+//! is simply off — and a StartOS server behind a satellite would quietly never
+//! get the ports it asked for, with nothing anywhere saying why. The servers
+//! therefore keep running on a satellite (including SSDP: withdrawing the IGD
+//! advertisement would make a UPnP client find no gateway at all, which is the
+//! silence this is meant to prevent), and [`is_known_client`] is the single
+//! chokepoint where the refusal is made.
+//!
+//! [`is_known_client`]: GatewayBackend::is_known_client
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -139,6 +159,12 @@ pub const KIND_SNI: &str = "SNI";
 // UPnP IGD error codes, reused verbatim by the shared PCP core.
 const IGD_ACTION_FAILED: u16 = 501;
 const IGD_CONFLICT: u16 = 718;
+
+/// How often a Satellite repeats its refusal for one client. PCP clients renew
+/// every few minutes and UPnP clients retry on failure, so an unthrottled line
+/// would be the loudest thing in the daemon's log; one per client per interval
+/// is enough to answer "why can't this device open a port?".
+const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(300);
 
 /// The daemon's port-control instance. RPC handlers use it for lease expiry
 /// display and to invalidate the authorization cache when a toggle changes.
@@ -1003,6 +1029,65 @@ fn arrival_matches(arrival: Arrival, neigh_iface: &str) -> bool {
     }
 }
 
+/// True when this router is a Satellite. A Satellite does not implement
+/// automatic port forwarding in v1 (design D12): PCP and UPnP are link-scoped,
+/// so a device behind a Satellite sends them *there* and nowhere else, and the
+/// Satellite has no authority to open a WAN port it does not own.
+///
+/// Cached for the life of the daemon: the role is fixed at flash — runtime role
+/// changes are an explicit non-goal (§9) — and this is consulted on every PCP
+/// datagram, where re-reading the marker would put a blocking file read on the
+/// packet path.
+fn is_satellite() -> bool {
+    static IS_SATELLITE: OnceLock<bool> = OnceLock::new();
+    *IS_SATELLITE.get_or_init(|| {
+        crate::satellite::load_role().role == crate::satellite::RouterRole::Satellite
+    })
+}
+
+/// Whether this refusal should be logged: the first request from a client, then
+/// once per [`REFUSAL_LOG_INTERVAL`] after it. Records `now` as the client's
+/// last-logged time when it says yes.
+///
+/// Split from [`log_satellite_refusal`] so the throttle is unit-testable without
+/// the process-global map or a real clock.
+fn should_log_refusal(
+    seen: &mut HashMap<Ipv4Addr, Instant>,
+    peer: Ipv4Addr,
+    now: Instant,
+) -> bool {
+    if let Some(prev) = seen.get(&peer) {
+        if now.saturating_duration_since(*prev) < REFUSAL_LOG_INTERVAL {
+            return false;
+        }
+    }
+    seen.insert(peer, now);
+    true
+}
+
+/// Record one Satellite refusal for `peer`, at most once per
+/// [`REFUSAL_LOG_INTERVAL`] per client.
+///
+/// `warn`, not `debug`. The failure this guards against is a device — a StartOS
+/// server, most consequentially — quietly never getting the ports it asked for,
+/// with nothing anywhere saying why. An operator reading the log is one of the
+/// two places D12 requires that answer to appear; the other is the UI.
+fn log_satellite_refusal(peer: Ipv4Addr, kind: &str) {
+    static LAST: OnceLock<Mutex<HashMap<Ipv4Addr, Instant>>> = OnceLock::new();
+    let mut seen = LAST
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    if !should_log_refusal(&mut seen, peer, Instant::now()) {
+        return;
+    }
+    tracing::warn!(
+        "refusing {kind} request from {peer}: automatic port forwarding is not \
+         available on a satellite router. Configure the port by hand on the core \
+         router's Published Ports page."
+    );
+}
+
 /// Labels forwards by which listener they arrived through — the trait itself
 /// can't distinguish a PCP MAP from a UPnP AddPortMapping.
 struct Via {
@@ -1039,6 +1124,15 @@ impl GatewayBackend for Via {
     }
 
     async fn is_known_client(&self, peer: Ipv4Addr) -> bool {
+        // D12, v1: a Satellite refuses every mapping request, and says so. This
+        // is the one chokepoint — the shared core consults it before MAP, before
+        // the SNI path, and before all three UPnP actions — so refusing here
+        // turns into a PCP NOT_AUTHORIZED and a UPnP 606 fault without any
+        // request reaching `add_forward`. The client is told; it does not wait.
+        if is_satellite() {
+            log_satellite_refusal(peer, self.kind);
+            return false;
+        }
         let Some(client) = self.pc.authorized_client(peer).await else {
             return false;
         };
@@ -2713,6 +2807,41 @@ config redirect 'dns_override_lan'
             pc.lease_remaining("apf_aabbccddeeff_8443"),
             None,
             "its lease is dropped too, so the sweep won't re-grace it"
+        );
+    }
+
+    #[test]
+    fn refusal_log_is_throttled_per_client() {
+        // D12: a satellite must say why it refuses, but PCP clients renew every
+        // few minutes — so the *first* request from each client logs, and
+        // repeats inside the interval stay quiet.
+        let mut seen = HashMap::new();
+        let a = Ipv4Addr::new(192, 168, 130, 20);
+        let b = Ipv4Addr::new(192, 168, 130, 21);
+        let t0 = Instant::now();
+
+        assert!(should_log_refusal(&mut seen, a, t0), "first refusal logs");
+        assert!(
+            !should_log_refusal(&mut seen, a, t0 + Duration::from_secs(1)),
+            "a renewal seconds later stays quiet"
+        );
+        assert!(
+            !should_log_refusal(
+                &mut seen,
+                a,
+                t0 + REFUSAL_LOG_INTERVAL - Duration::from_secs(1)
+            ),
+            "still quiet just inside the interval"
+        );
+        assert!(
+            should_log_refusal(&mut seen, a, t0 + REFUSAL_LOG_INTERVAL),
+            "logs again once the interval has passed"
+        );
+
+        // Throttling is per client: a second device is not silenced by the first.
+        assert!(
+            should_log_refusal(&mut seen, b, t0 + Duration::from_secs(1)),
+            "a different client logs on its own first refusal"
         );
     }
 

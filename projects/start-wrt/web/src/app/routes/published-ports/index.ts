@@ -1,6 +1,6 @@
 import { Component, computed, inject, signal } from '@angular/core'
 import { TuiResponsiveDialogService } from '@taiga-ui/addon-mobile'
-import { TuiButton, TuiTitle } from '@taiga-ui/core'
+import { TuiButton, TuiNotification, TuiTitle } from '@taiga-ui/core'
 import { TuiSkeleton } from '@taiga-ui/kit'
 import { TuiHeader } from '@taiga-ui/layout'
 import { PolymorpheusComponent } from '@taiga-ui/polymorpheus'
@@ -39,7 +39,19 @@ import { confirmVpnExposedPort } from 'src/app/services/vpn-exposed-port'
       [tuiSkeleton]="loading()"
       (edit)="edit($event)"
     ></table>
-    @if (service.automaticPortUses().length) {
+    @if (isSatellite()) {
+      <header tuiHeader="h6">
+        <hgroup tuiTitle>
+          <h3>{{ 'Automatic' | i18n }}</h3>
+        </hgroup>
+      </header>
+      <div tuiNotification appearance="info" [style.margin-block.rem]="1">
+        {{
+          'Not available on a satellite router. Devices here cannot open their own ports via UPnP or PCP, and requests to do so are refused. To expose a device behind this router, add the port by hand on the core router.'
+            | i18n
+        }}
+      </div>
+    } @else if (service.automaticPortUses().length) {
       <header tuiHeader="h6">
         <hgroup tuiTitle>
           <h3>{{ 'Automatic' | i18n }}</h3>
@@ -64,6 +76,7 @@ import { confirmVpnExposedPort } from 'src/app/services/vpn-exposed-port'
     TuiButton,
     PublishedPortsTable,
     AutomaticPortUsesTable,
+    TuiNotification,
     TuiSkeleton,
     i18nPipe,
   ],
@@ -87,6 +100,13 @@ export default class PublishedPorts {
   // Fullname of the default (LAN-owning) profile — devices with no explicit
   // security profile belong to it.
   protected readonly defaultProfile = signal('')
+  // True on a satellite router, which refuses UPnP/PCP entirely (design D12).
+  // The automatic-forwards section is then replaced by a note: on a satellite
+  // the list is always empty, and an empty list would hide the section
+  // altogether — leaving a user whose device cannot open a port with nothing
+  // anywhere explaining why. Defaults false, so a failed lookup shows the
+  // ordinary Core view rather than wrongly claiming the feature is unavailable.
+  protected readonly isSatellite = signal(false)
 
   constructor() {
     this.loadDependencies()
@@ -104,6 +124,7 @@ export default class PublishedPorts {
     ])
 
     this.loadVpnProfiles()
+    this.loadRole()
     // IPv6 port forwarding requires WAN IPv6 + LAN IPv6, and crucially a real
     // global address delegated to the WAN — without a GUA prefix no LAN device
     // can be reachable, so ULA/link-local-only WANs must not offer IPv6.
@@ -115,6 +136,13 @@ export default class PublishedPorts {
     // Use DDNS hostname if available, otherwise WAN IP
     const ddnsHostname = ddns?.enabled ? ddns.hostname || null : null
     this.ipv4EndpointHost.set(ddnsHostname || wanIpv4?.assigned_ip || null)
+  }
+
+  private async loadRole() {
+    // Degrades to the Core view: an older backend without `satellite.get-role`
+    // rejects the call, and a standalone Core is the common case anyway.
+    const role = await this.api.satelliteGetRole().catch(() => null)
+    this.isSatellite.set(role?.role === 'satellite')
   }
 
   private async loadVpnProfiles() {

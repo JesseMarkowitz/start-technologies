@@ -23,6 +23,7 @@ import {
   VpnServerSetArgs,
   VpnServers,
   WifiConfig,
+  RouterRoleRes,
   ScheduleWindow,
   ProfileId,
   ProfileIdOpt,
@@ -166,6 +167,10 @@ export class LiveApiService extends ApiService {
 
   async vpnServerPeerDelete(params: VpnServerPeerDeleteArgs): Promise<null> {
     return this.rpc.request({ method: 'vpn-server.peer-delete', params })
+  }
+
+  async satelliteGetRole(): Promise<RouterRoleRes> {
+    return this.rpc.request({ method: 'satellite.get-role', params: {} })
   }
 
   async wifiGet(): Promise<WifiConfig> {
