@@ -1,9 +1,20 @@
 # Satellite Router — Implementation Status & Next Steps
 
 Companion to `satellite-router.md` (design) and `satellite-router-testplan.md`. Tracks what has
-landed on the `start-wrt/satellite-router` branch and what remains, in the design's phase order
+landed on the `start-wrt/satellite-router-v2` branch and what remains, in the design's phase order
 (§8). This is a large feature spanning new backend modules, security-critical auth, WAN-less
 networking, and a new Angular UI; it is deliberately staged.
+
+**State as of 2026-09-21.** Filed upstream as `Start9Labs/start-technologies#4043`, awaiting a
+maintainer response. The branch merges cleanly onto upstream `master` (`84734c818`) with one trivial
+conflict in `web/.../i18n/dictionaries/en.ts`, where upstream's #3939 strings took IDs 555–557 and
+the satellite Published-Ports string renumbers to 558. Verified green in the capped container at
+`opt-level 0`: **609 tests, 0 failures**, including all nine `satellite.rs` tests, five `vpn_site.rs`
+tests and 31 in `port_control.rs`. Nothing has been exercised on two physical routers; the second
+unit has not arrived.
+
+The superseded `start-wrt/satellite-router` branch (pre-rebase duplicate, byte-identical satellite
+files) is retired.
 
 ## Landed on this branch
 

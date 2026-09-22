@@ -4,7 +4,7 @@ The **minimal** on-hardware test that validates the core mechanism before the fu
 is built: a **site-to-site WireGuard tunnel carrying a routed prefix, attached to the Core's profile
 zone, gives a WAN-less satellite Internet egress through the Core with that profile's policy.**
 
-This uses the two manual provisioning commands landed on the `start-wrt/satellite-router` branch
+This uses the two manual provisioning commands landed on the `start-wrt/satellite-router-v2` branch
 (`satellite provision-core-tunnel` / `provision-satellite-tunnel`). Pairing/auth/sync are **not**
 needed for this test — the operator generates keys and runs the commands by hand.
 
@@ -22,12 +22,12 @@ needed for this test — the operator generates keys and runs the commands by ha
 
 ## Addressing used in this example
 
-| | value |
-|---|---|
-| Underlay (transit link) | C1 `10.42.0.1/24`, S1 `10.42.0.2/24` |
-| Tunnel wg addresses | C1 `192.168.130.1`, S1 `192.168.130.2` |
+|                              | value                                                      |
+| ---------------------------- | ---------------------------------------------------------- |
+| Underlay (transit link)      | C1 `10.42.0.1/24`, S1 `10.42.0.2/24`                       |
+| Tunnel wg addresses          | C1 `192.168.130.1`, S1 `192.168.130.2`                     |
 | Routed to S1 over the tunnel | `192.168.130.2/32` (S1's wg host — for the self-ping test) |
-| Core listen port | `51900` |
+| Core listen port             | `51900`                                                    |
 
 **Important:** `192.168.130.0/24` must **not** be any Core profile's own subnet (satellites own
 their own subnets — the design's routed-attachment). Pick a block the Core doesn't use locally.
@@ -104,6 +104,7 @@ its WAN; and a WAN-less satellite reaches the Internet purely through the Core �
 question, on real hardware.
 
 Extra checks:
+
 - On C1, `wg show sat_s1_guest` shows the handshake and the `192.168.130.2/32` allowed-ip.
 - Tighten the `guest` profile's WAN access on C1 and confirm S1's egress is filtered the same way
   (proves policy is enforced at the Core, not bypassed).
@@ -124,6 +125,7 @@ have S1 serve the profile `/24` on one of its ports.
 
    This creates interface `psat_guest` (`br-lan.130`, `192.168.130.1/24`), a DHCP pool, puts `lan2`
    on VLAN 130, and joins the `lan` zone.
+
 3. **Verify:** plug a laptop into S1 `lan2`. It should get a `192.168.130.x` lease, reach the
    Internet (through the tunnel → Core → Core WAN), and be subject to the `guest` profile's policy.
 

@@ -1,5 +1,7 @@
 # Open issues that collide with the satellite-router work
 
+> **Superseded by the filed issue (2026-09-21).** Research note. Its conclusions are folded into the issue attachment (`SupportingEvidenceForSatelliteRouter.md`) and into the `Related open issues` line of #4043. Kept for the per-issue detail behind them; the attachment is authoritative.
+
 Working note. Six open issues bear on the satellite design without being about it. For each: what it
 actually says, what it does to the satellite plan, and what we might do differently because of it.
 #3670 (auth) and the StartTunnel convergence issues (#3681/#3682) are large enough to have their own

@@ -1,5 +1,7 @@
 # StartWRT and StartTunnel — what overlaps, and what the satellite work should take
 
+> **Superseded by the filed issue (2026-09-21).** Research note. Its conclusions are folded into the issue attachment (`SupportingEvidenceForSatelliteRouter.md`, §1 alternative 7 and §2 concern 7). Kept for the detail behind them; the attachment is authoritative.
+
 Working note. Explains what StartTunnel is, why a satellite router is structurally the same shape,
 what already exists there that the satellite design proposes to build from scratch, and what should
 _not_ be borrowed. Code references are against `master` as of 2026-09-20.

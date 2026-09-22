@@ -1,5 +1,7 @@
 # Satellite auth and issue #3670 — what is being retired, and what to build instead
 
+> **Superseded by the filed issue (2026-09-21).** Research note. Its conclusions are folded into the issue attachment (`SupportingEvidenceForSatelliteRouter.md`, §3 implementation concerns — the management RPC boundary). Kept for the detail behind them; the attachment is authoritative.
+
 Working note. Explains what StartWRT's authentication looks like today, what #3670 plans to replace
 it with, and where satellite pairing auth should attach. Code references are against `master` as of
 2026-09-20.
