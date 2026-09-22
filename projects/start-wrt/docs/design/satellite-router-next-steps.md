@@ -13,6 +13,11 @@ the satellite Published-Ports string renumbers to 558. Verified green in the cap
 tests and 31 in `port_control.rs`. Nothing has been exercised on two physical routers; the second
 unit has not arrived.
 
+`build/stage-files.sh` now lists `role.json` and `satellites.json` in the sysupgrade keep set —
+without them a satellite forgot its role on update and booted as a Core, and a Core forgot its
+pairings. The same list feeds `sysupgrade --create-backup`, so this is also what puts pairing into
+the backup (D16).
+
 The superseded `start-wrt/satellite-router` branch (pre-rebase duplicate, byte-identical satellite
 files) is retired.
 

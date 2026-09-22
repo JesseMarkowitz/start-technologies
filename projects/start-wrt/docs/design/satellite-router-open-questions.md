@@ -1,58 +1,117 @@
 # Satellite Router — Questions Parked for Implementation
 
 Working notes. **Not part of the issue package** (`satellite-router-issue-form.md` +
-`SupportingEvidenceForSatelliteRouter.md`) — these are decisions to settle when the work is
-designed and coded, recorded here so they are not lost between raising the issue and building it.
+`SupportingEvidenceForSatelliteRouter.md`) — decisions to settle when the work is designed and
+coded, recorded here so they are not lost between raising the issue and building it. §1 and §2 are
+resolved and are carried into the design of record as D16 and D17; §3 is the surveyed
+implementation surface, still open.
 
 ---
 
 ## 1. Backup, restore, and a satellite that is ahead of its Core
 
-Raised 2026-09-21.
+Raised 2026-09-21. **Resolved 2026-09-22.**
 
-Config sync carries a monotonic generation number, and a satellite refuses a snapshot older than
-the one it has applied. That anti-rollback rule collides with restoring a Core from backup:
+### What the code actually did
 
-> The Core fails. A satellite is on generation 26. The Core's most recent backup is from
-> generation 25. The restored Core pushes 25; the satellite refuses it as stale, and the two are
-> stuck.
+`backup.rs:57` runs `sysupgrade --create-backup`; `update.rs:300` runs plain `sysupgrade`. Both are
+governed by the same set — OpenWrt's default (`/etc/config/*`) plus `/lib/upgrade/keep.d/startwrt`,
+written by `build/stage-files.sh`. That list did not include `role.json` or `satellites.json`, so
+three things were true before this was fixed:
 
-The likely resolution, to be confirmed rather than assumed:
+- A satellite that took a firmware update **forgot it was a satellite**. `load_role()` defaults to
+  Core, so it would reboot as a Core, run the Core-only block and start serving its own LAN.
+- A Core that took a firmware update **forgot its satellites**, orphaning every pairing from the
+  authoritative side.
+- A Core's backup carried **no pairing material**, so a restore could not restore the network.
 
-- **A satellite holds no authoritative state.** Everything it has came from the Core. So the
-  recovery path is to factory-reset the satellites, restore the Core, and re-pair — after which the
-  system is exactly as it was, minus whatever the Core lost between its last backup and the failure.
-- **The Core must stay authoritative even when it is behind.** Changes made after the last backup
-  are lost, by design. A satellite holding a newer generation must therefore not be able to rejoin a
-  Core restored from an older one; it is reset and re-paired instead.
-- If the backup is recent enough to be in sync, satellites should simply reconnect when the Core
-  comes back, exactly as they would after a power cut.
+Both paths are now listed in keep.d. On shipped firmware the files do not exist, so the entries are
+inert until this feature lands.
 
-Open: whether a satellite is worth backing up at all (probably not — a failed satellite is replaced,
-comes up blank and syncs), and how the "you must reset your satellites" state is detected and
-communicated rather than presenting as a silent refusal.
+### One list, two purposes
+
+keep.d means both "survives an upgrade" and "is included in a portable backup file," and there is no
+way to say one without the other. A satellite's bearer token and WireGuard private key must survive
+an upgrade; whether they belong inside a backup file someone may copy off the router is the #3662
+question.
+
+**Decision: put the material in the backup and rely on #3662 encrypting backups with the admin
+password.** A backup that cannot restore the network is not a backup, and the alternative — omitting
+pairing — forces physical access to every satellite on the day the Core has already failed. If
+#3662's threat model later says bearer tokens must never travel, the answer is a second mechanism
+(preserved-but-excluded), not dropping them from keep.d and losing them on upgrade.
+
+### The generation collision
+
+The scenario: a satellite is on generation 26, the Core's backup is from 25, the restored Core
+pushes 25, and the satellite refuses it as stale.
+
+**Decision: the Core catches up rather than the satellite resetting.** On reconnect the satellite
+reports its applied generation; if the Core's is lower it raises its own counter above it and pushes
+a full snapshot carrying its restored content. The satellite accepts it as newer and converges.
+
+The Core stays authoritative and changes made after the backup are lost by design — the intended
+outcome — but no satellite has to be factory-reset and re-paired to get there. The anti-rollback
+property survives: it exists to stop a _replayed old_ snapshot from reinstating a deleted password,
+and an attacker cannot mint a generation above the satellite's without the Core's credentials. An
+attacker who has those is past this control anyway.
+
+If the restored backup is already in step with its satellites, they simply reconnect, as after a
+power cut.
+
+### What must be visible
+
+A silent convergence is the failure mode to avoid. Both ends should say that the Core was restored
+from a backup older than the configuration the satellite was running, and that settings may have
+changed. This is what makes the loss deliberate rather than mysterious.
+
+### Satellites are not backed up
+
+A satellite holds nothing authoritative, so a failed one is replaced, comes up blank and syncs.
+Two things are genuinely lost on a reset and should be documented rather than discovered: its
+**DHCP leases** (reservations are Core-owned and survive; dynamic leases do not, so devices behind
+that satellite take new addresses) and its **local activity log**.
+
+### Follow-on
+
+When the feature ships, `docs/src/backups.md` ("What Is Included") needs a row for satellite
+pairings, and `docs/src/updating.md` needs the multi-router ordering from §2.
 
 ---
 
 ## 2. Firmware upgrades across a Core and its satellites
 
-Raised 2026-09-21.
+Raised 2026-09-21. **Resolved 2026-09-22.**
 
-Proposed approach, security-first and deliberately blunt:
+The original proposal was blunt and security-first: upgrade the Core, let satellites drop off as
+incompatible, flash each one, and re-pair from scratch. With `role.json` preserved (§1) the reset is
+no longer necessary — a satellite keeps its role and its pairing across its own update and
+reconnects.
 
-1. Upgrade the **Core** first.
-2. Satellites running the older firmware drop off as incompatible — the version check is explicit,
-   not a best-effort negotiation.
-3. Each satellite is then flashed, comes up factory-reset and blank, and is re-paired to the Core.
+### The deadlock in the strict version
 
-The cost is real and should be stated plainly: **every upgrade is a whole-fleet event**, and every
-satellite goes through initial enrollment again. That is painful in proportion to the number of
-satellites, which today is one.
+A satellite has no WAN. It reaches the Internet only through the Core. If the Core is upgraded
+first, finds the satellite incompatible, and that refusal **tears down the tunnels**, the satellite
+loses egress — and can no longer download its own firmware. What should have been an in-app update
+becomes a physical microSD reflash, on a box that may be in a garage.
 
-Open: whether a narrower compatibility window (a satellite may lag the Core by one minor version, or
-the sync payload is versioned independently of the firmware) buys enough to be worth the extra
-surface. Alternate approaches welcome; the security argument for the blunt version is that no code
-path has to be correct across a version skew.
+### Decision
+
+- **Upgrade the Core first.** It is the authority, and the ordering stays.
+- **Version the sync payload, not the firmware.** Skew is then handled at exactly one interface
+  instead of everywhere, which is what the original security argument was really asking for.
+- **A version mismatch refuses to sync; it never drops the peer.** The transport — tunnel, routing,
+  egress — stays compatible across versions. A satellite on an unsupported payload version keeps
+  running its last applied configuration, keeps routing its clients, keeps reaching the Internet,
+  and can therefore update itself.
+- **The Core surfaces which satellites are behind**, and what that means: their configuration is
+  frozen at the last generation they accepted until they are updated.
+
+### Still open
+
+Whether the Core should be able to push firmware to a satellite rather than each satellite fetching
+its own, given that every byte travels through the Core regardless. That is a convenience decision,
+not a correctness one, and it can wait for the update flow to be built.
 
 ---
 

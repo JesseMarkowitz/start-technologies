@@ -172,6 +172,12 @@ cat > "${FILES_DIR}/lib/upgrade/keep.d/startwrt" << 'KEEPEOF'
 # Per-device IPv6 address history (same atomic-write pattern) — the stability
 # evidence the ipv6_tracker's election needs across reboots.
 /etc/startwrt/ipv6_neighbors.json
+# Router role. Absent, load_role() returns Core, so a satellite that updated
+# would boot as a Core and start serving its own LAN.
+/etc/startwrt/role.json
+# Paired satellites. The Core is the only holder of these records; losing them
+# orphans every satellite from the authoritative side.
+/etc/startwrt/satellites.json
 KEEPEOF
 
 echo "==> Staging complete."
