@@ -21,6 +21,35 @@ the backup (D16).
 The superseded `start-wrt/satellite-router` branch (pre-rebase duplicate, byte-identical satellite
 files) is retired.
 
+## Resume here (paused 2026-09-22)
+
+Work is paused on two external dependencies, not on anything in the tree:
+
+1. **A maintainer response to #4043.** The repo's triage workflow routes issue type `Feature` to
+   `FEATURE_OWNER` regardless of project, so the request is assigned to the feature owner rather
+   than to the StartWRT code owner who wrote most of the tracker. Both perspectives matter — one
+   owns the product decision, the other owns the code this lands in.
+2. **The second router.** Everything that would prove the design needs two boxes.
+
+When picking back up, in order of value:
+
+- **The hardware bring-up test** (`satellite-router-hardware-test.md`) the moment a second unit
+  exists. WAN-less egress is the premise the rest of the design rests on and it is still unproven.
+- **Decide D14 (routed vs. bridged) by measurement** on that same two-router bench: VXLAN-over-
+  WireGuard throughput on the K1, what MTU actually survives, and whether `.local` resolves across
+  the boxes each way. The issue asks the maintainers to rule on this; arriving with data is
+  stronger than arriving with a question.
+- **Then the phases below**, which are otherwise unchanged.
+
+**An unrelated first contribution, if one is wanted while waiting.** #3862 (the delegated IPv6
+prefix size is never read from netifd) is a real prerequisite for the IPv6 phase, and it is
+testable without satellites — but only against a real prefix delegation. Where an ISP does not
+provide one, a DHCPv6 server on the WAN port can delegate `/48`, `/56` and `/64` in turn, which is
+_better_ than a live ISP for this particular bug: the `/64` case is the one that silently produces
+no GUA on shipped defaults, and no ISP handing out a `/56` would let you reproduce it. Failing
+that, #3681 (lift shared WireGuard key and PSK handling into `shared-libs/`) needs no network at
+all and satellite pairing is a direct beneficiary.
+
 ## Landed on this branch
 
 - **Design** — `docs/design/satellite-router.md` (approved; decisions locked), this file, and the
