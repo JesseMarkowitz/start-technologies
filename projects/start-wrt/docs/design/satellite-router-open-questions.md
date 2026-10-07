@@ -155,6 +155,12 @@ enforce a single `/24`/`/16`. Open: the allocation scheme, the supported maximum
 the user's chosen LAN range cannot accommodate it, and how that error surfaces _before_ the admin
 commits to a topology.
 
+**Also the WAN subnet (2026-09-28).** A Core behind an ISP router has a private WAN subnet (for
+example `192.168.20.0/24`). `guard_subnet_collision` compares profiles only with each other, not with
+the WAN, and no WAN check was found in `lan.rs` or `wan.rs`. The allocator hands out
+`profiles × (1 + satellites)` `/24`s, so it is more likely than a single router to land on the
+upstream range; it must exclude the WAN subnet, and cope with that subnet changing.
+
 ### 6. VLAN tag consistency across routers.
 
 **Believed resolved (2026-09-21).** A satellite is paired blank and receives its tags from the Core
@@ -181,6 +187,10 @@ since landed regulatory-country support (`wifi.get`/`wifi.set` gain `country`, p
 `wifi.regulatory` reporting the channels an AP may currently use per band), which gives the Core the
 data it would need to coordinate. Open: does the Core plan channels across satellites, or is it left
 to the user — and if left to the user, what does the UI tell them? This extends #3466.
+
+**Answered by D20 (2026-09-28).** The Core plans every router's channels and widths from scans each
+router reports, and pushes them; satellites never select their own (design §18). Still open:
+whether re-planning should ever run without the admin asking.
 
 ### 11. Clock and certificates on a WAN-less satellite.
 

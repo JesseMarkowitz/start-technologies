@@ -23,6 +23,7 @@
 //!   a satellite in the registry only; it does **not** yet bring up tunnels or
 //!   push config, and says so in its response rather than implying otherwise.
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 
@@ -97,7 +98,10 @@ pub struct PairedSatellite {
 pub struct SyncSnapshot {
     pub generation: u64,
     pub ssid: String,
-    pub admin_key: String,
+    /// The Core's regulatory country. Unset runs the world regulatory domain.
+    pub country: Option<String>,
+    /// The Core's channel plan for this satellite, keyed by the satellite's radio name.
+    pub radios: BTreeMap<String, RadioPlan>,
     pub profiles: Vec<ProfileSpec>,
     pub passwords: Vec<PasswordSpec>,
     pub ports: Vec<PortSpec>,
@@ -119,6 +123,16 @@ pub struct ProfileSpec {
     pub ip6assign: Option<u8>,
     pub wan_access: String,
     pub outbound: String,
+}
+
+/// One radio's assignment in the Core's channel plan. A satellite never selects its own.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RadioPlan {
+    pub band: String,
+    pub channel: u32,
+    /// OpenWrt `htmode`, such as `HE80`.
+    pub htmode: String,
 }
 
 /// One Wi-Fi password → profile mapping (per-PSK dynamic VLAN, no RADIUS).
@@ -828,7 +842,25 @@ mod tests {
         let snap = SyncSnapshot {
             generation: 7,
             ssid: "Home".into(),
-            admin_key: "adminpw".into(),
+            country: Some("US".into()),
+            radios: BTreeMap::from([
+                (
+                    "radio0".into(),
+                    RadioPlan {
+                        band: "2g".into(),
+                        channel: 6,
+                        htmode: "HE20".into(),
+                    },
+                ),
+                (
+                    "radio1".into(),
+                    RadioPlan {
+                        band: "5g".into(),
+                        channel: 149,
+                        htmode: "HE40".into(),
+                    },
+                ),
+            ]),
             profiles: vec![ProfileSpec {
                 interface: "guest".into(),
                 vlan_tag: 101,
@@ -850,7 +882,7 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let back: SyncSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snap, back);
-        assert!(json.contains("\"adminKey\""));
         assert!(json.contains("\"vlanTag\""));
+        assert!(json.contains("\"radio1\":{\"band\":\"5g\",\"channel\":149,\"htmode\":\"HE40\"}"));
     }
 }

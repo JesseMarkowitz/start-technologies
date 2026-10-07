@@ -18,6 +18,8 @@ Covers the foundation slice landed so far (`backend/ctrl/src/satellite.rs`):
 - ✅ `add_then_remove_satellite` — registry add + idempotent remove.
 - ✅ `rejects_duplicate_name_and_key` — no duplicate label or public key in the registry.
 - ✅ `role_marker_round_trips` — role marker JSON serde round-trip.
+- ✅ `sync_snapshot_round_trips` — the semantic snapshot round-trips in camelCase, including the
+  country and the per-radio channel plan (D20). Added 2026-09-28.
 
 Site-to-site config generation (`backend/ctrl/src/vpn_site.rs`):
 
@@ -29,7 +31,9 @@ Site-to-site config generation (`backend/ctrl/src/vpn_site.rs`):
 
 **To add as each phase lands:** the routed-attachment source-rule + table-route emission in
 `profiles.rs`; the semantic-payload serializer/regenerator; the enrollment-token validation;
-generation-number monotonicity.
+generation-number monotonicity; the Core channel planner (D20: routers that hear each other well
+never share a block, pins are honoured, width narrows when blocks run out, the same inputs always give
+the same plan); the D18 nftables file parses and its empty set means dark.
 
 ## Layer 2 — CLI / config-generation functional tests
 
@@ -71,11 +75,42 @@ running dev daemon (`STARTWRT_DEV_PASSWORD=…`). Assert on emitted UCI / JSON, 
    confirm the clamp/MTU on the Core ingress.
 9. ⛔ **Config propagation** — add/change/delete a profile or password at C1 → S1 converges;
    `generation_applied` advances; the UI shows S1 up-to-date.
-10. ⛔ **Staleness / revocation** — remove a password at C1 while S1 is offline; on reconnect S1
-    stops accepting it; UI flags the interim staleness.
-11. ⛔ **Failover** — Core/tunnel down → S1 clients lose Internet/LAN (expected island); recovery on restore.
+10. ⛔ **Staleness / revocation** — remove a password at C1 while S1 is offline. The revoked
+    password is never accepted: not while S1 is dark (D18), and not between reconnect and
+    reconcile. After reconcile S1 rejects it; UI flags the interim staleness.
+11. ⛔ **Failover (D18 fail-closed)** — cut the backhaul: within the liveness threshold S1 stops
+    broadcasting the SSID and its profile ports stop serving; its status page stays reachable over
+    the uplink. Restore: S1 comes back only after it has reconciled to C1's current generation, and a
+    flapping backhaul does not flap the SSID. Separately, pull **C1's WAN** only: S1 must stay up.
+    Also: run `fw4 reload` on S1 while it is live and while it is dark. It must come out dark and
+    return only when the daemon re-affirms. Record whether going dark restarts the radios: note
+    each band's channel before and after a dark/resume cycle.
 12. ⛔ **Unpair** — unpair S1 at C1 → its tunnels drop and its management auth is revoked immediately.
 13. ⛔ **Daisy check (negative)** — confirm hub-and-spoke only; a satellite behind a satellite is not supported.
+14. ⛔ **Country and channels (D20)** — set a country on C1 → S1's `iw reg get` shows it and its
+    channel list matches C1's `wifi.regulatory`. Clear it → both fall back to the world subset.
+    Pair S1 → it scans while dark, reports, and comes up on the channels C1 planned; `hostapd` on
+    S1 never runs automatic selection (its config carries explicit channels). C1's own radios move
+    to the plan too. Power-cycle C1 and S1 together five times: the channels are the same every
+    time. Pin S1's 5 GHz from C1 → S1 moves and the planner re-plans around it; pin one overlapping
+    C1 → C1 warns. Re-plan previews before applying; record how long clients on a moved radio are
+    cut off. Check S1's scan sees C1's beacons and their signal.
+15. ⛔ **Adoption (D21)** — fresh S1, WAN cabled to a C1 LAN port serving a profile, power on: S1
+    brings up no setup Wi-Fi; C1 lists it and asks to convert the port, naming the devices on it;
+    nothing changes before approval. Approve, type S1's sticker password → S1 joins. A wrong
+    password is refused and does not lock the port.
+16. ⛔ **Recovery mode (D22)** — cut the backhaul. On S1's LAN port and, 1 minute later, on
+    `StartWRT-Recovery-<suffix>`: `router.lan` shows `Satellite <name> — recovery mode`; nothing else is
+    reachable; logs show link and tunnel state but no client leases or associations. Restart
+    recovers once the cable is back. Factory reset → S1 reboots broadcasting nothing, the phone
+    falls back to the shared SSID on C1, C1 lists S1 as new and offers the saved configuration or a
+    new satellite, and S1's sticker password is required again. A phone that knew the shared SSID
+    never joins the recovery network by itself; a profile password on the recovery network is
+    refused. S1's sticker password is refused on the shared SSID in normal operation.
+    With a third router: power C1 off → S1 and S2 both go dark with distinct recovery SSIDs, and each
+    accepts only its own sticker password. Reset S1 with its WAN cable pulled → its setup page
+    reports no cable and asks satellite-or-main-router; plug the cable in → it takes its setup
+    network down and C1 lists it.
 
 ## Security test cases (Layer 3, from design §12)
 
@@ -85,3 +120,7 @@ running dev daemon (`STARTWRT_DEV_PASSWORD=…`). Assert on emitted UCI / JSON, 
   authenticated management tunnel.
 - ⛔ Rollback: an older-generation snapshot is rejected.
 - ⛔ Tap/inject on the backhaul: only ciphertext observed; injected frames dropped.
+- ⛔ Non-satellite on the backhaul (D19): a laptop plugged into the backhaul switch, and into a
+  cable unplugged from S1, gets no address, no Internet, no LAN and no router UI; the Core flags it.
+- ⛔ Switched backhaul (D19): C1 → switch → S1 passes the Layer-3 suite unchanged; with a third
+  router, C1 → switch → S1 + S2 does too.

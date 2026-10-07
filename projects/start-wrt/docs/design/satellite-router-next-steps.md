@@ -8,7 +8,9 @@ networking, and a new Angular UI; it is deliberately staged.
 **State as of 2026-09-21.** Filed upstream as `Start9Labs/start-technologies#4043`, awaiting a
 maintainer response. The branch merges cleanly onto upstream `master` (`84734c818`) with one trivial
 conflict in `web/.../i18n/dictionaries/en.ts`, where upstream's #3939 strings took IDs 555–557 and
-the satellite Published-Ports string renumbers to 558. Verified green in the capped container at
+the satellite Published-Ports string renumbers to 558. _Update 2026-09-28:_ against the
+`start-wrt/v1.2.0` tag the conflict is the same, but #4095's Root CA strings now hold 558–559, so
+the satellite string renumbers to **560**. Verified green in the capped container at
 `opt-level 0`: **609 tests, 0 failures**, including all nine `satellite.rs` tests, five `vpn_site.rs`
 tests and 31 in `port_control.rs`. Nothing has been exercised on two physical routers; the second
 unit has not arrived.
@@ -35,10 +37,12 @@ When picking back up, in order of value:
 
 - **The hardware bring-up test** (`satellite-router-hardware-test.md`) the moment a second unit
   exists. WAN-less egress is the premise the rest of the design rests on and it is still unproven.
-- **Decide D14 (routed vs. bridged) by measurement** on that same two-router bench: VXLAN-over-
+- **D14 (routed vs. bridged): talk to the StartWRT maintainers first** (decided 2026-09-28), then
+  measure on that same two-router bench: VXLAN-over-
   WireGuard throughput on the K1, what MTU actually survives, and whether `.local` resolves across
-  the boxes each way. The issue asks the maintainers to rule on this; arriving with data is
-  stronger than arriving with a question.
+  the boxes each way. For the bridged option, also cable a deliberate second path and time how
+  long loop protection takes to catch it (design §6 risk 12). The issue asks the maintainers to
+  rule on this; arriving with data is stronger than arriving with a question.
 - **Then the phases below**, which are otherwise unchanged.
 
 **An unrelated first contribution, if one is wanted while waiting.** #3862 (the delegated IPv6
@@ -80,7 +84,7 @@ all and satellite pairing is a direct beneficiary.
   automatic sync of these from the Core are still follow-ups.
 - **Config-sync contract + pairing primitives** — in `satellite.rs`: the semantic snapshot types
   (`SyncSnapshot`/`ProfileSpec`/`PasswordSpec`/`PortSpec`, camelCase, with a monotonic
-  `generation`), a pure free-UDP-port allocator (`allocate_listen_ports`), and the reserved
+  `generation`; `country` and the per-radio channel plan `radios`/`RadioPlan` added 2026-09-28 for D20), a pure free-UDP-port allocator (`allocate_listen_ports`), and the reserved
   inter-router transit block + `transit_addrs(index)`. 4 tests.
 - **API contract** — `API_CONTRACT.md` section for `satellite.*`.
 - **Automatic port forwarding refused, explicitly (D12, phase 7)** — `port_control.rs`: a Satellite
@@ -146,11 +150,29 @@ all and satellite pairing is a direct beneficiary.
 ## Phase 5 — Config sync (D5)
 
 - ☐ Semantic payload types + a Core-side builder from `profiles`/`wifi`/`ethernet`
-  (`{profiles, passwords, ports, ssid, adminKey}`) carrying a monotonic **generation** number.
+  (`{profiles, passwords, ports, ssid, country, radios}`; no admin password, D22) carrying a monotonic
+  **generation** number. `country` is the Core's `wifi.get` country; `radios` is this satellite's
+  part of the Core's channel plan (D20).
 - ☐ Push transport: Core as RPC client over the management tunnel (reuse `CliContext::call_remote` /
   `registry::call_registry_rpc`) → a satellite `satellite.apply` endpoint.
 - ☐ Satellite apply: regenerate local profiles via the existing `profiles.rs` rewrite chain against
   its own `/24`s; reject older generations; full-snapshot reconcile on reconnect + version heartbeat.
+- ☐ Satellite Wi-Fi apply (D20): set the country and each radio's planned channel and `htmode`
+  through the existing `wifi.rs` apply path; never `auto`. A country the satellite's regulatory
+  database lacks refuses the snapshot (the D17 path); a channel its radio refuses takes the plan's
+  next choice, else leaves that radio off, and is reported.
+- ☐ Satellite reports upstream (the D13 channel): radio inventory at pairing; on request, a scan per
+  radio (networks heard per channel with signal, channel busy time), taken while dark before the
+  first plan.
+- ☐ **Core channel planner (D20)** — new code, the largest piece D20 adds. Inputs: every router's
+  scans and the pins; output: channel and width per radio, separating routers that hear each other
+  well, then avoiding neighbours. Runs at pairing, on a country change and on request; shows the
+  plan before applying. Once a Core has a satellite, its own radios take the plan instead of
+  hostapd's automatic selection. Pure and unit-testable without hardware.
+- ☐ D18 enforcement: an nftables file shipped under `/usr/share/` (not the auto-included
+  `nftables.d/table-pre/`, which would load on a Core), loaded by an fw4 `config include` the daemon
+  writes on a satellite only. Its empty set means dark, so an fw4 reload fails closed. Staged by
+  `build/stage-files.sh` like the other `.nft` files.
 
 ## Phase 6 — Capability gating (D7) & UI
 
@@ -158,6 +180,14 @@ all and satellite pairing is a direct beneficiary.
   `vpn_server`, `published-ports`) read-only/disabled; keep `system`/`lan`/`devices` local.
 - ☐ Angular "Satellites" surface (`web/`): pair dialog + registry/status list (pattern-match
   `routes/published-ports`); wire `api.service.ts` + `live-api` + `mock-api`; `app.routes.ts`/settings.
+- ☐ Channel plan view: every router's radios with planned channel and width, a pin per radio from
+  the Core's `wifi.regulatory` list, a re-plan button that previews before applying, and a warning
+  when a pin overlaps a router it hears well.
+- ☐ Pairing asks for the country when the Core has none (D20: the world subset leaves 5 GHz one
+  80 MHz block, too little to separate more than two routers).
+- ☐ D19 enforcement: the backhaul role writes a UCI fw4 zone (input and forward dropped, no DHCP)
+  plus one WireGuard accept rule per satellite. Anything UCI cannot express follows D18's
+  file-plus-include rule, loaded only on a Core with a backhaul port.
 
 ## Phase 7 — v1 refusal path (D12) ✅ done
 
@@ -188,11 +218,52 @@ all and satellite pairing is a direct beneficiary.
   7's refusal. The `arrival_matches` substitute is a _replacement, not an inheritance_ — flag it in
   the phase 4 security review (design §15).
 
+## Adoption and recovery (D6, D21, D22)
+
+- ☐ Core announcement on every LAN port (IPv6 link-local, signed with the Core's key); a fresh
+  router that hears it on its WAN port keeps setup Wi-Fi off and waits to be adopted.
+- ☐ Core lists unadopted routers; on a port still serving a profile, asks "Make LAN port _n_ the
+  satellite port?" listing the devices that will lose access, and changes nothing until approved.
+- ☐ Adoption handshake keyed by the sticker Wi-Fi password (EEPROM) typed at the Core; pins both
+  WireGuard keys; the password never crosses the wire in the clear. Needs the phase 4 security
+  review.
+- ☐ A fresh router broadcasts nothing until it has checked its WAN port (link, a DHCP attempt, one
+  Core-announcement interval).
+- ☐ A fresh router that hears no Core and gets no Internet on its WAN port says so on its setup
+  page (no cable / cable but nothing answering / address but no Internet) and asks whether it is a
+  satellite with a cabling fault or a main router to set up.
+- ☐ Board with no EEPROM password: pre-adoption page on the satellite's LAN port at `router.lan`
+  showing a one-time adoption code.
+- ☐ Recovery mode: isolated recovery network on the LAN port and a `StartWRT-Recovery-<last 4 hex of WAN MAC>` 2.4 GHz SSID,
+  (the satellite's sticker password, one client, 1 minute after going dark — placeholder); DNS answers `router.lan` with the satellite; page
+  headed `Satellite <satellite-specific name> — recovery mode`, served over HTTP, no login;
+  diagnostics, filtered logs, restart, factory reset.
+- ☐ Factory reset on a satellite erases the overlay like the existing soft reset, and the reset
+  router waits for adoption broadcasting nothing. The Core treats it as new and offers "use the saved
+  configuration of _name_, or set up a new satellite" (also the path for replacing failed hardware).
+  Saved configurations stay until removed by hand, with their last-connected date; adopting a new
+  satellite offers a multi-select of unconnected saved configurations to delete, and deleting
+  revokes the old key.
+- ☐ Satellite status in the Core: state, last seen, firmware version when known, older-than-Core
+  marker (D17); its recovery SSID; each port's profile and link state; Wi-Fi client count, in total and per profile
+  (counts only; the device list is phase 8).
+- ☐ User docs, as updates to the existing StartWRT book (`docs/src/`) with the code: building a
+  Core with satellites end to end; the quick start (`initial-setup.md`) updated so adding a
+  satellite takes no reading; a failure-scenarios section; `wifi.md`/`factory-reset.md` saying
+  plainly what each sticker password opens and that replacing **Default** retires the Core's.
+  The failure-scenarios section also covers a reset satellite with an empty WAN port, whose setup
+  network is named `StartWRT` like an unrenamed main network.
+- ☐ **Hardware watchdog, as a separate upstream change** (benefits every StartWRT router): enable
+  the K1 watchdog in the device tree (disabled in the vendor `k1-x.dtsi`), and stop the vendor
+  driver self-feeding once user space opens `/dev/watchdog`. Testable on one router.
+
 ## Cross-cutting / packaging
 
 - ☐ `API_CONTRACT.md` updated as each endpoint lands; web `api.service` trio kept in sync (coupled-files rule).
 - ☐ Verify `wireguard-tools`/`kmod-wireguard` in `build/openwrt.diffconfig` (D10).
-- ☐ `CHANGELOG.md` + user docs (`docs/src/`) on user-visible completion.
+- ☐ `CHANGELOG.md` + user docs (`docs/src/`) on user-visible completion. The docs must state the
+  backhaul rule (design D19): the Core port that carries satellites, and any switch on it, is for
+  satellites only, and any other device plugged in there gets no access by design.
 - ☐ Future enhancement: **Wi-Fi backhaul** (design §11) — deferred.
 
 ## How to validate
