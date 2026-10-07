@@ -83,6 +83,7 @@ import {
 } from './api.service'
 import { UciFile, UciSection } from './types'
 import { dhcpLanSlaacDhcpv6 } from 'src/app/routes/lan/routes/ipv6/uci/mocks'
+import { hasHostnameEndpoint } from 'src/app/routes/outbound/utils'
 import {
   generateMockDataUsage,
   getMockArpOutput,
@@ -1540,6 +1541,7 @@ export class MockApiService extends ApiService {
       used_by: [],
       supports_ipv6: true,
       mtu: null,
+      hostname_endpoint: false,
     },
     {
       id: 'wg_mullvad',
@@ -1553,6 +1555,7 @@ export class MockApiService extends ApiService {
       used_by: [],
       supports_ipv6: false,
       mtu: 1280,
+      hostname_endpoint: false,
     },
   ]
 
@@ -1585,6 +1588,7 @@ export class MockApiService extends ApiService {
         // Honor an uncommented MTU line; a commented `#MTU=` is ignored.
         mtu:
           Number(/(^|\n)\s*MTU\s*=\s*(\d+)/i.exec(params.config)?.[2]) || null,
+        hostname_endpoint: hasHostnameEndpoint(params.config),
       },
     ]
     this.logActivity(
