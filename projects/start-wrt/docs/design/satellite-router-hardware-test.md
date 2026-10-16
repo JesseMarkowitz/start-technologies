@@ -89,6 +89,12 @@ This creates `wg` interface `sat_s1_guest` (addr `192.168.130.2/32`, no listen â
 pointing at `10.42.0.1:51900` with `allowed_ips = 0.0.0.0/0` and `route_allowed_ips=1` (full egress
 via the Core), joined to S1's `lan` zone, and brings it up.
 
+> `0.0.0.0/0` with `route_allowed_ips=1` installs the tunnel as S1's **only** default route. It is
+> safe here because S1 has no WAN default to displace and the Core's endpoint `10.42.0.1` sits on the
+> connected transit `/24`, so the connected route keeps reaching it. It is a bring-up shortcut for
+> one tunnel, not the final shape: with several profile tunnels each profile is policy-routed
+> through its own per-VLAN table (`satellite-router-next-steps.md`, Phase 2).
+
 ## Step 4 â€” verify (the actual test)
 
 On **S1**:

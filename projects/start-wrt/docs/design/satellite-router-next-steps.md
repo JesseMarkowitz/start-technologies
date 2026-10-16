@@ -25,6 +25,18 @@ ports; the routed design (D1) never carries another router's DHCP across a bridg
 unaffected, but D14's layer-2 option would have to account for it. Upstream's `bench/bench.sh`
 (#4072) is a live-bench harness for one physical router and is worth evaluating for the two-router
 bench. Capped container at `opt-level 0`: **667 tests in `startwrt-core` + 18 in `uciedit`, 0 failures**.
+_Update 2026-10-16:_ the two upstream changes the merge had not been checked against are now
+checked. **#4097** (chain-route `vcrb_` fallbacks, `nohostroute`) acts on `vpn_client` sections only
+and leaves `vpn_site` alone; neither mechanism applies to a satellite tunnel (design §6 risk 1). Its
+pattern did apply on the Core side, where a satellite subnet followed the default route out the WAN
+while its tunnel was down: `vpn_site.rs` now writes a `vsb_<iface>_<n>` unreachable on loopback
+beneath each subnet route, replaced on every provision, with tests. The satellite side still writes
+`route_allowed_ips '1'` with `0.0.0.0/0`, which `vpn_client.rs` refuses for its own tunnels: it is
+safe for exactly the single tunnel of the bring-up runbook, because the Core's endpoint is on the
+connected transit `/24` and there is no default route to displace, and it is wrong for the final
+shape (N profile tunnels cannot all own the main table's default) — see Phase 2. **#4055** made the
+Core's per-profile dnsmasq instances interface-scoped and `localservice`, so they refuse a
+satellite's queries; the DNS design that follows is §20, and it adds items to Phases 3, 5 and 8.
 
 `build/stage-files.sh` now lists `role.json` and `satellites.json` in the sysupgrade keep set —
 without them a satellite forgot its role on update and booted as a Core, and a Core forgot its
@@ -135,9 +147,15 @@ all and satellite pairing is a direct beneficiary.
 - ☐ **Underlay automation** — the transit-port IP + `transit` firewall zone are operator-manual in
   the runbook today; automate at pairing.
 - ☐ **MSS/MTU clamp** on the Core ingress; validate downstream-host (not just self-ping) egress.
-- ☐ **Satellite side** — reuse `vpn_client.rs` interface/peer construction to dial the Core; add
-  **WAN-less egress** (D3): pin the Core-endpoint `/32` via the local transit link (not WAN),
-  re-point DNS, neutralize the kill-switch `unreachable` fallback. **Validate on hardware early.**
+- ☐ **Satellite side** — write each profile tunnel with `route_allowed_ips '0'` (as `vpn_client.rs`
+  does, and for the same reason: N tunnels cannot each install a main-table default) and route the
+  satellite-local profile through its tunnel with the per-VLAN table `rewrite_routing` already
+  builds, `prtb_` kill switch included — that is D18 at the routing layer, so do **not** neutralize
+  it. `guard_outbound_available` accepts only `UciVpnClient` outbounds today and must learn
+  `UciVpnSite`. No endpoint pinning: the Core's transit address is on the connected uplink.
+  Re-point DNS per design §20 (`noresolv`, every upstream `@<tunnel>`). **Validate on hardware
+  early.** The bring-up runbook's single `0.0.0.0/0` + `route_allowed_ips '1'` tunnel is fine as a
+  test and is not this.
 - ☐ MSS clamp / correct tunnel MTU on the Core ingress (none today; reuse the `mtu_fix` pattern).
 
 ## Phase 3 — Routed attachment at the Core (`profiles.rs`)
@@ -145,9 +163,14 @@ all and satellite pairing is a direct beneficiary.
 - ☐ Attach a satellite `/24` to its profile: add the tunnel interface to the `vlan_<iface>` zone
   (Vec `network`), and — for VPN-routed profiles — emit a source ip-rule (`src <remote/24> lookup
 <vlan_tag>`) + a route in the per-VLAN table (generalize `prr_`/`plr_`).
+- ✅ A `vsb_` unreachable on loopback beneath each satellite subnet route in `main`, so a subnet whose
+  tunnel is down fails closed instead of leaving by the WAN (`vpn_site.rs`, 2026-10-16; the #4097
+  pattern).
 - ☐ Extend `sync_cross_subnet_routes` / `sync_vpn_peer_cross_routes` to enumerate satellite subnets.
 - ☐ Teach `guard_subnet_collision` / `validate_profile_block` about Core-central satellite subnet
-  allocation (D8); keep `vlan_tag` globally identical across routers.
+  allocation (D8); keep `vlan_tag` globally identical across routers. The same table feeds
+  `dns_inject::read_snapshot` and `profile_for`, which today know only the Core's own `/24`s
+  (design §20).
 
 ## Phase 4 — Pairing & remote-peer auth (`satellite.rs` + `middleware/auth.rs`) ★ security review
 
@@ -164,6 +187,11 @@ all and satellite pairing is a direct beneficiary.
   (`{profiles, passwords, ports, ssid, country, radios}`; no admin password, D22) carrying a monotonic
   **generation** number. `country` is the Core's `wifi.get` country; `radios` is this satellite's
   part of the Core's channel plan (D20).
+- ☐ DNS in the payload, per profile (design §20): the upstream server list (the Core's WAN resolvers
+  for an ISP-mode profile), `router.lan` → the Core's gateway, the profile's lease names from the
+  Core and the other satellites, and the rendered published-records hosts file (#4055). The
+  satellite applies them through `rewrite_dns_forwarding` with every server `@<tunnel>` and
+  `noresolv` set.
 - ☐ Push transport: Core as RPC client over the management tunnel (reuse `CliContext::call_remote` /
   `registry::call_registry_rpc`) → a satellite `satellite.apply` endpoint.
 - ☐ Satellite apply: regenerate local profiles via the existing `profiles.rs` rewrite chain against
@@ -212,6 +240,9 @@ all and satellite pairing is a direct beneficiary.
 - ☐ Satellite reports device facts upstream (the first satellite→Core direction; see design §14 and
   threat #11); Core owns policy and renders them in the device list. Unblocks the per-device toggle,
   D12's authorization, and IPv6 published ports at once.
+- ☐ #4055's per-device publishing permission (`_allow_dns_inject`) and its address sweep read the
+  registry for satellite devices; the satellite relays a publisher's UPDATE to the Core over the
+  management tunnel (design §20, the D12 shape).
 
 ## Phase 9 — IPv6 (D11) ★ gated on a spike
 

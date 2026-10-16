@@ -106,12 +106,12 @@ state; they reconcile on reconnect after any missed edit.
 | D1  | Profile model for multi-router subnets       | **Routed attachment** — single-`/24` profiles + attach remote subnets to the zone/table                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | ✅ locked                                  |
 | D2  | Tunnel topology / profile separation         | **Option A — per-profile L3 tunnels** (~profiles×satellites; full zone reuse)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | ✅ locked                                  |
 | D6  | Role selection & mutability                  | **Decided by adoption: a router added through a Core (D21) is a satellite; a router set up on its own is a Core.** The user is never asked to choose. Changing role is a factory reset, never an in-place switch (revised 2026-09-21, and 2026-09-28 for adoption)                                                                                                                                                                                                                                                                                                                                                      | ✅ locked                                  |
-| D3  | Satellite Internet egress (no WAN)           | Reuse per-profile policy routing, with explicit **WAN-less** handling (endpoint via local link, DNS re-pointed, kill-switch neutralized)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | recommended                                |
+| D3  | Satellite Internet egress (no WAN)           | Reuse per-profile policy routing, with explicit **WAN-less** handling (endpoint via the local link, DNS re-pointed). Each profile tunnel is written with `route_allowed_ips '0'` and routed through its per-VLAN table; the `prtb_` kill switch **stays**, as the routing-layer half of D18. The Core mirrors it with a `vsb_` unreachable beneath each satellite subnet route (revised 2026-10-16)                                                                                                                                                                                                                     | recommended                                |
 | D4  | Pairing & remote-peer auth                   | Enrollment code → persistent per-pairing token, backed by `ed25519` identity, **bound to the management-tunnel source**; new auth path in `middleware/auth.rs`. **Needs security review.**                                                                                                                                                                                                                                                                                                                                                                                                                              | recommended                                |
 | D5  | Config sync                                  | **Push a semantic payload**; satellite regenerates locally; reconcile on reconnect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | recommended                                |
 | D7  | Role capability gating                       | **Middleware** gate keyed on role (allowlist of satellite-local endpoints)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | recommended                                |
 | D8  | Subnet/VLAN coordination                     | `vlan_tag` **globally identical**; **Core-central** `/24` allocation per satellite; teach the two subnet guards about satellite subnets                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | recommended                                |
-| D9  | DNS & DHCP split                             | **Satellite-local** DHCP and DNS per profile (mirrors the current per-gateway model)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | recommended                                |
+| D9  | DNS & DHCP split                             | **Satellite-local** DHCP and DNS per profile (mirrors the current per-gateway model). The Core's per-profile dnsmasq instances never answer a satellite; every DNS fact a satellite resolver needs travels in the D5 payload, and every satellite upstream query is bound to a profile tunnel (§20, added 2026-10-16)                                                                                                                                                                                                                                                                                                   | recommended                                |
 | D10 | Packaging / image                            | WireGuard already ships; **no RADIUS**; verify `wireguard-tools`/`kmod-wireguard` only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | recommended                                |
 | D11 | Satellite IPv6 addressing                    | **Prefixes arrive as delegated state over the authenticated tunnel, never in the semantic payload** (§13). Mechanism: DHCPv6-PD on the management tunnel                                                                                                                                                                                                                                                                                                                                                                                                                                                                | invariant ✅ locked; mechanism recommended |
 | D12 | Automatic port forwarding behind a satellite | **Satellite relays, Core authorizes** (§15); absent from v1 behind an explicit refusal                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | ✅ locked                                  |
@@ -174,12 +174,19 @@ state; they reconcile on reconnect after any missed edit.
 ## 6. Risks & gotchas identified in advance (with mitigations)
 
 1. **WAN-less satellite egress & endpoint pinning — TOP RISK.** `rewrite_vpn_chain_routes`
-   (`vpn_client.rs:1220`) pins a VPN endpoint's `/32` via the target interface assuming a base uplink
+   (`vpn_client.rs`) pins a VPN endpoint's `/32` via the target interface assuming a base uplink
    exists; the per-profile policy tables and the kill-switch `unreachable` fallbacks
    (`profiles.rs rewrite_routing`) also assume a WAN default. A satellite has no WAN. _Mitigation:_
-   pin each Core tunnel-endpoint `/32` via the **local transit link** gateway; re-point DNS
-   (`peerdns=0`) at the Core/local resolver; neutralize the WAN kill-switch semantics on satellites.
-   **Must be validated on hardware** — this is where the most new logic lives.
+   the Core's transit address is on the satellite's **connected uplink**, so the connected route
+   reaches it and no endpoint pinning is needed; re-point DNS (`peerdns=0`, `noresolv`) as §20 says;
+   **keep** the kill switch — with `route_allowed_ips '0'` and one per-VLAN table per profile, `prtb_`
+   is what makes a profile whose tunnel is down fail closed (D18). _Checked against #4097
+   (2026-10-16):_ its `vcrb_` chain fallbacks and `nohostroute` act on `vpn_client` sections only;
+   satellite tunnels are `vpn_site` sections and need neither — the Core listens, and the
+   satellite's endpoint is never reached through another tunnel. What the Core did lack was the
+   mirror image, a satellite subnet following the Core's default out the WAN while its tunnel is
+   down; `vpn_site.rs` now writes a `vsb_` unreachable beneath each subnet route. **Must be
+   validated on hardware** — this is where the most new logic lives.
 2. **MSS/MTU clamp on tunnel ingress — none today.** The inbound `wg_<P>` writes `mtu:None` and the
    profile zone has no `mtu_fix`, so large TCP from satellite hosts would black-hole. _Mitigation:_
    set a correct tunnel MTU and/or add `mtu_fix` on the tunnel/zone (reuse the pattern in
@@ -968,3 +975,55 @@ admin's approval and the sticker password at the Core (D21).
 empty WAN port keeps the `StartWRT` setup SSID; the failure-scenarios section of the user docs covers
 it: a reset satellite with no cable broadcasts a setup network also named `StartWRT`, and devices
 that saved the main network under that name will fail to join it. The quick start is unchanged.
+
+---
+
+## 20. DNS on a satellite (D9, checked against #4055 on 2026-10-16)
+
+**The Core's resolvers will not serve a satellite.** Since #4055 every per-profile dnsmasq instance
+on the Core is interface-scoped (`interface <profile>`, `listen_address <gateway>`, `nonwildcard`,
+`localservice`). `localservice` answers only sources on a subnet the instance has an interface on;
+a satellite's `/24` arrives over a tunnel whose interface carries a `/32`, so the query is refused.
+Opening those instances to the tunnels would undo the scoping #4055 introduced, so the design does
+not forward satellite DNS to the Core at all. A satellite runs the same per-profile instances the
+Core does (`rewrite_dns_forwarding`, driven by the payload) and answers its own clients.
+
+**Where a satellite's answers come from — all of it in the D5 payload, per profile:**
+
+- **Upstream servers.** The Core's server list for the profile (its override, its system servers,
+  or its VPN's DNS), each entry written `ip@<that profile's tunnel>` so the query crosses the
+  tunnel and leaves the Core under that profile's policy and egress, exactly as a client's packet
+  would. A profile in ISP mode has no list on the Core (its instance falls back to
+  `resolv.conf.auto`); for a satellite the payload carries the Core's WAN resolvers, since a
+  satellite's own `resolv.conf.auto` holds whatever the backhaul DHCP said, which under D19 is
+  nothing usable. `noresolv` is therefore always set on a satellite. SmartDNS is not used on a
+  satellite: it binds no interface for its upstream queries, and router-originated traffic over the
+  bare uplink reaches nothing (D19) — only dnsmasq's `server=ip@iface` carries the binding.
+- **`router.lan`** resolves to the Core's gateway address for the profile (D22), written by the
+  satellite as a hosts entry alongside the next item.
+- **Cross-router `.lan` names.** `local=/lan/` makes each instance authoritative for `.lan`, so a
+  satellite's instance alone answers only its own leases, and a Core-side printer's name is
+  NXDOMAIN on a satellite. This is the DNS half of D14 and is solved the same way whichever
+  mechanism D14 picks: the payload carries the profile's lease names from the Core and from every
+  other satellite (D13 supplies the upward direction), and the satellite renders them into an
+  addn-hosts file.
+- **Published records (#4055).** The Core already renders, per profile, exactly the records that
+  profile's zone may see. The payload carries that rendered file for each profile the satellite
+  serves; the satellite writes it to the same tmpfs path its instance reads and SIGHUPs. One policy
+  engine, at the Core, and the same visibility everywhere.
+
+**A publisher behind a satellite** (a StartOS server on a satellite port) sends its unsigned UPDATE
+over TCP to its resolver, which is the satellite. Three #4055 facts then have to learn about
+satellites:
+
+- The permission is `_allow_dns_inject` on a **Core** DHCP host section, and a satellite client has
+  none there. It moves to the device registry (D13), where the Core already owns per-device policy.
+- The satellite relays the UPDATE to the Core over the management tunnel and the Core decides —
+  D12's shape (§15), reused rather than a second authorizer on the satellite.
+- `dns_inject::read_snapshot` learns profiles from the Core's own interfaces and `profile_for` maps
+  a source address to a profile by the Core's `/24`; a satellite address matches nothing. Both read
+  the D8 allocation table, and the sweep that drops a record whose device lost its address reads the
+  registry's addresses for satellite devices.
+
+With the permission set nowhere, none of this runs: #4055 creates no per-profile instances in that
+case, and neither does a satellite.

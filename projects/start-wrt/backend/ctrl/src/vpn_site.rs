@@ -12,6 +12,8 @@
 //!   reachability is via `allowed_ips` cryptokey routing, not the interface subnet);
 //! - a peer whose `allowed_ips` is the satellite's **subnet** with
 //!   `route_allowed_ips=1` (so the kernel installs the `/24` route via the tunnel);
+//! - an `unreachable` route on loopback beneath each subnet route (`vsb_*`), so a
+//!   subnet whose tunnel is down is unreachable rather than routed out the WAN;
 //! - membership of the tunnel interface in the profile's `vlan_<iface>` zone
 //!   (reusing `vpn_server::ensure_firewall_zone`);
 //! - an accept rule for the handshake on the **transit-link** zone (not `wan`).
@@ -25,8 +27,8 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use uciedit::openwrt::{
-    Dhcp, InterfaceProto, NetworkBridgeVlan, NetworkInterface, NetworkVlanPort,
-    NetworkVlanPortTagging,
+    Dhcp, InterfaceProto, NetworkBridgeVlan, NetworkInterface, NetworkRoute, NetworkRoute6,
+    NetworkVlanPort, NetworkVlanPortTagging,
 };
 use uciedit::{Arena, Configs, Line, LineComment, Section, Token, TypedSection};
 
@@ -79,6 +81,13 @@ pub struct SiteTunnelParams<'p> {
     pub core_private_key: &'p str,
 }
 
+/// Name prefix of the `unreachable` fallback beneath each satellite subnet route.
+const SUBNET_BLOCK_PREFIX: &str = "vsb_";
+
+/// Metric of that fallback: above netifd's interface routes (≈1024), so it wins
+/// only while the tunnel route is absent.
+const SUBNET_BLOCK_METRIC: u32 = 2048;
+
 /// A single-host CIDR for `addr` — `/32` for IPv4, `/128` for IPv6. A tunnel interface
 /// carries only a host address; peer reachability comes from `allowed_ips`.
 fn host_cidr(addr: IpAddr) -> String {
@@ -105,6 +114,7 @@ pub fn provision_core_site_tunnel<'a>(
     set_site_interface(cfgs, &iface, params)?;
     set_site_metadata(cfgs, &iface, params)?;
     add_site_peer(cfgs, &iface, params, arena)?;
+    set_subnet_block_routes(cfgs, &iface, params.satellite_subnets)?;
     // Attach the tunnel to the profile's zone so all per-profile policy applies to
     // the satellite's routed subnet exactly as it would to a local client.
     ensure_firewall_zone(cfgs, &iface, params.profile_interface)?;
@@ -252,6 +262,48 @@ fn add_site_peer<'a>(
     }
 
     cfgs["network"].sections.push(Section { arena, lines });
+    Ok(())
+}
+
+/// netifd drops the `route_allowed_ips` route while the tunnel is down, and the
+/// satellite's subnet would then follow the Core's default route out the WAN.
+/// These loopback fallbacks make it unreachable instead, as `prtb_` does for a
+/// VPN-routed profile. One per subnet, replaced on every provision.
+fn set_subnet_block_routes(
+    cfgs: &mut Configs,
+    interface_name: &str,
+    subnets: &[String],
+) -> Result<(), Error> {
+    let prefix = format!("{SUBNET_BLOCK_PREFIX}{interface_name}_");
+    cfgs["network"]
+        .sections
+        .retain(|s| !s.name().is_some_and(|n| n.starts_with(prefix.as_str())));
+    for (i, subnet) in subnets.iter().enumerate() {
+        let name = format!("{prefix}{i}");
+        if subnet.contains(':') {
+            cfgs["network"].append(
+                &NetworkRoute6 {
+                    interface: "loopback".to_string(),
+                    target: subnet.clone(),
+                    metric: Some(SUBNET_BLOCK_METRIC),
+                    kind: Some("unreachable".to_string()),
+                    ..Default::default()
+                },
+                Some(name.as_str()),
+            )?;
+        } else {
+            cfgs["network"].append(
+                &NetworkRoute {
+                    interface: "loopback".to_string(),
+                    target: subnet.clone(),
+                    metric: Some(SUBNET_BLOCK_METRIC),
+                    kind: Some("unreachable".to_string()),
+                    ..Default::default()
+                },
+                Some(name.as_str()),
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -676,6 +728,62 @@ mod tests {
             .filter(|s| s.ty() == "wireguard_sat_s1_guest")
             .count();
         assert_eq!(peers, 1, "re-provision must not duplicate the peer");
+        let blocks = cfgs["network"]
+            .sections
+            .iter()
+            .filter(|s| s.name().is_some_and(|n| n.starts_with("vsb_sat_s1_guest_")))
+            .count();
+        assert_eq!(blocks, 1, "re-provision must not duplicate the fallback");
+    }
+
+    #[tokio::test]
+    async fn subnet_routes_fail_closed_when_the_tunnel_is_down() {
+        let dir = tempfile::tempdir().unwrap();
+        write_base(dir.path());
+        let arena = Arena::new();
+        let mut cfgs = parse_all(dir.path(), &arena, &["network", "startwrt", "firewall"])
+            .await
+            .unwrap();
+
+        let subnets = vec!["192.168.130.0/24".to_string(), "fd00:130::/64".to_string()];
+        provision_core_site_tunnel(&mut cfgs, &arena, &params(&subnets)).unwrap();
+
+        let v4 = cfgs["network"]
+            .sections
+            .iter()
+            .find(|s| s.name().as_deref() == Some("vsb_sat_s1_guest_0"))
+            .expect("v4 fallback should exist")
+            .get::<NetworkRoute>()
+            .unwrap();
+        assert_eq!(v4.interface, "loopback");
+        assert_eq!(v4.target, "192.168.130.0/24");
+        assert_eq!(v4.kind.as_deref(), Some("unreachable"));
+        assert_eq!(v4.metric, Some(SUBNET_BLOCK_METRIC));
+        assert_eq!(
+            v4.table, None,
+            "the fallback sits in main beside the tunnel route"
+        );
+
+        let v6 = cfgs["network"]
+            .sections
+            .iter()
+            .find(|s| s.name().as_deref() == Some("vsb_sat_s1_guest_1"))
+            .expect("v6 fallback should exist")
+            .get::<NetworkRoute6>()
+            .unwrap();
+        assert_eq!(v6.target, "fd00:130::/64");
+        assert_eq!(v6.kind.as_deref(), Some("unreachable"));
+
+        // Narrowing to one subnet drops the stale fallback.
+        let one = vec!["192.168.130.0/24".to_string()];
+        provision_core_site_tunnel(&mut cfgs, &arena, &params(&one)).unwrap();
+        assert!(
+            !cfgs["network"]
+                .sections
+                .iter()
+                .any(|s| s.name().as_deref() == Some("vsb_sat_s1_guest_1")),
+            "a removed subnet leaves no fallback behind"
+        );
     }
 
     fn sat_params<'p>(allowed: &'p [String]) -> SatelliteTunnelParams<'p> {
