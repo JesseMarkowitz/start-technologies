@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { FileHelper } from '../util/fileHelper'
-import { z } from '@start9labs/start-core/zExport'
+import * as z from '@start9labs/start-core/z'
 
 const shape = z.looseObject({ A: z.string(), K: z.string().optional() })
 const effects = {} as any
@@ -128,5 +128,30 @@ describe('FileHelper.merge', () => {
     expect(JSON.parse(readFileSync(path, 'utf-8'))).toEqual({
       backend: { type: 'b' },
     })
+  })
+
+  test('yaml keeps a custom tag that parses to a class instance', async () => {
+    class Include {
+      constructor(public value: string) {}
+    }
+    const include = {
+      tag: '!include',
+      identify: (v: unknown) => v instanceof Include,
+      resolve: (v: string) => new Include(v),
+      stringify: ({ value }: { value: unknown }) => (value as Include).value,
+    }
+    const path = seeded(
+      'tags.yaml',
+      'automation: !include automations.yaml\nhttp:\n  port: 1\n',
+    )
+    const file = FileHelper.yaml(path, z.looseObject({ http: z.any() }), {
+      customTags: [include],
+    })
+
+    await file.merge(effects, { http: undefined })
+
+    expect(readFileSync(path, 'utf-8').trim()).toBe(
+      'automation: !include automations.yaml',
+    )
   })
 })

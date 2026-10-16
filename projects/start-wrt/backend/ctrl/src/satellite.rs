@@ -43,16 +43,19 @@ const REGISTRY_PATH: &str = "/etc/startwrt/satellites.json";
 
 /// Which role this physical router plays. Chosen at provisioning; a router with
 /// no marker is a standalone **Core** (the common case).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default, visit_rs::VisitVariants,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterRole {
     #[default]
     Core,
     Satellite,
 }
+rpc_toolkit::reflect_ts!(RouterRole);
 
 /// Persisted role marker (`/etc/startwrt/role.json`).
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleMarker {
     pub role: RouterRole,
@@ -61,9 +64,10 @@ pub struct RoleMarker {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_endpoint: Option<String>,
 }
+rpc_toolkit::reflect_ts!(RoleMarker);
 
 /// One satellite the Core has paired with (`/etc/startwrt/satellites.json`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 pub struct PairedSatellite {
     /// Admin-facing label (unique).
@@ -81,6 +85,7 @@ pub struct PairedSatellite {
     #[serde(default)]
     pub last_seen: i64,
 }
+rpc_toolkit::reflect_ts!(PairedSatellite);
 
 // ── Config-sync payload (Core → satellite, design D5) ───────────────────────
 //
@@ -248,7 +253,7 @@ pub async fn get_role(_ctx: ServerContext) -> Result<RoleMarker, Error> {
     Ok(load_role())
 }
 
-#[derive(Deserialize, Serialize, Parser)]
+#[derive(Deserialize, Serialize, Parser, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 #[command(rename_all = "kebab-case")]
 pub struct SetRoleParams {
@@ -258,6 +263,7 @@ pub struct SetRoleParams {
     #[clap(long)]
     core_endpoint: Option<String>,
 }
+rpc_toolkit::reflect_ts!(SetRoleParams);
 
 #[instrument(skip_all)]
 pub async fn set_role(
@@ -289,7 +295,7 @@ pub async fn list(_ctx: ServerContext) -> Result<Vec<PairedSatellite>, Error> {
     Ok(load_registry())
 }
 
-#[derive(Deserialize, Serialize, Parser)]
+#[derive(Deserialize, Serialize, Parser, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 #[command(rename_all = "kebab-case")]
 pub struct PairParams {
@@ -302,14 +308,16 @@ pub struct PairParams {
     #[clap(long)]
     enrollment_token: Option<String>,
 }
+rpc_toolkit::reflect_ts!(PairParams);
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 pub struct PairResponse {
     pub name: String,
     pub status: String,
     pub note: String,
 }
+rpc_toolkit::reflect_ts!(PairResponse);
 
 #[instrument(skip_all)]
 pub async fn pair(
@@ -354,18 +362,16 @@ pub async fn pair(
     })
 }
 
-#[derive(Deserialize, Serialize, Parser)]
+#[derive(Deserialize, Serialize, Parser, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 #[command(rename_all = "kebab-case")]
 pub struct UnpairParams {
     name: String,
 }
+rpc_toolkit::reflect_ts!(UnpairParams);
 
 #[instrument(skip_all)]
-pub async fn unpair(
-    _ctx: ServerContext,
-    UnpairParams { name }: UnpairParams,
-) -> Result<(), Error> {
+pub async fn unpair(_ctx: ServerContext, UnpairParams { name }: UnpairParams) -> Result<(), Error> {
     ensure_core()?;
     let mut list = load_registry();
     if !remove_satellite(&mut list, &name) {
@@ -387,7 +393,7 @@ pub async fn unpair(
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusResponse {
     pub role: RouterRole,
@@ -395,6 +401,7 @@ pub struct StatusResponse {
     pub satellite_count: usize,
     pub satellites: Vec<PairedSatellite>,
 }
+rpc_toolkit::reflect_ts!(StatusResponse);
 
 #[instrument(skip_all)]
 pub async fn status(_ctx: ServerContext) -> Result<StatusResponse, Error> {
@@ -421,7 +428,7 @@ pub async fn status(_ctx: ServerContext) -> Result<StatusResponse, Error> {
 // picks a transit subnet, and runs these on each router. The eventual pairing
 // flow (D4) will call the same generators with allocated keys/ports.
 
-#[derive(Deserialize, Serialize, Parser)]
+#[derive(Deserialize, Serialize, Parser, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 #[command(rename_all = "kebab-case")]
 pub struct ProvisionCoreParams {
@@ -446,6 +453,7 @@ pub struct ProvisionCoreParams {
     #[clap(long)]
     core_private_key: String,
 }
+rpc_toolkit::reflect_ts!(ProvisionCoreParams);
 
 #[instrument(skip_all)]
 pub async fn provision_core_tunnel(
@@ -464,7 +472,8 @@ pub async fn provision_core_tunnel(
     let mut retries = 4;
     loop {
         let arena = Arena::new();
-        let mut cfgs = parse_all("/etc/config", &arena, &["network", "startwrt", "firewall"]).await?;
+        let mut cfgs =
+            parse_all("/etc/config", &arena, &["network", "startwrt", "firewall"]).await?;
         let params = crate::vpn_site::SiteTunnelParams {
             satellite: &p.satellite,
             profile_interface: &p.profile,
@@ -484,7 +493,8 @@ pub async fn provision_core_tunnel(
             }
             Err(err) => return Err(err.into()),
             Ok(()) => {
-                let _ = crate::run_quiet_async(tokio::process::Command::new("ifup").arg(&iface)).await;
+                let _ =
+                    crate::run_quiet_async(tokio::process::Command::new("ifup").arg(&iface)).await;
                 crate::profiles::reload_system().await?;
                 break;
             }
@@ -503,7 +513,7 @@ pub async fn provision_core_tunnel(
     Ok(())
 }
 
-#[derive(Deserialize, Serialize, Parser)]
+#[derive(Deserialize, Serialize, Parser, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 #[command(rename_all = "kebab-case")]
 pub struct ProvisionSatelliteParams {
@@ -529,6 +539,7 @@ pub struct ProvisionSatelliteParams {
     #[clap(long, default_value = "lan")]
     firewall_zone_member: String,
 }
+rpc_toolkit::reflect_ts!(ProvisionSatelliteParams);
 
 #[instrument(skip_all)]
 pub async fn provision_satellite_tunnel(
@@ -552,7 +563,8 @@ pub async fn provision_satellite_tunnel(
     let mut retries = 4;
     loop {
         let arena = Arena::new();
-        let mut cfgs = parse_all("/etc/config", &arena, &["network", "startwrt", "firewall"]).await?;
+        let mut cfgs =
+            parse_all("/etc/config", &arena, &["network", "startwrt", "firewall"]).await?;
         let params = crate::vpn_site::SatelliteTunnelParams {
             satellite: &p.satellite,
             profile_interface: &p.profile,
@@ -573,7 +585,8 @@ pub async fn provision_satellite_tunnel(
             }
             Err(err) => return Err(err.into()),
             Ok(()) => {
-                let _ = crate::run_quiet_async(tokio::process::Command::new("ifup").arg(&iface)).await;
+                let _ =
+                    crate::run_quiet_async(tokio::process::Command::new("ifup").arg(&iface)).await;
                 crate::profiles::reload_system().await?;
                 break;
             }
@@ -583,13 +596,16 @@ pub async fn provision_satellite_tunnel(
         "satellite",
         "provision-satellite-tunnel",
         true,
-        &format!("Provisioned satellite tunnel to Core for profile '{}'", p.profile),
+        &format!(
+            "Provisioned satellite tunnel to Core for profile '{}'",
+            p.profile
+        ),
         None,
     );
     Ok(())
 }
 
-#[derive(Deserialize, Serialize, Parser)]
+#[derive(Deserialize, Serialize, Parser, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 #[command(rename_all = "kebab-case")]
 pub struct ProvisionSatelliteProfileParams {
@@ -611,6 +627,7 @@ pub struct ProvisionSatelliteProfileParams {
     #[clap(long, default_value = "lan")]
     firewall_zone_member: String,
 }
+rpc_toolkit::reflect_ts!(ProvisionSatelliteProfileParams);
 
 #[instrument(skip_all)]
 pub async fn provision_satellite_profile(
@@ -628,8 +645,12 @@ pub async fn provision_satellite_profile(
     let mut retries = 4;
     loop {
         let arena = Arena::new();
-        let mut cfgs =
-            parse_all("/etc/config", &arena, &["network", "startwrt", "firewall", "dhcp"]).await?;
+        let mut cfgs = parse_all(
+            "/etc/config",
+            &arena,
+            &["network", "startwrt", "firewall", "dhcp"],
+        )
+        .await?;
         let params = crate::vpn_site::SatelliteLocalProfileParams {
             profile_interface: &p.profile,
             vlan_tag: p.vlan_tag,
@@ -655,7 +676,10 @@ pub async fn provision_satellite_profile(
         "satellite",
         "provision-satellite-profile",
         true,
-        &format!("Provisioned local profile '{}' (vlan {})", p.profile, p.vlan_tag),
+        &format!(
+            "Provisioned local profile '{}' (vlan {})",
+            p.profile, p.vlan_tag
+        ),
         None,
     );
     Ok(())

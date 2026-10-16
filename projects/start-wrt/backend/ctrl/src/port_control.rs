@@ -1094,11 +1094,7 @@ fn is_satellite() -> bool {
 ///
 /// Split from [`log_satellite_refusal`] so the throttle is unit-testable without
 /// the process-global map or a real clock.
-fn should_log_refusal(
-    seen: &mut HashMap<Ipv4Addr, Instant>,
-    peer: Ipv4Addr,
-    now: Instant,
-) -> bool {
+fn should_log_refusal(seen: &mut HashMap<Ipv4Addr, Instant>, peer: Ipv4Addr, now: Instant) -> bool {
     if let Some(prev) = seen.get(&peer) {
         if now.saturating_duration_since(*prev) < REFUSAL_LOG_INTERVAL {
             return false;
@@ -1822,18 +1818,19 @@ pub async fn run(pc: Arc<PortControl>) {
 
 /// Run one server for the life of the daemon. Each already retries its own
 /// errors internally, so the only way out is a panic — and sharing one task
-/// would let that panic take the other three with it. Losing the sweep is the
+/// would let that panic take the others with it. Losing the sweep is the
 /// case that matters: forwards would stay open with nothing left to close them.
-async fn supervise<F, Fut>(name: &'static str, pc: Arc<PortControl>, start: F)
+pub(crate) async fn supervise<S, F, Fut>(name: &'static str, state: S, start: F)
 where
-    F: Fn(Arc<PortControl>) -> Fut,
+    S: Clone,
+    F: Fn(S) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
     loop {
-        match tokio::spawn(start(pc.clone())).await {
+        match tokio::spawn(start(state.clone())).await {
             Ok(()) => return,
             Err(e) => {
-                tracing::error!("port-control {name} server panicked ({e}); restarting");
+                tracing::error!("{name} server panicked ({e}); restarting");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
@@ -2075,7 +2072,7 @@ async fn run_sweep(pc: Arc<PortControl>) {
 }
 
 /// One automatic port use for the published-ports UI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, visit_rs::VisitFields)]
 pub struct AutomaticPortUse {
     /// UCI section name (`apf_<mac>_<extport>`).
     pub id: String,
@@ -2095,6 +2092,7 @@ pub struct AutomaticPortUse {
     /// Hostname for an SNI route; absent for plain forwards.
     pub hostname: Option<String>,
 }
+rpc_toolkit::reflect_ts!(AutomaticPortUse);
 
 /// Display names keyed by uppercase MAC; static UCI names take precedence.
 pub(crate) fn device_display_names(
@@ -2227,11 +2225,12 @@ pub async fn wan_changed(ctx: ServerContext) -> Result<Value, Error> {
     Ok(Value::Null)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, visit_rs::VisitFields)]
 pub struct SetAutoForwardRequest {
     pub mac: String,
     pub allow: bool,
 }
+rpc_toolkit::reflect_ts!(SetAutoForwardRequest);
 
 /// Changes a device's default-off automatic port-use permission.
 #[instrument(skip_all)]

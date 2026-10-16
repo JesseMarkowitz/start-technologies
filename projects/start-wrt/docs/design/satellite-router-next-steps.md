@@ -13,7 +13,18 @@ the satellite Published-Ports string renumbers to 558. _Update 2026-09-28:_ agai
 the satellite string renumbers to **560**. Verified green in the capped container at
 `opt-level 0`: **609 tests, 0 failures**, including all nine `satellite.rs` tests, five `vpn_site.rs`
 tests and 31 in `port_control.rs`. Nothing has been exercised on two physical routers; the second
-unit has not arrived.
+unit has not arrived. _Update 2026-10-15:_ merged upstream master `83c211441` (#4140 generated RPC
+bindings, #4055 DNS record publishing, #4230 zod schema modules beside the bindings, #4219 channel
+width, #4236 LAN DHCP guard). Conflicts: `en.ts` (the string is now **573**, and all five
+dictionaries carry it), `api.service.ts` (`RouterRoleRes` is an alias over the generated `Api`),
+`API_CONTRACT.md` (DNS Injection took §17; Satellite Router is **§18**) and `bindings.ts`
+(regenerated, which now also writes `bindings.schemas.ts` and `events.schemas.ts`). The satellite RPC
+types derive `visit_rs::VisitFields` (`RouterRole`: `VisitVariants`) with `reflect_ts!` bridges.
+#4236's bridge-forward guard drops DHCP replies and router advertisements switched between LAN
+ports; the routed design (D1) never carries another router's DHCP across a bridge, so it is
+unaffected, but D14's layer-2 option would have to account for it. Upstream's `bench/bench.sh`
+(#4072) is a live-bench harness for one physical router and is worth evaluating for the two-router
+bench. Capped container at `opt-level 0`: **667 tests in `startwrt-core` + 18 in `uciedit`, 0 failures**.
 
 `build/stage-files.sh` now lists `role.json` and `satellites.json` in the sysupgrade keep set —
 without them a satellite forgot its role on update and booted as a Core, and a Core forgot its

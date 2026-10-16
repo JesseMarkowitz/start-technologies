@@ -210,8 +210,10 @@ fn add_site_peer<'a>(
         comment: LineComment::None,
     });
 
-    let desc_str: &str =
-        arena.alloc(format!("satellite {} ({})", params.satellite, params.profile_interface));
+    let desc_str: &str = arena.alloc(format!(
+        "satellite {} ({})",
+        params.satellite, params.profile_interface
+    ));
     lines.push(Line::Option {
         option: Token::from_str("description", arena),
         value: Token::from_str(desc_str, arena),
@@ -539,9 +541,10 @@ fn set_local_profile_dhcp(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use uciedit::openwrt::{FirewallRule, FirewallZone};
     use uciedit::parse_all;
+
+    use super::*;
 
     fn write_base(dir: &std::path::Path) {
         std::fs::write(
@@ -735,9 +738,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_base(dir.path());
         let arena = Arena::new();
-        let mut cfgs = parse_all(dir.path(), &arena, &["network", "startwrt", "firewall", "dhcp"])
-            .await
-            .unwrap();
+        let mut cfgs = parse_all(
+            dir.path(),
+            &arena,
+            &["network", "startwrt", "firewall", "dhcp"],
+        )
+        .await
+        .unwrap();
 
         let params = SatelliteLocalProfileParams {
             profile_interface: "psat_guest",
