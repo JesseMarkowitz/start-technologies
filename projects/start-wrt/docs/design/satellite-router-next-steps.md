@@ -1,343 +1,229 @@
 # Satellite Router — Implementation Status & Next Steps
 
-Companion to `satellite-router.md` (design) and `satellite-router-testplan.md`. Tracks what has
-landed on the `start-wrt/satellite-router-v2` branch and what remains, in the design's phase order
-(§8). This is a large feature spanning new backend modules, security-critical auth, WAN-less
-networking, and a new Angular UI; it is deliberately staged.
+Companion to `satellite-router.md` (design). Tracks what has landed on the
+`start-wrt/satellite-router-v2` branch and what remains, in build order.
 
-**State as of 2026-09-21.** Filed upstream as `Start9Labs/start-technologies#4043`, awaiting a
-maintainer response. The branch merges cleanly onto upstream `master` (`84734c818`) with one trivial
-conflict in `web/.../i18n/dictionaries/en.ts`, where upstream's #3939 strings took IDs 555–557 and
-the satellite Published-Ports string renumbers to 558. _Update 2026-09-28:_ against the
-`start-wrt/v1.2.0` tag the conflict is the same, but #4095's Root CA strings now hold 558–559, so
-the satellite string renumbers to **560**. Verified green in the capped container at
-`opt-level 0`: **609 tests, 0 failures**, including all nine `satellite.rs` tests, five `vpn_site.rs`
-tests and 31 in `port_control.rs`. Nothing has been exercised on two physical routers; the second
-unit has not arrived. _Update 2026-10-15:_ merged upstream master `83c211441` (#4140 generated RPC
-bindings, #4055 DNS record publishing, #4230 zod schema modules beside the bindings, #4219 channel
-width, #4236 LAN DHCP guard). Conflicts: `en.ts` (the string is now **573**, and all five
-dictionaries carry it), `api.service.ts` (`RouterRoleRes` is an alias over the generated `Api`),
-`API_CONTRACT.md` (DNS Injection took §17; Satellite Router is **§18**) and `bindings.ts`
-(regenerated, which now also writes `bindings.schemas.ts` and `events.schemas.ts`). The satellite RPC
-types derive `visit_rs::VisitFields` (`RouterRole`: `VisitVariants`) with `reflect_ts!` bridges.
-#4236's bridge-forward guard drops DHCP replies and router advertisements switched between LAN
-ports; the routed design (D1) never carries another router's DHCP across a bridge, so it is
-unaffected, but D14's layer-2 option would have to account for it. Upstream's `bench/bench.sh`
-(#4072) is a live-bench harness for one physical router and is worth evaluating for the two-router
-bench. Capped container at `opt-level 0`: **667 tests in `startwrt-core` + 18 in `uciedit`, 0 failures**.
-_Update 2026-10-16:_ the two upstream changes the merge had not been checked against are now
-checked. **#4097** (chain-route `vcrb_` fallbacks, `nohostroute`) acts on `vpn_client` sections only
-and leaves `vpn_site` alone; neither mechanism applies to a satellite tunnel (design §6 risk 1). Its
-pattern did apply on the Core side, where a satellite subnet followed the default route out the WAN
-while its tunnel was down: `vpn_site.rs` now writes a `vsb_<iface>_<n>` unreachable on loopback
-beneath each subnet route, replaced on every provision, with tests. The satellite side still writes
-`route_allowed_ips '1'` with `0.0.0.0/0`, which `vpn_client.rs` refuses for its own tunnels: it is
-safe for exactly the single tunnel of the bring-up runbook, because the Core's endpoint is on the
-connected transit `/24` and there is no default route to displace, and it is wrong for the final
-shape (N profile tunnels cannot all own the main table's default) — see Phase 2. **#4055** made the
-Core's per-profile dnsmasq instances interface-scoped and `localservice`, so they refuse a
-satellite's queries; the DNS design that follows is §20, and it adds items to Phases 3, 5 and 8.
+**Direction (2026-10-18, D25).** Satellites are thin access points (APs) on a tagged Ethernet
+trunk, with one WireGuard management tunnel per AP (design §21). The routed design that preceded
+it — per-profile tunnels, satellite subnets, WAN-less egress, satellite DHCP/DNS — was built,
+bench-tested on two routers and is retired. Its implementation stays in this branch's history up
+to `904d03f97` (also kept as the fork branch `start-wrt/satellite-router-routed`), and its bench
+results stay in `satellite-router-open-questions.md` §22–26. `satellite-router-testplan.md` and
+`satellite-router-hardware-test.md` describe that design's bench and are kept as its record; the
+D25 bench checks are at the end of design §21 and below.
 
-`build/stage-files.sh` now lists `role.json` and `satellites.json` in the sysupgrade keep set —
-without them a satellite forgot its role on update and booted as a Core, and a Core forgot its
-pairings. The same list feeds `sysupgrade --create-backup`, so this is also what puts pairing into
-the backup (D16).
-
-The superseded `start-wrt/satellite-router` branch (pre-rebase duplicate, byte-identical satellite
-files) is retired.
-
-## Resume here (paused 2026-09-22)
-
-Work is paused on two external dependencies, not on anything in the tree:
-
-1. **A maintainer response to #4043.** The repo's triage workflow routes issue type `Feature` to
-   `FEATURE_OWNER` regardless of project, so the request is assigned to the feature owner rather
-   than to the StartWRT code owner who wrote most of the tracker. Both perspectives matter — one
-   owns the product decision, the other owns the code this lands in.
-2. **The second router.** Everything that would prove the design needs two boxes.
-
-When picking back up, in order of value:
-
-- **The hardware bring-up test** (`satellite-router-hardware-test.md`) the moment a second unit
-  exists. WAN-less egress is the premise the rest of the design rests on and it is still unproven.
-- **D14 (routed vs. bridged): talk to the StartWRT maintainers first** (decided 2026-09-28), then
-  measure on that same two-router bench: VXLAN-over-
-  WireGuard throughput on the K1, what MTU actually survives, and whether `.local` resolves across
-  the boxes each way. For the bridged option, also cable a deliberate second path and time how
-  long loop protection takes to catch it (design §6 risk 12). The issue asks the maintainers to
-  rule on this; arriving with data is stronger than arriving with a question.
-- **Then the phases below**, which are otherwise unchanged.
-
-**An unrelated first contribution, if one is wanted while waiting.** #3862 (the delegated IPv6
-prefix size is never read from netifd) is a real prerequisite for the IPv6 phase, and it is
-testable without satellites — but only against a real prefix delegation. Where an ISP does not
-provide one, a DHCPv6 server on the WAN port can delegate `/48`, `/56` and `/64` in turn, which is
-_better_ than a live ISP for this particular bug: the `/64` case is the one that silently produces
-no GUA on shipped defaults, and no ISP handing out a `/56` would let you reproduce it. Failing
-that, #3681 (lift shared WireGuard key and PSK handling into `shared-libs/`) needs no network at
-all and satellite pairing is a direct beneficiary.
+**State as of 2026-10-18.** Branch tip `904d03f97` on upstream `master` `83c211441`. Capped
+container, `opt-level 0`: **706 unit tests, 0 failures**; rustfmt, prettier, `check:wrt` clean.
+Upstream `#4043` has had no maintainer reply since it was filed; it still describes the routed
+design and is left as is until maintainers reply or code lands. Two-router bench: the Start9 K1
+is the Core, a BPI-F3 the satellite, adopted end to end with D24 over IPv6 link-local.
 
 ## Landed on this branch
 
-- **Design** — `docs/design/satellite-router.md` (approved; decisions locked), this file, and the
-  test plan.
-- **Foundation module** — `backend/ctrl/src/satellite.rs`:
-  - `RouterRole` (Core/Satellite) persisted to `/etc/startwrt/role.json` (default Core), with
-    `load_role()` for other modules (e.g. the daemon gate) to consume.
-  - Paired-satellite registry (`/etc/startwrt/satellites.json`) with add/remove + de-dup.
-  - RPC `satellite.{get-role,set-role,list,pair,unpair,status}`, registered in `lib.rs::main_api`.
-  - Core-only capability gating (`ensure_core`) — a first slice of D7.
-  - Unit tests (5) for the pure logic.
-- **Site-to-site config generation** — `backend/ctrl/src/vpn_site.rs` (Core side): a `wg`
-  interface (transit `/32`), a **subnet-advertising** peer (the satellite's whole `/24` in
-  `allowed_ips` + `route_allowed_ips=1`), profile firewall-zone membership, and a transit-zone
-  accept rule; the `UciVpnSite` metadata section; `provision_core_site_tunnel` (pure config-writer,
-  not yet called into effect); 3 tests incl. a parse→provision→assert integration test. In
-  `vpn_server.rs`: `ensure_firewall_zone` exposed and a source-zone-parameterized firewall-rule
-  helper added (existing `wan` callers unchanged).
-- **Executable manual provisioning + satellite-side tunnel** — `vpn_site.rs`
-  `provision_satellite_site_tunnel` (the satellite dials the Core, full egress-via-Core); and the
-  RPC commands `satellite.provision-core-tunnel` / `provision-satellite-tunnel` that apply the
-  generators to `/etc/config` and bring the tunnel up (role-gated). This makes the **basic
-  hardware bring-up test executable** — runbook in `satellite-router-hardware-test.md`.
-- **Satellite local profile serving** — `vpn_site.rs` `provision_satellite_local_profile`
-  (interface `br-lan.<vlan>` + `/24` + DHCP pool + a LAN port on the VLAN + zone membership) and the
-  `satellite.provision-satellite-profile` RPC. Lets a **downstream client** plugged into the
-  satellite land on the profile and egress via the Core (runbook Step 5). Wi-Fi (per-PSK) entry and
-  automatic sync of these from the Core are still follow-ups.
-- **Config-sync contract + pairing primitives** — in `satellite.rs`: the semantic snapshot types
-  (`SyncSnapshot`/`ProfileSpec`/`PasswordSpec`/`PortSpec`, camelCase, with a monotonic
-  `generation`; `country` and the per-radio channel plan `radios`/`RadioPlan` added 2026-09-28 for D20), a pure free-UDP-port allocator (`allocate_listen_ports`), and the reserved
-  inter-router transit block + `transit_addrs(index)`. 4 tests.
-- **API contract** — `API_CONTRACT.md` section for `satellite.*`.
-- **Automatic port forwarding refused, explicitly (D12, phase 7)** — `port_control.rs`: a Satellite
-  refuses every PCP/UPnP mapping request at `Via::is_known_client`, the single chokepoint the shared
-  core consults before MAP, the SNI path, and all three UPnP actions. The client gets a PCP
-  `NOT_AUTHORIZED` / UPnP fault 606 (both already emitted by the shared core), and the daemon logs
-  it at `warn`, throttled to one line per client per 5 minutes. Paired with a note on the Published
-  Ports page (`web/routes/published-ports/index.ts` + the `api.service` trio), because the automatic
-  section is hidden when the list is empty — which on a Satellite it always is. 1 test.
+What carries into D25:
 
-> **Honest scope note.** `pair` currently records a satellite in the Core registry only; it does
-> **not** yet establish tunnels, validate an enrollment token, or push config — and its response
-> says so. Everything below is not yet implemented.
+- **Role marker and registry** (`satellite.rs`): `RouterRole` in `/etc/startwrt/role.json`
+  (the satellite's holds `coreEndpoint` and `coreKey` after adoption), the registry in
+  `/etc/startwrt/satellites.json`, both in `build/stage-files.sh`'s sysupgrade keep set (D16).
+  RPCs `satellite.{get-role,set-role,list,unpair,status}`.
+- **Adoption** (`adoption/`, D21, D24): keyed-BLAKE3 challenge-response over a link-local UDP
+  transport, Core announce / candidates / adopt, the satellite's candidate listener on its uplink
+  port, 5 tries then a 60 s cooldown on both sides, `satellite.adoption.{candidates,adopt,code}`.
+  Bench-tested: adoption replaces a hand-provisioned tunnel on both routers with new keys and a
+  derived PSK. `nohostroute 1` on any tunnel whose endpoint host carries a scope (open questions
+  §25).
+- **Sync payload types** (`satellite.rs`): `SyncSnapshot` with `generation`, `country` and the
+  per-radio `RadioPlan` (D20). The profile and port specs inside it change shape under D25.
+- **Core-side fail-closed shape**: `vsb_` unreachable routes beneath satellite subnet routes
+  (`vpn_site.rs`). The routes go with the routed design; the pattern — a daemon-affirmed state
+  whose absence is closed — is what D18 and trunk gating reuse.
+- **API contract** §18 and the generated bindings; the `Allow-Adoption` firewall rule on zone
+  `wan`; changelog fragment `minor-added-satellite-adoption.md`.
 
-## Phase 1 — Role & provisioning (partly done)
+What batch one removes (routed only):
 
-- ✅ Role marker + `satellite.get-role/set-role`.
-- ☐ **Daemon gate** — in `bins/daemon.rs::inner_main`, read `satellite::load_role()` and, when
-  Satellite, **skip** the Core-only normal-mode block (`profiles::bootstrap_admin_profile`, WAN
-  setup, `system::apply_remote_access`, schedule/cron regeneration).
-- ☐ **No role at flash** (D6, reaffirmed 2026-10-16): the wizard never asks. A freshly flashed or
-  factory-reset router starts **neutral** — no role file, broadcasting nothing — and listens on its
-  WAN port for the Core's adoption announcement (Adoption and recovery, below). Adoption writes
-  `satellite`; completing the standalone setup wizard writes `core`. The role is immutable
-  afterwards; changing it is the factory reset.
+- `vpn_site.rs`: per-profile site tunnels both sides, the satellite-local profile, the `vsb_`
+  routes; `satellite.provision-{core,satellite}-tunnel` and `provision-satellite-profile`;
+  `transit_addrs` and `allocate_listen_ports`; `PairedSatellite`'s per-profile tunnel list.
+- `satellite.pair` (contract-only pairing; adoption replaced it).
+- The D12 refusal in `port_control.rs` and its Published Ports note and dictionary string (ID 573
+  in all five dictionaries).
+- `SyncSnapshot`'s per-satellite subnet fields.
+- Design §20 (satellite DNS) stays as a record; nothing implements it.
 
-## Phase 2 — Site-to-site transport (`vpn_site.rs`, new) ★ top risk
+## Batch one — trunk and AP bridge (the data path)
 
-- ✅ **Core-side config generation** (`vpn_site.rs`): subnet-advertising peer (prefix `allowed_ips`,
-  not `/32`), transit-underlay addressing decoupled from the profile `/24`s, per-profile tunnel
-  interface + peer + zone membership + accept rule; `UciVpnSite` metadata. Reuses `WgInterface` and
-  the refactored `vpn_server` helpers; does **not** touch the `allocate_peer_ip`/proxy-ARP/`/32`
-  host paths.
-- ✅ Source-zone-parameterized WG accept rule (`vpn_server::ensure_wireguard_firewall_rule_in_zone`).
-- ✅ **Satellite-side generator** (`provision_satellite_site_tunnel`) + **executable manual
-  provisioning** (`satellite.provision-{core,satellite}-tunnel`, apply + `ifup` + reload). Enough to
-  run the **basic hardware bring-up test** (`satellite-router-hardware-test.md`).
-- ☐ **Automatic (paired) provisioning** — the pairing flow (D4) calls the same generators with
-  allocated keys/ports instead of hand-entered ones.
-- ☐ **Underlay: IPv6 link-local only** (decided 2026-10-16, verified on the bench the same day —
-  open questions §25). The backhaul segment carries no DHCP and no IPv4: the Core announces and
-  listens on its link-local address, the satellite's WireGuard endpoint is `[fe80::…%<wan>]:<port>`
-  (netifd's `wireguard.sh` brackets any host containing a colon, so `endpoint_host` carries it as
-  is), and the Core's peer stays endpoint-less and roams. The satellite's tunnel interface carries `nohostroute 1`: netifd's endpoint host-route step cannot parse a scoped endpoint and takes the interface down (open questions §25 addendum). A satellite therefore never holds a WAN
-  lease or a WAN default, which removes §22 and §23 by construction. The runbook's manual
-  transit-port IP + `transit` zone are a test-only arrangement.
-- ☐ **MSS/MTU clamp** on the Core ingress; validate downstream-host (not just self-ping) egress.
-- ☐ **Satellite side** — write each profile tunnel with `route_allowed_ips '0'` (as `vpn_client.rs`
-  does, and for the same reason: N tunnels cannot each install a main-table default) and route the
-  satellite-local profile through its tunnel with the per-VLAN table `rewrite_routing` already
-  builds, `prtb_` kill switch included — that is D18 at the routing layer, so do **not** neutralize
-  it. `guard_outbound_available` accepts only `UciVpnClient` outbounds today and must learn
-  `UciVpnSite`. No endpoint pinning: the Core's transit address is on the connected uplink.
-  Re-point DNS per design §20 (`noresolv`, every upstream `@<tunnel>`). **Validate on hardware
-  early.** The bring-up runbook's single `0.0.0.0/0` + `route_allowed_ips '1'` tunnel is fine as a
-  test and is not this.
-- ☐ MSS clamp / correct tunnel MTU on the Core ingress (none today; reuse the `mtu_fix` pattern).
+No gating, no management tunnel, no sync yet: prove that a client behind an AP is an ordinary
+client of the Core. Removal of the routed code rides in the same batch.
 
-## Phase 3 — Routed attachment at the Core (`profiles.rs`)
+**Core.**
 
-- ☐ Attach a satellite `/24` to its profile: add the tunnel interface to the `vlan_<iface>` zone
-  (Vec `network`), and — for VPN-routed profiles — emit a source ip-rule (`src <remote/24> lookup
-<vlan_tag>`) + a route in the per-VLAN table (generalize `prr_`/`plr_`).
-- ✅ A `vsb_` unreachable on loopback beneath each satellite subnet route in `main`, so a subnet whose
-  tunnel is down fails closed instead of leaving by the WAN (`vpn_site.rs`, 2026-10-16; the #4097
-  pattern).
-- ☐ Extend `sync_cross_subnet_routes` / `sync_vpn_peer_cross_routes` to enumerate satellite subnets.
-- ☐ Teach `guard_subnet_collision` / `validate_profile_block` about Core-central satellite subnet
-  allocation (D8); keep `vlan_tag` globally identical across routers. The same table feeds
-  `dns_inject::read_snapshot` and `profile_for`, which today know only the Core's own `/24`s
-  (design §20).
+- ☐ **Trunk port.** A port role beside the profile assignment in `ethernet.rs`, which today reads
+  one profile per port and ignores tagged memberships. A trunk port is a tagged member of every
+  profile's `bridge-vlan` (`<port>:t`) and is not in VLAN 1 untagged (`ensure_vlan_filtering`,
+  `profiles.rs`, makes every bridge port PRIMARY on VLAN 1). Profile creation and deletion keep
+  the trunk's memberships current, so a new profile is on every trunk the moment it exists.
+  Approval and the list of devices that lose access (D19) are UI work in a later batch; the
+  RPC takes the port and refuses one that is the Core's WAN.
+- ☐ **Backhaul VLAN.** The trunk's untagged side is a VLAN of its own, not a profile: a reserved
+  tag outside the profile range, the trunk port PRIMARY on it, a Core interface on `br-lan.<tag>`
+  with no IPv4, no DHCP, no router advertisements, IPv6 link-local only, in a zone that accepts
+  the adoption port and the management tunnel's listen port and drops everything else. The
+  adoption listener moves from the Admin bridge interface to it.
+- ☐ Ethernet UI: the Ethernet page wipes every `bridge-vlan` section on save and lists only
+  `br-lan` ports plus the WAN; it must preserve a trunk port's memberships and show the port as a
+  trunk. `firstboot_config` hard-codes `eth0`/`eth1` and is left alone.
 
-## Phase 4 — Pairing & remote-peer auth (`satellite.rs` + `middleware/auth.rs`) ★ security review
+**AP.**
 
-- ☐ Enrollment: single-use, short-lived, admin-initiated token; key-fingerprint confirmation;
-  reuse `sign/ed25519` + `registry/device_info` for signed identity.
-- ☐ New remote-peer auth path in `middleware/auth.rs` — a per-pairing token (à la
-  `auth::HashSessionToken`) **bound to the management-tunnel source**; firewall the satellite's
-  config-apply RPC to the tunnel only.
-- ☐ Unpair must revoke at the Core immediately (drop tunnels + invalidate token).
+- ☐ **Uplink as trunk.** The uplink port (D21: the WAN port where the board has one) joins
+  `br-lan` as a tagged member of every profile VLAN and PRIMARY on the backhaul VLAN. The `wan`
+  interface, its DHCP client and the `wan` zone go: the AP has no WAN.
+- ☐ **Profile VLANs without addresses.** For each profile in the payload, a `bridge-vlan` with
+  the tag and a network interface on `br-lan.<tag>` with `proto none`: a bridge member hostapd
+  and access ports can join, no address, no DHCP, no firewall zone. The AP's own Admin LAN
+  (`192.168.0.1/24` today, the source of the bench collision) goes with the rest.
+- ☐ **Wi-Fi.** The same wireless config the Core writes (`wifi.rs`: one `wifi-iface` per radio,
+  per-password dynamic VLAN through `wifi-vlan` sections keyed by the profile tag), with each
+  `wifi-vlan` pointing at the address-less profile interface. Until sync exists (batch three) the
+  bench writes the SSID and passwords by hand with `wifi set`; the AP must not rewrite them.
+- ☐ **Access ports.** Each non-uplink port PRIMARY on one profile VLAN, or no member of any.
+- ☐ **DHCP guard, AP variant.** The shipped guard (`backend/nftables/ruleset-pre/`) drops DHCP
+  replies and router advertisements switched between bridge ports, which on an AP drops the
+  Core's. The variant exempts frames arriving on the uplink. Bench probe 2026-10-18 on the
+  shipped kernel: a bridge-family table, raw payload matches and `vlan id` load without
+  `kmod-nft-bridge`; every `meta` match (`iifname`, `ibrname`, `ibrpvid`) fails. The exemption
+  needs the module, so **`kmod-nft-bridge` joins `build/openwrt.diffconfig` (D10)** and the
+  variant ships with the image build. Until both bench routers run that image the AP runs no
+  guard at all: the shipped guard is not staged on the 1.2.1 image either, so the bench sees
+  the same thing a release would.
+- ☐ Daemon role gate (D7, first slice): on an AP skip `bootstrap_admin_profile`, WAN setup,
+  `apply_remote_access` and schedule regeneration in `bins/daemon.rs::inner_main`. The AP's
+  allowlist comes in batch four.
 
-## Phase 5 — Config sync (D5)
+**Removal.** The routed list above, in the same batch, with the unit tests that covered it.
+Keep `satellite.rs`'s role, registry and `SyncSnapshot` skeleton.
 
-- ☐ Semantic payload types + a Core-side builder from `profiles`/`wifi`/`ethernet`
-  (`{profiles, passwords, ports, ssid, country, radios}`; no admin password, D22) carrying a monotonic
-  **generation** number. `country` is the Core's `wifi.get` country; `radios` is this satellite's
-  part of the Core's channel plan (D20).
-- ☐ DNS in the payload, per profile (design §20): the upstream server list (the Core's WAN resolvers
-  for an ISP-mode profile), `router.lan` → the Core's gateway, the profile's lease names from the
-  Core and the other satellites, and the rendered published-records hosts file (#4055). The
-  satellite applies them through `rewrite_dns_forwarding` with every server `@<tunnel>` and
-  `noresolv` set.
-- ☐ Push transport: Core as RPC client over the management tunnel (reuse `CliContext::call_remote` /
-  `registry::call_registry_rpc`) → a satellite `satellite.apply` endpoint.
-- ☐ Satellite apply: regenerate local profiles via the existing `profiles.rs` rewrite chain against
-  its own `/24`s; reject older generations; full-snapshot reconcile on reconnect + version heartbeat.
-- ☐ Satellite Wi-Fi apply (D20): set the country and each radio's planned channel and `htmode`
-  through the existing `wifi.rs` apply path; never `auto`. A country the satellite's regulatory
-  database lacks refuses the snapshot (the D17 path); a channel its radio refuses takes the plan's
-  next choice, else leaves that radio off, and is reported.
-- ☐ Satellite reports upstream (the D13 channel): radio inventory at pairing; on request, a scan per
-  radio (networks heard per channel with signal, channel busy time), taken while dark before the
-  first plan.
-- ☐ **Core channel planner (D20)** — new code, the largest piece D20 adds. Inputs: every router's
-  scans and the pins; output: channel and width per radio, separating routers that hear each other
-  well, then avoiding neighbours. Runs at pairing, on a country change and on request; shows the
-  plan before applying. Once a Core has a satellite, its own radios take the plan instead of
-  hostapd's automatic selection. Pure and unit-testable without hardware.
-- ☐ D18 enforcement: an nftables file shipped under `/usr/share/` (not the auto-included
-  `nftables.d/table-pre/`, which would load on a Core), loaded by an fw4 `config include` the daemon
-  writes on a satellite only. Its empty set means dark, so an fw4 reload fails closed. Staged by
-  `build/stage-files.sh` like the other `.nft` files.
+**Bench exit for batch one.** On the bench the K1's only LAN port is the trunk, so during this
+batch the Core is reached over its Wi-Fi and its WAN-side management port, and the BPI over
+link-local on the backhaul VLAN (`ssh -J wrt-bench root@fe80::…%br-lan.<tag>`). Pass:
 
-## Phase 6 — Capability gating (D7) & UI
+- A wired client on a BPI access port and a Wi-Fi client on a BPI password lease from the Core
+  in the right profile, reach the Internet, and appear in the Core's device list.
+- `router.lan` from behind the BPI answers with the Core; `.local` names resolve across routers.
+- A profile edit on the Core (new password, new profile) reaches the BPI's clients with no change
+  on the BPI beyond the hand-written Wi-Fi config.
+- Throughput through the BPI against the raw link (the ~400 Mbit/s tunnel ceiling of open
+  questions §24 must be gone).
 
-- ☐ Role-aware middleware (D7): on a satellite an **allowlist** of satellite-local endpoints is
-  served and every other RPC is refused — absent, not read-only. Local means: its own link, tunnel
-  and sync state, its connected clients, firmware, restart, factory reset, logs.
-- ☐ **Satellite UI (D23, decided 2026-10-16): a different, much smaller app, not the Core's UI with
-  controls greyed out.** It shows nothing the Core controls — no profiles, passwords, Wi-Fi,
-  WAN, VPN, port or DNS settings, not even read-only. It shows what is true of this router alone:
-  an unmistakable "Satellite _name_" heading, a link to the Core (`router.lan`) for everything
-  else, the Core link state (tunnels, last sync generation), its own clients — per Ethernet port
-  and per Wi-Fi radio, with the profile each is in — firmware version against the Core's, and its logs. It is the normal-operation sibling of the
-  recovery page (D22) and shares its shell. **Open:** whether it carries any action at all (restart,
-  factory reset) — a satellite holds no password (D22), so either the page has no actions and the
-  Core issues them over the management tunnel, or the satellite validates the Core's session over
-  that tunnel. Everything else is managed at the Core, and comes from
-  the Core.
-- ☐ Angular "Satellites" surface (`web/`): pair dialog + registry/status list (pattern-match
-  `routes/published-ports`); wire `api.service.ts` + `live-api` + `mock-api`; `app.routes.ts`/settings.
-- ☐ Channel plan view: every router's radios with planned channel and width, a pin per radio from
-  the Core's `wifi.regulatory` list, a re-plan button that previews before applying, and a warning
-  when a pin overlaps a router it hears well.
-- ☐ Pairing asks for the country when the Core has none (D20: the world subset leaves 5 GHz one
-  80 MHz block, too little to separate more than two routers).
-- ☐ D19 enforcement: the backhaul role writes a UCI fw4 zone (input and forward dropped, no DHCP)
-  plus one WireGuard accept rule per satellite. Anything UCI cannot express follows D18's
-  file-plus-include rule, loaded only on a Core with a backhaul port.
+## Batch two — management tunnel and trunk gating
 
-## Phase 7 — v1 refusal path (D12) ✅ done
+- ☐ **Management tunnel.** Adoption provisions one WireGuard interface per AP on the Core and one
+  on the AP, replacing the per-profile tunnel it provisions today: underlay = link-local on the
+  backhaul VLAN, the AP's endpoint `[fe80::…%<uplink>]:<port>` with `nohostroute 1`, the Core's
+  peer endpoint-less and roaming, inside addresses from a reserved block assigned at adoption (the
+  AP is addressed by this and nothing else, open questions §23). Keys and the derived PSK as
+  today. Time: the Core answers NTP on its end (StartWRT runs no NTP server today); the Core
+  initiates the handshake, so an AP rebooting with a stale clock reopens the tunnel (design §21).
+- ☐ **Trunk gating (D18 shape).** A bridge-family nftables file shipped under `/usr/share/` and
+  loaded by an fw4 include the daemon writes on a Core with a trunk, holding a set of live trunk
+  ports; profile-tagged frames on a trunk port not in the set are dropped, both directions; the
+  backhaul VLAN is never gated. Needs `kmod-nft-bridge` (the probe above). The daemon adds a port
+  when the AP's tunnel handshakes and removes it when D18's liveness threshold lapses; an fw4
+  reload empties the set and the daemon re-affirms. Fallback if the module cannot be carried:
+  toggle the trunk's tagged memberships with `bridge vlan`, re-applied after every network
+  reload.
+- ☐ **AP fail-closed (D18).** An AP whose tunnel is down takes its SSIDs down and cuts its access
+  ports from the bridge; recovery mode (D22) is batch five.
+- ☐ Unpair revokes: tunnel removed both sides, the port leaves the live set, the AP's `coreKey`
+  cleared so it re-enters candidate mode. Same-name re-adoption replaces the registry entry and
+  the old tunnel (today it leaves the old tunnel and key behind).
+- ☐ Firmware reach: the Core forwards an AP's traffic only to the update source it is itself
+  configured with (`startwrt.system.registry`, `DEFAULT_REGISTRY_URL` as fallback) and the hosts
+  that registry's asset URLs name, and resolves those names for it. Everything else from the
+  tunnel is dropped. The Core-pushes-firmware option is deferred.
 
-- ✅ Satellite refuses PCP/UPnP explicitly (protocol error + `warn` log, throttled per client).
-- ✅ Published Ports page states the feature is unavailable on a Satellite and points at the Core.
-- ☐ **Not yet exercised on hardware** — the refusal is unit-tested and the servers are unchanged on
-  a Core, but no PCP/UPnP client has been pointed at a Satellite. Fold into the hardware suite.
+**Bench exit.** The design §21 checks: gating with a managed switch and a wired client on it
+(unplug the AP, reboot the AP, reboot the Core, reload the firewall; time the close and the
+reopen); an AP rebooted with its clock set behind gets its tunnel back without help; a client
+behind the AP leases from the Core with the guard variant loaded and a rogue DHCP server behind
+the AP reaches no other client. Needs an image with `kmod-nft-bridge` flashed on both routers.
 
-## Phase 8 — Device registry (D13)
+## Batch three — config sync (D5)
 
-- ☐ Satellite reports device facts upstream (the first satellite→Core direction; see design §14 and
-  threat #11); Core owns policy and renders them in the device list. Unblocks the per-device toggle,
-  D12's authorization, and IPv6 published ports at once.
-- ☐ #4055's per-device publishing permission (`_allow_dns_inject`) and its address sweep read the
-  registry for satellite devices; the satellite relays a publisher's UPDATE to the Core over the
-  management tunnel (design §20, the D12 shape).
+- ☐ Payload (`SyncSnapshot`): SSID, broadcast flags, passwords with their profile tags, access
+  ports keyed by the names the AP reported, country and the per-radio plan (D20), the update
+  source, `generation`. No addresses, no DNS, no subnets.
+- ☐ Core builder from `wifi`, `profiles` and `ethernet`; push over the management tunnel with the
+  Core as RPC client (`CliContext::call_remote` / `registry::call_registry_rpc` pattern) to a
+  `satellite.apply` endpoint the AP serves only from the tunnel (D4, D7).
+- ☐ AP apply: rewrite wireless, the profile `bridge-vlan`s and access ports from the payload;
+  reject an older generation; full reconcile on reconnect; version heartbeat. A payload whose
+  profile set changes restarts the AP's network (accepted for v1).
+- ☐ AP reports at adoption: port inventory (name, uplink, link), radios; on request a scan per
+  radio taken while dark (D20 input).
+- ☐ Wi-Fi apply per D20: country and each radio's planned channel and width, never `auto`;
+  an unknown country refuses the snapshot; a refused channel takes the plan's next choice.
+- ☐ Core channel planner (D20): pure, unit-testable; runs at adoption, on a country change and on
+  request; preview before apply; pins honoured. Once a Core has an AP its own radios take the
+  plan too.
+- ☐ Adoption asks for the country when the Core has none (D20).
 
-## Phase 9 — IPv6 (D11) ★ gated on a spike
+## Batch four — role gate and the AP's page (D7, D23)
 
-- ☐ **Run the risk #9 bench spike first** — DHCPv6-PD over a WireGuard interface has no precedent in
-  this codebase (NOARP p2p device, no automatic link-local, DHCPv6 solicits to `ff02::1:2`). Two
-  Linux boxes, `odhcpd` one side, a DHCPv6 client the other, `ff02::1:2` in `allowed_ips`. Needs no
-  satellite and no K1. If it fails, fall back to Core-central `/64` allocation pushed as delegated
-  state (design §13).
-- ☐ Then: prefix delegation over the management tunnel + the interface-keyed `rule6` attachment.
-  The v1 data shapes already carry v6 (`subnets`, `ip6assign`, `IpAddr`), so no schema migration.
+- ☐ Role-aware middleware: an AP serves an allowlist — its link and tunnel state, last generation,
+  its clients per port and radio with their profile, firmware, logs, restart, factory reset — and
+  refuses everything else, absent not read-only.
+- ☐ The AP's local page (D23): a separate minimal app sharing the recovery page's shell; "Satellite
+  _name_" heading, link to the Core, tunnel state, clients, firmware against the Core's, logs.
+  Open: whether it carries restart and factory reset itself or the Core issues them over the
+  tunnel.
+- ☐ Core UI: Satellites page (adopt with the D24 code or sticker password, candidates list,
+  status, unpair, saved configurations), the trunk approval dialog listing devices that lose
+  access (D19), the channel plan view with pins and re-plan preview (D20).
+- ☐ Device list: an AP's Wi-Fi clients show as Wi-Fi on the AP, not "Ethernet" on the Core (D13
+  revised: the AP reports which radio or port each client is on; the Core already has the
+  leases).
 
-## Phase 10 — Automatic port forwarding (D12, full)
+## Batch five — recovery and the rest of adoption (D22)
 
-- ☐ Satellite-side listener relaying to the Core authorizer. **Requires phase 8.** Replaces phase
-  7's refusal. The `arrival_matches` substitute is a _replacement, not an inheritance_ — flag it in
-  the phase 4 security review (design §15).
+- ☐ A fresh router broadcasts nothing until it has checked its uplink port; one that hears no
+  Core and gets no Internet says so on its setup page and asks satellite-or-main.
+- ☐ Recovery mode: `StartWRT-Recovery-<last 4 hex of uplink MAC>` 2.4 GHz SSID and an isolated
+  recovery network on an access port (a Wi-Fi-only AP has only the SSID), HTTP, no login, headed
+  `Satellite <name> — recovery mode`, filtered logs, restart, factory reset.
+- ☐ Factory reset on an AP: overlay erased, waits for adoption broadcasting nothing; the Core
+  offers "saved configuration of _name_" or new; saved configurations kept until removed, with a
+  multi-select delete at adoption; deleting revokes the old key.
+- ☐ Core status per AP: state, last seen, firmware and older-than-Core marker (D17), recovery SSID,
+  each port's profile and link, Wi-Fi client counts per profile.
+- ☐ Factory password on boards without one: deferred (design §21). Today's behaviour stays.
 
-## Adoption and recovery (D6, D21, D22, D24)
+## Packaging, docs, upstream
 
-- ☐ Core announcement on every LAN port (IPv6 link-local, signed with the Core's key); a fresh
-  router that hears it on its WAN port keeps setup Wi-Fi off and waits to be adopted.
-- ☐ Core lists unadopted routers; on a port still serving a profile, asks "Make LAN port _n_ the
-  satellite port?" listing the devices that will lose access, and changes nothing until approved.
-- ☐ Adoption handshake (D24, decided 2026-10-17): keyed BLAKE3 challenge-response on the sticker Wi-Fi
-  password (EEPROM) typed at the Core, or by the generated adoption code on a board without one;
-  fresh random challenge each way; each proof covers both challenges and both WireGuard public keys;
-  the secret never crosses the wire. The Core accepts proofs only while the Add page is open, on
-  that port. Both sides: 5 failed attempts, then a fixed 60 s cooldown, counted in memory, logged
-  on the satellite, shown on the Add page. The Core discards the secret and keeps the pinned key.
-  No PAKE in v1; the phase 4 security review decides whether to swap the proof step. Confirm with
-  manufacturing that the EEPROM password is drawn uniformly over the full `PASSWORD_CHARS` set.
-- ☐ A fresh router broadcasts nothing until it has checked its WAN port (link, a DHCP attempt, one
-  Core-announcement interval).
-- ☐ A fresh router that hears no Core and gets no Internet on its WAN port says so on its setup
-  page (no cable / cable but nothing answering / address but no Internet) and asks whether it is a
-  satellite with a cabling fault or a main router to set up.
-- ☐ Board with no EEPROM password: pre-adoption page on the satellite's LAN port at `router.lan`
-  showing a generated adoption code at least as long as a sticker password, with a Copy button and
-  a QR code, valid until adopted or power-cycled (D24).
-- ☐ Recovery mode: isolated recovery network on the LAN port and a `StartWRT-Recovery-<last 4 hex of WAN MAC>` 2.4 GHz SSID,
-  (the satellite's sticker password, one client, 1 minute after going dark — placeholder); DNS answers `router.lan` with the satellite; page
-  headed `Satellite <satellite-specific name> — recovery mode`, served over HTTP, no login;
-  diagnostics, filtered logs, restart, factory reset.
-- ☐ Factory reset on a satellite erases the overlay like the existing soft reset, and the reset
-  router waits for adoption broadcasting nothing. The Core treats it as new and offers "use the saved
-  configuration of _name_, or set up a new satellite" (also the path for replacing failed hardware).
-  Saved configurations stay until removed by hand, with their last-connected date; adopting a new
-  satellite offers a multi-select of unconnected saved configurations to delete, and deleting
-  revokes the old key.
-- ☐ Satellite status in the Core: state, last seen, firmware version when known, older-than-Core
-  marker (D17); its recovery SSID; each port's profile and link state; Wi-Fi client count, in total and per profile
-  (counts only; the device list is phase 8).
-- ☐ User docs, as updates to the existing StartWRT book (`docs/src/`) with the code: building a
-  Core with satellites end to end; the quick start (`initial-setup.md`) updated so adding a
-  satellite takes no reading; a failure-scenarios section; `wifi.md`/`factory-reset.md` saying
-  plainly what each sticker password opens and that replacing **Default** retires the Core's.
-  The failure-scenarios section also covers a reset satellite with an empty WAN port, whose setup
-  network is named `StartWRT` like an unrenamed main network.
-- ☐ **Hardware watchdog, as a separate upstream change** (benefits every StartWRT router): enable
-  the K1 watchdog in the device tree (disabled in the vendor `k1-x.dtsi`), and stop the vendor
-  driver self-feeding once user space opens `/dev/watchdog`. Testable on one router.
-
-## Cross-cutting / packaging
-
-- ☐ `API_CONTRACT.md` updated as each endpoint lands; web `api.service` trio kept in sync (coupled-files rule).
-- ☐ Verify `wireguard-tools`/`kmod-wireguard` in `build/openwrt.diffconfig` (D10).
-- ☐ `CHANGELOG.md` + user docs (`docs/src/`) on user-visible completion. The docs must state the
-  backhaul rule (design D19): the Core port that carries satellites, and any switch on it, is for
-  satellites only, and any other device plugged in there gets no access by design.
-- ☐ Future enhancement: **Wi-Fi backhaul** (design §11) — deferred.
+- ☐ `build/openwrt.diffconfig`: `kmod-nft-bridge` (batch one). `kmod-wireguard` is already
+  there. Start9's AP board needs its own image target when the board exists.
+- ☐ `build/stage-files.sh`: the AP guard variant and the gating file under `/usr/share/`; keep
+  set unchanged.
+- ☐ Loop protection (design §6 risk 12, a v1 requirement): every bridge with a trunk port runs
+  STP or an equivalent that recovers without a reboot; bench check with a deliberately cabled
+  second path. Wi-Fi backhaul stays out until §11's rules hold.
+- ☐ `API_CONTRACT.md` §18 and the generated bindings with every endpoint; the web `api.service`
+  trio together.
+- ☐ Changelog fragment updated to the AP shape; user docs as updates to the StartWRT book:
+  building a Core with APs, the quick start, failure scenarios, the backhaul rule (a trunk port
+  and any switch on it serve APs only; a managed switch on the trunk loses the Core while its AP
+  is down), what each sticker password opens.
+- ☐ Hardware watchdog as a separate upstream change (K1 watchdog disabled in the vendor dts;
+  `/dev/watchdog` absent on the bench).
+- ☐ Deferred: MACsec on the trunk, Core-pushes-firmware, the role's name, Start9's AP hardware.
 
 ## How to validate
 
-- Per-commit: `make start-wrt-test` (container unit tests) — this environment has **no native Rust
-  toolchain**, so the containerized path (`start9/cargo-zigbuild`) is the only compile route here.
-- Feature acceptance: the Layer-3 hardware suite in `satellite-router-testplan.md` on a Core +
-  Satellite pair. The **WAN-less egress (Phase 2)** is the highest-risk item and should be proven on
-  hardware before the rest is built out.
+- Per change: `make start-wrt-test` in the capped container (`--cpus=4 -m 10g -j 2`,
+  `opt-level 0`; see the workspace notes), `make start-wrt-format-check`, `npm run check:wrt`,
+  `make start-wrt-rpc-bindings-check` after any RPC change.
+- On the bench: the exit checks of each batch above, driven from the client's side and with
+  evidence from both routers. Batch two and the guard variant need an image build
+  (`make start-wrt-image`, hours) flashed on both routers; everything in batch one runs on the
+  1.2.1 image with the branch binary deployed over SSH.

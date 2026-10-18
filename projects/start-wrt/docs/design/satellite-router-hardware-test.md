@@ -1,5 +1,7 @@
 # Satellite Router — Basic Hardware Bring-up Test
 
+> **Superseded by D25 (`satellite-router.md` §21, 2026-10-18).** This bring-up runbook covers the routed design and is kept as its record; its runs on the two-router bench are in `satellite-router-open-questions.md` §22–26. The thin-AP bench checks are in `satellite-router-next-steps.md`.
+
 The **minimal** on-hardware test that validates the core mechanism before the full pairing/sync/UI
 is built: a **site-to-site WireGuard tunnel carrying a routed prefix, attached to the Core's profile
 zone, gives a WAN-less satellite Internet egress through the Core with that profile's policy.**
