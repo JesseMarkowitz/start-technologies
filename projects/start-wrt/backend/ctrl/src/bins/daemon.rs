@@ -213,6 +213,11 @@ async fn inner_main() -> Result<(), Error> {
     let open_authed = crate::continuations::OpenAuthedContinuations::new();
     let app_state;
 
+    // Adopted, not merely in the role: a candidate behaves as a router until a Core takes it.
+    let is_access_point = {
+        let role = crate::satellite::load_role();
+        role.role == crate::satellite::RouterRole::Satellite && role.core_key.is_some()
+    };
     if setup_mode {
         tracing::info!("setup mode detected (booted from removable media)");
 
@@ -247,6 +252,12 @@ async fn inner_main() -> Result<(), Error> {
             }
         }
 
+        app_state = AppState {
+            flash_in_progress: Arc::new(AtomicBool::new(false)),
+        };
+    } else if is_access_point {
+        // An access point holds nothing the Core does not push (design D25).
+        crate::update::check_pending_update_marker();
         app_state = AppState {
             flash_in_progress: Arc::new(AtomicBool::new(false)),
         };
@@ -371,7 +382,7 @@ async fn inner_main() -> Result<(), Error> {
     // Initialize SSL: ensure Root CA and server cert exist
     let tls_ready = init_ssl().await;
 
-    if !setup_mode {
+    if !setup_mode && !is_access_point {
         // The IGD UUID derives from the initialized root CA.
         // Configure reply diversion before constructing the SNI demux.
         startos::net::transparent::set_divert_config(startos::net::transparent::DivertConfig {
@@ -396,6 +407,8 @@ async fn inner_main() -> Result<(), Error> {
         if crate::dns_inject::DNS_INJECT.set(di.clone()).is_ok() {
             tokio::spawn(crate::dns_inject::run(di));
         }
+    }
+    if !setup_mode {
         crate::adoption::start();
     }
 

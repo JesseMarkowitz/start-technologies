@@ -548,5 +548,4 @@ export default {
   570: 'Szerokość 2,4 GHz',
   571: 'Szerokość 5 GHz',
   572: 'Nie połączono',
-  573: 'Niedostępne na routerze satelitarnym. Urządzenia podłączone tutaj nie mogą samodzielnie otwierać portów przez UPnP ani PCP; takie żądania są odrzucane. Aby udostępnić urządzenie za tym routerem, dodaj port ręcznie na routerze Core.',
 } satisfies i18n

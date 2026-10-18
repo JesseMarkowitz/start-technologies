@@ -36,9 +36,12 @@ import { EthernetPortView, EthernetService } from './service'
             @if (item.wan) {
               <span tuiBadge size="s" appearance="primary">WAN</span>
             }
+            @if (item.trunk) {
+              <span tuiBadge size="s" appearance="primary">TRUNK</span>
+            }
           </td>
           <td tuiTd>
-            @if (item.wan) {
+            @if (item.wan || item.trunk) {
               -
             } @else {
               <button

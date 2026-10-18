@@ -56,28 +56,6 @@ export const AdoptParams: z.ZodObject<{
    * The candidate's sticker Wi-Fi password, or its adoption code.
    */
   secret: z.ZodString
-  /**
-   * The Core profile interface the first tunnel carries.
-   */
-  profile: z.ZodString
-  /**
-   * Firewall zone the handshake arrives on; derived from the candidate's
-   * interface when omitted.
-   */
-  transitZone: z.ZodCodec<
-    z.ZodOptional<z.ZodNullable<z.ZodString>>,
-    z.ZodNullable<z.ZodString>
-  >
-  /**
-   * Repeatable. What the satellite routes through the tunnel; all traffic
-   * when omitted.
-   */
-  allowedIp: z.ZodArray<z.ZodString>
-  /**
-   * Repeatable. The satellite's own subnets the Core routes to it over the
-   * tunnel, besides its tunnel address.
-   */
-  satelliteSubnet: z.ZodArray<z.ZodString>
   coreTunnelAddr: z.ZodCodec<
     z.ZodOptional<z.ZodNullable<z.ZodString>>,
     z.ZodNullable<z.ZodString>
@@ -111,39 +89,6 @@ export const AdoptParams: z.ZodObject<{
   secret: z.string().meta({
     description:
       "The candidate's sticker Wi-Fi password, or its adoption code.",
-  }),
-  /**
-   * The Core profile interface the first tunnel carries.
-   */
-  profile: z.string().meta({
-    description: 'The Core profile interface the first tunnel carries.',
-  }),
-  /**
-   * Firewall zone the handshake arrives on; derived from the candidate's
-   * interface when omitted.
-   */
-  transitZone: wire(
-    z.string().nullable().optional(),
-    z.string().nullable(),
-  ).meta({
-    description:
-      "Firewall zone the handshake arrives on; derived from the candidate's\ninterface when omitted.",
-  }),
-  /**
-   * Repeatable. What the satellite routes through the tunnel; all traffic
-   * when omitted.
-   */
-  allowedIp: z.array(z.string()).meta({
-    description:
-      'Repeatable. What the satellite routes through the tunnel; all traffic\nwhen omitted.',
-  }),
-  /**
-   * Repeatable. The satellite's own subnets the Core routes to it over the
-   * tunnel, besides its tunnel address.
-   */
-  satelliteSubnet: z.array(z.string()).meta({
-    description:
-      "Repeatable. The satellite's own subnets the Core routes to it over the\ntunnel, besides its tunnel address.",
   }),
   coreTunnelAddr: wire(z.string().nullable().optional(), z.string().nullable()),
   satelliteTunnelAddr: wire(
@@ -957,64 +902,9 @@ export const OutboundVpnUpdateRequest: z.ZodObject<{
 }).meta({
   id: 'OutboundVpnUpdateRequest',
 })
-export const PairParams: z.ZodObject<{
-  name: z.ZodString
-  /**
-   * The satellite's WireGuard public key (base64).
-   */
-  publicKey: z.ZodString
-  /**
-   * The satellite's management address on the inter-router link.
-   */
-  mgmtAddress: z.ZodString
-  /**
-   * Single-use enrollment token (validation is a follow-up — see note).
-   */
-  enrollmentToken: z.ZodCodec<
-    z.ZodOptional<z.ZodNullable<z.ZodString>>,
-    z.ZodNullable<z.ZodString>
-  >
-}> = /* @__PURE__ */ object({
-  name: z.string(),
-  /**
-   * The satellite's WireGuard public key (base64).
-   */
-  publicKey: z.string().meta({
-    description: "The satellite's WireGuard public key (base64).",
-  }),
-  /**
-   * The satellite's management address on the inter-router link.
-   */
-  mgmtAddress: z.string().meta({
-    description: "The satellite's management address on the inter-router link.",
-  }),
-  /**
-   * Single-use enrollment token (validation is a follow-up — see note).
-   */
-  enrollmentToken: wire(
-    z.string().nullable().optional(),
-    z.string().nullable(),
-  ).meta({
-    description:
-      'Single-use enrollment token (validation is a follow-up — see note).',
-  }),
-}).meta({
-  id: 'PairParams',
-})
-export const PairResponse: z.ZodObject<{
-  name: z.ZodString
-  status: z.ZodString
-  note: z.ZodString
-}> = /* @__PURE__ */ object({
-  name: z.string(),
-  status: z.string(),
-  note: z.string(),
-}).meta({
-  id: 'PairResponse',
-})
 
 /**
- * One satellite the Core has paired with (`/etc/startwrt/satellites.json`).
+ * One access point the Core has adopted (`/etc/startwrt/satellites.json`).
  */
 export const PairedSatellite: z.ZodObject<{
   /**
@@ -1022,17 +912,15 @@ export const PairedSatellite: z.ZodObject<{
    */
   name: z.ZodString
   /**
-   * The satellite's WireGuard public key (base64), pinned at pairing — the
-   * far end of the management tunnel and the trust anchor for its RPC.
+   * The satellite's WireGuard public key (base64), pinned at adoption.
    */
   publicKey: z.ZodString
   /**
-   * The satellite's management address on the inter-router link.
+   * The satellite's address inside its management tunnel.
    */
   mgmtAddress: z.ZodString
   /**
-   * The config generation this satellite last acknowledged (0 = never). Used
-   * to surface staleness after a config edit (see design §10).
+   * The config generation this satellite last acknowledged (0 = never).
    */
   generationApplied: z.ZodCodec<z.ZodOptional<z.ZodInt>, z.ZodInt>
   /**
@@ -1047,26 +935,24 @@ export const PairedSatellite: z.ZodObject<{
     description: 'Admin-facing label (unique).',
   }),
   /**
-   * The satellite's WireGuard public key (base64), pinned at pairing — the
-   * far end of the management tunnel and the trust anchor for its RPC.
+   * The satellite's WireGuard public key (base64), pinned at adoption.
    */
   publicKey: z.string().meta({
     description:
-      "The satellite's WireGuard public key (base64), pinned at pairing — the\nfar end of the management tunnel and the trust anchor for its RPC.",
+      "The satellite's WireGuard public key (base64), pinned at adoption.",
   }),
   /**
-   * The satellite's management address on the inter-router link.
+   * The satellite's address inside its management tunnel.
    */
   mgmtAddress: z.string().meta({
-    description: "The satellite's management address on the inter-router link.",
+    description: "The satellite's address inside its management tunnel.",
   }),
   /**
-   * The config generation this satellite last acknowledged (0 = never). Used
-   * to surface staleness after a config edit (see design §10).
+   * The config generation this satellite last acknowledged (0 = never).
    */
   generationApplied: wire(z.int().optional(), z.int()).meta({
     description:
-      'The config generation this satellite last acknowledged (0 = never). Used\nto surface staleness after a config edit (see design §10).',
+      'The config generation this satellite last acknowledged (0 = never).',
   }),
   /**
    * Unix seconds of last successful contact (0 = never).
@@ -1077,7 +963,23 @@ export const PairedSatellite: z.ZodObject<{
 }).meta({
   id: 'PairedSatellite',
   description:
-    'One satellite the Core has paired with (`/etc/startwrt/satellites.json`).',
+    'One access point the Core has adopted (`/etc/startwrt/satellites.json`).',
+})
+
+/**
+ * One Wi-Fi password and the profile VLAN it lands on.
+ */
+export const PasswordSpec: z.ZodObject<{
+  label: z.ZodString
+  key: z.ZodString
+  vlanTag: z.ZodInt
+}> = /* @__PURE__ */ object({
+  label: z.string(),
+  key: z.string(),
+  vlanTag: z.int(),
+}).meta({
+  id: 'PasswordSpec',
+  description: 'One Wi-Fi password and the profile VLAN it lands on.',
 })
 
 /**
@@ -1177,161 +1079,28 @@ export const ProfileIdOpt: z.ZodObject<{
 }).meta({
   id: 'ProfileIdOpt',
 })
+
+/**
+ * A profile as its VLAN crosses the trunk.
+ */
+export const ProfileSpec: z.ZodObject<{
+  fullname: z.ZodString
+  interface: z.ZodString
+  vlanTag: z.ZodInt
+}> = /* @__PURE__ */ object({
+  fullname: z.string(),
+  interface: z.string(),
+  vlanTag: z.int(),
+}).meta({
+  id: 'ProfileSpec',
+  description: 'A profile as its VLAN crosses the trunk.',
+})
 export const Protocol: z.ZodEnum<{
   tcp: 'tcp'
   udp: 'udp'
   'tcp+udp': 'tcp+udp'
 }> = /* @__PURE__ */ z.enum(['tcp', 'udp', 'tcp+udp']).meta({
   id: 'Protocol',
-})
-export const ProvisionCoreParams: z.ZodObject<{
-  satellite: z.ZodString
-  profile: z.ZodString
-  coreTransitAddr: z.ZodString
-  /**
-   * Repeatable. CIDR(s) to route to the satellite over the tunnel (e.g. the
-   * satellite's /24, or its wg host /32 for a self-ping test). Repeat once per
-   * address family for a dual-stack profile (D11).
-   */
-  satelliteAllowedIp: z.ZodArray<z.ZodString>
-  satellitePublicKey: z.ZodString
-  presharedKey: z.ZodString
-  listenPort: z.ZodInt
-  /**
-   * Firewall zone the handshake arrives on (the transit-link zone).
-   */
-  transitZone: z.ZodString
-  corePrivateKey: z.ZodString
-}> = /* @__PURE__ */ object({
-  satellite: z.string(),
-  profile: z.string(),
-  coreTransitAddr: z.string(),
-  /**
-   * Repeatable. CIDR(s) to route to the satellite over the tunnel (e.g. the
-   * satellite's /24, or its wg host /32 for a self-ping test). Repeat once per
-   * address family for a dual-stack profile (D11).
-   */
-  satelliteAllowedIp: z.array(z.string()).meta({
-    description:
-      "Repeatable. CIDR(s) to route to the satellite over the tunnel (e.g. the\nsatellite's /24, or its wg host /32 for a self-ping test). Repeat once per\naddress family for a dual-stack profile (D11).",
-  }),
-  satellitePublicKey: z.string(),
-  presharedKey: z.string(),
-  listenPort: z.int(),
-  /**
-   * Firewall zone the handshake arrives on (the transit-link zone).
-   */
-  transitZone: z.string().meta({
-    description:
-      'Firewall zone the handshake arrives on (the transit-link zone).',
-  }),
-  corePrivateKey: z.string(),
-}).meta({
-  id: 'ProvisionCoreParams',
-})
-export const ProvisionSatelliteParams: z.ZodObject<{
-  satellite: z.ZodString
-  profile: z.ZodString
-  satWgAddr: z.ZodString
-  corePublicKey: z.ZodString
-  coreEndpointHost: z.ZodString
-  coreEndpointPort: z.ZodInt
-  presharedKey: z.ZodString
-  satPrivateKey: z.ZodString
-  /**
-   * Repeatable. What to route through the tunnel; defaults to full egress via
-   * the Core (`0.0.0.0/0`) when omitted.
-   */
-  allowedIp: z.ZodArray<z.ZodString>
-  /**
-   * A local interface whose firewall zone the tunnel joins.
-   */
-  firewallZoneMember: z.ZodString
-}> = /* @__PURE__ */ object({
-  satellite: z.string(),
-  profile: z.string(),
-  satWgAddr: z.string(),
-  corePublicKey: z.string(),
-  coreEndpointHost: z.string(),
-  coreEndpointPort: z.int(),
-  presharedKey: z.string(),
-  satPrivateKey: z.string(),
-  /**
-   * Repeatable. What to route through the tunnel; defaults to full egress via
-   * the Core (`0.0.0.0/0`) when omitted.
-   */
-  allowedIp: z.array(z.string()).meta({
-    description:
-      'Repeatable. What to route through the tunnel; defaults to full egress via\nthe Core (`0.0.0.0/0`) when omitted.',
-  }),
-  /**
-   * A local interface whose firewall zone the tunnel joins.
-   */
-  firewallZoneMember: z.string().meta({
-    description: 'A local interface whose firewall zone the tunnel joins.',
-  }),
-}).meta({
-  id: 'ProvisionSatelliteParams',
-})
-export const ProvisionSatelliteProfileParams: z.ZodObject<{
-  /**
-   * The network interface name to create on the satellite (e.g. "psat_guest").
-   */
-  profile: z.ZodString
-  vlanTag: z.ZodInt
-  /**
-   * The satellite's gateway address for the profile /24 (its .1).
-   */
-  gateway: z.ZodString
-  /**
-   * A satellite LAN port to place on the profile VLAN (untagged).
-   */
-  port: z.ZodString
-  /**
-   * IPv6 prefix length to carve for this profile from the satellite's delegated
-   * prefix (D11). Omit for v4-only, which is all of v1 — a satellite has no WAN, so
-   * nothing delegates a prefix until D11's mechanism lands.
-   */
-  ip6assign: z.ZodCodec<
-    z.ZodOptional<z.ZodNullable<z.ZodInt>>,
-    z.ZodNullable<z.ZodInt>
-  >
-  firewallZoneMember: z.ZodString
-}> = /* @__PURE__ */ object({
-  /**
-   * The network interface name to create on the satellite (e.g. "psat_guest").
-   */
-  profile: z.string().meta({
-    description:
-      'The network interface name to create on the satellite (e.g. "psat_guest").',
-  }),
-  vlanTag: z.int(),
-  /**
-   * The satellite's gateway address for the profile /24 (its .1).
-   */
-  gateway: z.string().meta({
-    description:
-      "The satellite's gateway address for the profile /24 (its .1).",
-  }),
-  /**
-   * A satellite LAN port to place on the profile VLAN (untagged).
-   */
-  port: z.string().meta({
-    description:
-      'A satellite LAN port to place on the profile VLAN (untagged).',
-  }),
-  /**
-   * IPv6 prefix length to carve for this profile from the satellite's delegated
-   * prefix (D11). Omit for v4-only, which is all of v1 — a satellite has no WAN, so
-   * nothing delegates a prefix until D11's mechanism lands.
-   */
-  ip6assign: wire(z.int().nullable().optional(), z.int().nullable()).meta({
-    description:
-      "IPv6 prefix length to carve for this profile from the satellite's delegated\nprefix (D11). Omit for v4-only, which is all of v1 — a satellite has no WAN, so\nnothing delegates a prefix until D11's mechanism lands.",
-  }),
-  firewallZoneMember: z.string(),
-}).meta({
-  id: 'ProvisionSatelliteProfileParams',
 })
 export const PublishedPortStatus: z.ZodEnum<{
   active: 'active'
@@ -1344,6 +1113,30 @@ export const PublishedPortStatus: z.ZodEnum<{
   .meta({
     id: 'PublishedPortStatus',
   })
+
+/**
+ * One radio's assignment in the Core's channel plan.
+ */
+export const RadioPlan: z.ZodObject<{
+  band: z.ZodString
+  channel: z.ZodInt
+  /**
+   * OpenWrt `htmode`, such as `HE80`.
+   */
+  htmode: z.ZodString
+}> = /* @__PURE__ */ object({
+  band: z.string(),
+  channel: z.int(),
+  /**
+   * OpenWrt `htmode`, such as `HE80`.
+   */
+  htmode: z.string().meta({
+    description: 'OpenWrt `htmode`, such as `HE80`.',
+  }),
+}).meta({
+  id: 'RadioPlan',
+  description: "One radio's assignment in the Core's channel plan.",
+})
 export const ResetPasswordParams: z.ZodObject<{
   oldPassword: z.ZodString
   newPassword: z.ZodString
@@ -1355,14 +1148,14 @@ export const ResetPasswordParams: z.ZodObject<{
 })
 
 /**
- * Which role this physical router plays. Chosen at provisioning; a router with
- * no marker is a standalone **Core** (the common case).
+ * A router with no marker is a standalone Core. An adopted router is a
+ * satellite: an access point of its Core.
  */
 export const RouterRole: z.ZodEnum<{ core: 'core'; satellite: 'satellite' }> =
   /* @__PURE__ */ z.enum(['core', 'satellite']).meta({
     id: 'RouterRole',
     description:
-      'Which role this physical router plays. Chosen at provisioning; a router with\nno marker is a standalone **Core** (the common case).',
+      'A router with no marker is a standalone Core. An adopted router is a\nsatellite: an access point of its Core.',
   })
 export const ScheduleGetParams: z.ZodObject<{ interface: z.ZodString }> =
   /* @__PURE__ */ object({ interface: z.string() }).meta({
@@ -1469,28 +1262,12 @@ export const SetRoleParams: z.ZodObject<{
    * "core" or "satellite".
    */
   role: z.ZodString
-  /**
-   * On a satellite, the Core's underlay endpoint.
-   */
-  coreEndpoint: z.ZodCodec<
-    z.ZodOptional<z.ZodNullable<z.ZodString>>,
-    z.ZodNullable<z.ZodString>
-  >
 }> = /* @__PURE__ */ object({
   /**
    * "core" or "satellite".
    */
   role: z.string().meta({
     description: '"core" or "satellite".',
-  }),
-  /**
-   * On a satellite, the Core's underlay endpoint.
-   */
-  coreEndpoint: wire(
-    z.string().nullable().optional(),
-    z.string().nullable(),
-  ).meta({
-    description: "On a satellite, the Core's underlay endpoint.",
   }),
 }).meta({
   id: 'SetRoleParams',
@@ -2048,6 +1825,10 @@ export const EthernetSetRequest: z.ZodIntersection<
           z.ZodOptional<z.ZodNullable<typeof ProfileIdOpt>>,
           z.ZodNullable<typeof ProfileIdOpt>
         >
+        /**
+         * Carries every profile tagged to access points (design D25). No profile.
+         */
+        trunk: z.ZodCodec<z.ZodOptional<z.ZodBoolean>, z.ZodBoolean>
       }>
     >
   }>
@@ -2069,6 +1850,13 @@ export const EthernetSetRequest: z.ZodIntersection<
             ProfileIdOpt.nullable().optional(),
             ProfileIdOpt.nullable(),
           ),
+          /**
+           * Carries every profile tagged to access points (design D25). No profile.
+           */
+          trunk: wire(z.boolean().optional(), z.boolean()).meta({
+            description:
+              'Carries every profile tagged to access points (design D25). No profile.',
+          }),
         }),
       ),
     }),
@@ -2285,32 +2073,50 @@ export const PublishedPortInput: z.ZodObject<{
 export const RoleMarker: z.ZodObject<{
   role: typeof RouterRole
   /**
-   * On a Satellite, the Core's reachable endpoint on the inter-router link
-   * (underlay address). `None` on a Core.
+   * On a satellite, the Core's link-local endpoint with its interface.
    */
   coreEndpoint: z.ZodOptional<z.ZodNullable<z.ZodString>>
   /**
-   * On a Satellite, the Core's WireGuard public key (base64) pinned at
-   * adoption. `None` until adopted; a satellite with none waits to be adopted.
+   * On a satellite, the Core's WireGuard public key (base64) pinned at
+   * adoption. A satellite with none waits to be adopted.
    */
   coreKey: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  /**
+   * On a satellite, the port that carries the trunk to the Core.
+   */
+  uplink: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  /**
+   * On a satellite, the sync generation applied last (0 = none).
+   */
+  generation: z.ZodCodec<z.ZodOptional<z.ZodInt>, z.ZodInt>
 }> = /* @__PURE__ */ object({
   role: RouterRole,
   /**
-   * On a Satellite, the Core's reachable endpoint on the inter-router link
-   * (underlay address). `None` on a Core.
+   * On a satellite, the Core's link-local endpoint with its interface.
    */
   coreEndpoint: z.string().nullable().optional().meta({
     description:
-      "On a Satellite, the Core's reachable endpoint on the inter-router link\n(underlay address). `None` on a Core.",
+      "On a satellite, the Core's link-local endpoint with its interface.",
   }),
   /**
-   * On a Satellite, the Core's WireGuard public key (base64) pinned at
-   * adoption. `None` until adopted; a satellite with none waits to be adopted.
+   * On a satellite, the Core's WireGuard public key (base64) pinned at
+   * adoption. A satellite with none waits to be adopted.
    */
   coreKey: z.string().nullable().optional().meta({
     description:
-      "On a Satellite, the Core's WireGuard public key (base64) pinned at\nadoption. `None` until adopted; a satellite with none waits to be adopted.",
+      "On a satellite, the Core's WireGuard public key (base64) pinned at\nadoption. A satellite with none waits to be adopted.",
+  }),
+  /**
+   * On a satellite, the port that carries the trunk to the Core.
+   */
+  uplink: z.string().nullable().optional().meta({
+    description: 'On a satellite, the port that carries the trunk to the Core.',
+  }),
+  /**
+   * On a satellite, the sync generation applied last (0 = none).
+   */
+  generation: wire(z.int().optional(), z.int()).meta({
+    description: 'On a satellite, the sync generation applied last (0 = none).',
   }),
 }).meta({
   id: 'RoleMarker',
@@ -2362,15 +2168,96 @@ export const StatusResponse: z.ZodObject<{
     z.ZodOptional<z.ZodNullable<z.ZodString>>,
     z.ZodNullable<z.ZodString>
   >
+  uplink: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodString>>,
+    z.ZodNullable<z.ZodString>
+  >
+  generation: z.ZodInt
   satelliteCount: z.ZodInt
   satellites: z.ZodArray<typeof PairedSatellite>
 }> = /* @__PURE__ */ object({
   role: RouterRole,
   coreEndpoint: wire(z.string().nullable().optional(), z.string().nullable()),
+  uplink: wire(z.string().nullable().optional(), z.string().nullable()),
+  generation: z.int(),
   satelliteCount: z.int(),
   satellites: z.array(PairedSatellite),
 }).meta({
   id: 'StatusResponse',
+})
+
+/**
+ * What an access point needs from its Core (D5). `generation` is monotonic;
+ * an access point rejects a snapshot older than the one it applied.
+ */
+export const SyncSnapshot: z.ZodObject<{
+  generation: z.ZodInt
+  ssid: z.ZodString
+  broadcastSeparately: z.ZodCodec<z.ZodOptional<z.ZodBoolean>, z.ZodBoolean>
+  /**
+   * Unset runs the world regulatory domain.
+   */
+  country: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodString>>,
+    z.ZodNullable<z.ZodString>
+  >
+  /**
+   * The Core's channel plan for this access point, keyed by its radio name.
+   */
+  radios: z.ZodRecord<z.ZodString, typeof RadioPlan>
+  profiles: z.ZodArray<typeof ProfileSpec>
+  passwords: z.ZodArray<typeof PasswordSpec>
+  /**
+   * Access ports by name: the profile VLAN each carries untagged, or none.
+   */
+  ports: z.ZodRecord<z.ZodString, z.ZodNullable<z.ZodInt>>
+  /**
+   * The registry the Core itself updates from. The access point reaches no other.
+   */
+  updateSource: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodString>>,
+    z.ZodNullable<z.ZodString>
+  >
+}> = /* @__PURE__ */ object({
+  generation: z.int(),
+  ssid: z.string(),
+  broadcastSeparately: wire(z.boolean().optional(), z.boolean()),
+  /**
+   * Unset runs the world regulatory domain.
+   */
+  country: wire(z.string().nullable().optional(), z.string().nullable()).meta({
+    description: 'Unset runs the world regulatory domain.',
+  }),
+  /**
+   * The Core's channel plan for this access point, keyed by its radio name.
+   */
+  radios: z.record(z.string(), RadioPlan).meta({
+    description:
+      "The Core's channel plan for this access point, keyed by its radio name.",
+  }),
+  profiles: z.array(ProfileSpec),
+  passwords: z.array(PasswordSpec),
+  /**
+   * Access ports by name: the profile VLAN each carries untagged, or none.
+   */
+  ports: z.record(z.string(), z.int().nullable()).meta({
+    description:
+      'Access ports by name: the profile VLAN each carries untagged, or none.',
+  }),
+  /**
+   * The registry the Core itself updates from. The access point reaches no other.
+   */
+  updateSource: wire(
+    z.string().nullable().optional(),
+    z.string().nullable(),
+  ).meta({
+    description:
+      'The registry the Core itself updates from. The access point reaches no other.',
+  }),
+}).meta({
+  id: 'SyncSnapshot',
+  description:
+    'What an access point needs from its Core (D5). `generation` is monotonic;\nan access point rejects a snapshot older than the one it applied.',
 })
 export const UciFile: z.ZodObject<{
   sections: z.ZodArray<typeof Section>
@@ -3202,6 +3089,13 @@ export const Api = {
                   ProfileId.nullable().optional(),
                   ProfileId.nullable(),
                 ),
+                /**
+                 * Carries every profile tagged to access points (design D25). No profile.
+                 */
+                trunk: wire(z.boolean().optional(), z.boolean()).meta({
+                  description:
+                    'Carries every profile tagged to access points (design D25). No profile.',
+                }),
               }),
             ),
           }),
@@ -3606,6 +3500,13 @@ export const Api = {
             },
           },
         },
+        apply: {
+          _PARAMS: /* @__PURE__ */ SyncSnapshot.meta({
+            description:
+              'A clap-compatible wrapper that reads the inner value as JSON from stdin\ninstead of from CLI args. Used for commands that take complex structured\ninput (entire profile objects, etc.).\n\nThis is a thin wrapper around `startos::util::serde::StdinDeserializable`\nthat adds a `CommandFactory` impl so it can be used directly as a handler\n`Params` type (rather than flattened inside a `#[derive(Parser)]` struct,\nwhich is how startos uses its version).',
+          }),
+          _RETURN: /* @__PURE__ */ z.null(),
+        },
         'get-role': {
           _PARAMS: /* @__PURE__ */ z.intersection(
             z.intersection(
@@ -3635,33 +3536,6 @@ export const Api = {
             empty,
           ),
           _RETURN: /* @__PURE__ */ z.array(PairedSatellite),
-        },
-        pair: {
-          _PARAMS: /* @__PURE__ */ z.intersection(
-            z.intersection(
-              object({
-                format: wire(
-                  IoFormat.nullable().optional(),
-                  IoFormat.nullable(),
-                ),
-              }),
-              empty,
-            ),
-            PairParams,
-          ),
-          _RETURN: /* @__PURE__ */ PairResponse,
-        },
-        'provision-core-tunnel': {
-          _PARAMS: /* @__PURE__ */ ProvisionCoreParams,
-          _RETURN: /* @__PURE__ */ z.null(),
-        },
-        'provision-satellite-profile': {
-          _PARAMS: /* @__PURE__ */ ProvisionSatelliteProfileParams,
-          _RETURN: /* @__PURE__ */ z.null(),
-        },
-        'provision-satellite-tunnel': {
-          _PARAMS: /* @__PURE__ */ ProvisionSatelliteParams,
-          _RETURN: /* @__PURE__ */ z.null(),
         },
         'set-role': {
           _PARAMS: /* @__PURE__ */ SetRoleParams,

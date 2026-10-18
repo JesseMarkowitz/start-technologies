@@ -548,5 +548,4 @@ export default {
   570: 'Ancho de 2,4 GHz',
   571: 'Ancho de 5 GHz',
   572: 'No conectado',
-  573: 'No disponible en un router satélite. Los dispositivos conectados aquí no pueden abrir sus propios puertos mediante UPnP o PCP; esas solicitudes se rechazan. Para exponer un dispositivo detrás de este router, añada el puerto a mano en el router Core.',
 } satisfies i18n

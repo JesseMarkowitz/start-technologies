@@ -67,6 +67,9 @@ pub struct FirewallRule {
     #[uci(default)]
     pub dest_port: Option<String>,
     pub proto: Vec<String>,
+    /// fw4 ICMP type names, for a rule with proto `icmp`.
+    #[uci(default)]
+    pub icmp_type: Vec<String>,
     pub target: FirewallTarget,
     #[uci(default)]
     pub family: Option<String>,

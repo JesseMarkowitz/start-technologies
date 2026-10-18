@@ -26,9 +26,10 @@ use rpc_toolkit::{from_fn_async, from_fn_async_local, HandlerExt, ParentHandler}
 use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
-use uciedit::openwrt::{FirewallRule, FirewallTarget, FirewallZone, NetworkInterface};
+use uciedit::openwrt::{FirewallRule, FirewallTarget, NetworkInterface};
 use uciedit::{dump_all, parse_all, Arena, Configs};
 
+use crate::backhaul::backhaul_device;
 use crate::prelude::*;
 use crate::satellite::{self, PairedSatellite, RouterRole};
 use crate::utils::HandlerExtSerde;
@@ -147,12 +148,16 @@ fn if_name(index: u32) -> Option<String> {
     })
 }
 
-fn lan_bridges() -> Vec<String> {
+/// The Core announces on the backhaul VLAN of its LAN bridge alone: a router
+/// on a profile port is a client, not a candidate.
+fn backhaul_interfaces() -> Vec<String> {
     std::fs::read_dir("/sys/class/net")
         .map(|d| {
             d.filter_map(|e| e.ok())
                 .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| n.starts_with("br-lan"))
+                .filter(|n| {
+                    n.starts_with("br-") && *n == backhaul_device(n.split('.').next().unwrap_or(""))
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -168,14 +173,14 @@ async fn run_core() -> Result<(), Error> {
     if CORE.set(link.clone()).is_err() {
         return Ok(());
     }
-    tracing::info!("adoption: Core announcing on LAN bridges, port {PORT}");
+    tracing::info!("adoption: Core announcing on the backhaul, port {PORT}");
     let announce = encode(&Message::Announce);
     let mut tick = tokio::time::interval(ANNOUNCE_EVERY);
     let mut buf = vec![0u8; MAX_DATAGRAM];
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                for iface in lan_bridges() {
+                for iface in backhaul_interfaces() {
                     let Some(idx) = if_index(&iface) else { continue };
                     let dst = SocketAddrV6::new(ALL_NODES, PORT, 0, idx);
                     if let Err(e) = link.socket.send_to(&announce, dst).await {
@@ -285,21 +290,6 @@ pub struct AdoptParams {
     /// The candidate's sticker Wi-Fi password, or its adoption code.
     #[clap(long)]
     secret: String,
-    /// The Core profile interface the first tunnel carries.
-    #[clap(long)]
-    profile: String,
-    /// Firewall zone the handshake arrives on; derived from the candidate's
-    /// interface when omitted.
-    #[clap(long)]
-    transit_zone: Option<String>,
-    /// Repeatable. What the satellite routes through the tunnel; all traffic
-    /// when omitted.
-    #[clap(long)]
-    allowed_ip: Vec<String>,
-    /// Repeatable. The satellite's own subnets the Core routes to it over the
-    /// tunnel, besides its tunnel address.
-    #[clap(long)]
-    satellite_subnet: Vec<String>,
     #[clap(long)]
     core_tunnel_addr: Option<String>,
     #[clap(long)]
@@ -333,31 +323,17 @@ fn parse_candidate_address(s: &str) -> Result<SocketAddrV6, Error> {
     Ok(SocketAddrV6::new(ip, PORT, 0, idx))
 }
 
-fn zone_for_device(cfgs: &Configs<'_>, device: &str) -> Option<String> {
-    let logical = cfgs["network"]
-        .sections
-        .iter()
-        .find(|s| {
-            s.get::<NetworkInterface>()
-                .map(|i| i.device == device)
-                .unwrap_or(false)
-        })
-        .and_then(|s| s.name().map(|n| n.to_string()))?;
-    cfgs["firewall"]
-        .sections
-        .iter()
-        .filter_map(|s| s.get::<FirewallZone>().ok())
-        .find(|z| z.network.iter().any(|n| *n == logical))
-        .map(|z| z.name)
-}
-
-fn used_listen_ports(cfgs: &Configs<'_>) -> Vec<u16> {
-    cfgs["network"]
+/// The first UDP port from `base` no WireGuard interface listens on.
+fn next_free_listen_port(cfgs: &Configs<'_>, base: u16) -> u16 {
+    let used: Vec<u16> = cfgs["network"]
         .sections
         .iter()
         .filter_map(|s| s.get::<crate::vpn_server::WgInterface>().ok())
         .filter_map(|w| w.listen_port)
-        .collect()
+        .collect();
+    (base..=u16::MAX)
+        .find(|p| !used.contains(p))
+        .unwrap_or(base)
 }
 
 fn next_transit_index(registry: &[PairedSatellite]) -> u8 {
@@ -387,29 +363,18 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
         }
     }
 
-    let (transit_zone, listen_port, registry) = {
+    let (listen_port, registry) = {
         let arena = Arena::new();
-        let cfgs = parse_all("/etc/config", &arena, &["network", "firewall"]).await?;
-        let zone = match p.transit_zone.clone() {
-            Some(z) => z,
-            None => zone_for_device(&cfgs, &iface).unwrap_or_else(|| "lan".to_string()),
-        };
-        let port = match p.listen_port {
-            Some(port) => port,
-            None => {
-                satellite::allocate_listen_ports(&used_listen_ports(&cfgs), 1, LISTEN_PORT_BASE)
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| Error::new(eyre!("no free listen port"), ErrorKind::Network))?
-            }
-        };
-        (zone, port, satellite::load_registry())
+        let cfgs = parse_all("/etc/config", &arena, &["network"]).await?;
+        let port = p
+            .listen_port
+            .unwrap_or_else(|| next_free_listen_port(&cfgs, LISTEN_PORT_BASE));
+        (port, satellite::load_registry())
     };
     let index = next_transit_index(&registry);
     let (core_default, sat_default) = satellite::transit_addrs(index);
     let tunnel = TunnelSpec {
         satellite: p.name.clone(),
-        profile: p.profile.clone(),
         core_listen_port: listen_port,
         core_tunnel_addr: p
             .core_tunnel_addr
@@ -419,11 +384,6 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
             .satellite_tunnel_addr
             .clone()
             .unwrap_or_else(|| sat_default.to_string()),
-        allowed_ips: if p.allowed_ip.is_empty() {
-            vec!["0.0.0.0/0".to_string()]
-        } else {
-            p.allowed_ip.clone()
-        },
     };
 
     let core_key = WgKey::generate();
@@ -489,23 +449,34 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
         .with_kind(ErrorKind::Network)?;
 
     let satellite_key = b64(adopted.satellite_key.as_bytes());
-    satellite::provision_core_tunnel(
-        ServerContext::default(),
-        satellite::ProvisionCoreParams {
-            satellite: p.name.clone(),
-            profile: p.profile.clone(),
-            core_transit_addr: tunnel.core_tunnel_addr.clone(),
-            satellite_allowed_ip: std::iter::once(format!("{}/32", tunnel.satellite_tunnel_addr))
-                .chain(p.satellite_subnet.iter().cloned())
-                .collect(),
-            satellite_public_key: satellite_key.clone(),
-            preshared_key: b64(&adopted.preshared_key),
-            listen_port,
-            transit_zone,
-            core_private_key: b64(core_key.as_ref()),
-        },
-    )
-    .await?;
+    let preshared_key = b64(&adopted.preshared_key);
+    let core_private_key = b64(core_key.as_ref());
+    let core_addr = parse_ip(&tunnel.core_tunnel_addr)?;
+    let satellite_addr = parse_ip(&tunnel.satellite_tunnel_addr)?;
+    {
+        let arena = Arena::new();
+        let mut cfgs = parse_all("/etc/config", &arena, &["network", "firewall"]).await?;
+        crate::mgmt_tunnel::provision_core_end(
+            &mut cfgs,
+            &arena,
+            &crate::mgmt_tunnel::CoreEnd {
+                satellite: &p.name,
+                core_addr,
+                satellite_addr,
+                satellite_public_key: &satellite_key,
+                preshared_key: &preshared_key,
+                listen_port,
+                core_private_key: &core_private_key,
+            },
+        )?;
+        dump_all("/etc/config", cfgs).await?;
+    }
+    let _ =
+        crate::run_quiet_async(tokio::process::Command::new("/etc/init.d/network").arg("reload"))
+            .await;
+    let _ =
+        crate::run_quiet_async(tokio::process::Command::new("/etc/init.d/firewall").arg("reload"))
+            .await;
     let mut registry = registry;
     satellite::remove_satellite(&mut registry, &p.name);
     satellite::add_satellite(
@@ -529,7 +500,7 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
     Ok(AdoptResponse {
         name: p.name,
         satellite_key,
-        interface: crate::vpn_site::site_interface_name(&tunnel.satellite, &tunnel.profile),
+        interface: crate::mgmt_tunnel::core_interface_name(&tunnel.satellite),
     })
 }
 
@@ -659,7 +630,7 @@ async fn run_candidate() -> Result<(), Error> {
             Message::Confirm(c) => match responder.confirm(&c, &mut guard, now) {
                 Ok(by) => {
                     let endpoint = format!("{}%{}", src.ip(), wan);
-                    match adopt_self(&key, &by, &endpoint).await {
+                    match adopt_self(&key, &by, src.ip()).await {
                         Ok(()) => {
                             crate::activity::log(
                                 "satellite",
@@ -700,28 +671,59 @@ async fn run_candidate() -> Result<(), Error> {
     }
 }
 
-async fn adopt_self(key: &WgKey, by: &proof::AdoptedBy, endpoint: &str) -> Result<(), Error> {
+fn parse_ip(s: &str) -> Result<std::net::IpAddr, Error> {
+    s.parse().map_err(|_| {
+        Error::new(
+            eyre!("invalid tunnel address '{s}'"),
+            ErrorKind::InvalidRequest,
+        )
+    })
+}
+
+/// Becoming an access point: the uplink joins the bridge, the Core's
+/// link-local endpoint is reached through the backhaul VLAN from here on, and
+/// the management tunnel dials it.
+async fn adopt_self(key: &WgKey, by: &proof::AdoptedBy, core_ip: &Ipv6Addr) -> Result<(), Error> {
     let t = &by.tunnel;
-    satellite::provision_satellite_tunnel(
-        ServerContext::default(),
-        satellite::ProvisionSatelliteParams {
-            satellite: t.satellite.clone(),
-            profile: t.profile.clone(),
-            sat_wg_addr: t.satellite_tunnel_addr.clone(),
-            core_public_key: b64(by.core_key.as_bytes()),
-            core_endpoint_host: endpoint.to_string(),
-            core_endpoint_port: t.core_listen_port,
-            preshared_key: b64(&by.preshared_key),
-            sat_private_key: b64(key.as_ref()),
-            allowed_ip: t.allowed_ips.clone(),
-            firewall_zone_member: "lan".to_string(),
-        },
-    )
-    .await?;
+    let endpoint;
+    let uplink;
+    {
+        let arena = Arena::new();
+        let mut cfgs = parse_all(
+            "/etc/config",
+            &arena,
+            &["network", "firewall", "dhcp", "wireless"],
+        )
+        .await?;
+        uplink = crate::ap::uplink_from_wan(&cfgs)
+            .ok_or_else(|| Error::new(eyre!("no WAN device configured"), ErrorKind::Network))?;
+        crate::ap::write_base_layout(&mut cfgs, &uplink)?;
+        let bridge = crate::ethernet::find_lan_bridge(&cfgs)?
+            .map(|d| d.name)
+            .unwrap_or_else(|| crate::ethernet::DEFAULT_LAN_BRIDGE.to_string());
+        endpoint = format!("{core_ip}%{}", backhaul_device(&bridge));
+        crate::mgmt_tunnel::provision_ap_end(
+            &mut cfgs,
+            &arena,
+            &crate::mgmt_tunnel::ApEnd {
+                satellite_addr: parse_ip(&t.satellite_tunnel_addr)?,
+                core_addr: parse_ip(&t.core_tunnel_addr)?,
+                core_public_key: &b64(by.core_key.as_bytes()),
+                core_endpoint_host: &endpoint,
+                core_endpoint_port: t.core_listen_port,
+                preshared_key: &b64(&by.preshared_key),
+                private_key: &b64(key.as_ref()),
+            },
+        )?;
+        dump_all("/etc/config", cfgs).await?;
+    }
     let mut role = satellite::load_role();
-    role.core_endpoint = Some(endpoint.to_string());
+    role.core_endpoint = Some(endpoint);
     role.core_key = Some(b64(by.core_key.as_bytes()));
-    satellite::persist_role(&role).await
+    role.uplink = Some(uplink);
+    satellite::persist_role(&role).await?;
+    crate::ap::reload_all().await;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -796,7 +798,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zone_and_wan_device_resolve_from_configs() {
+    async fn wan_device_and_free_port_resolve_from_configs() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("network"),
@@ -815,7 +817,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wan_device(&cfgs).as_deref(), Some("eth1"));
-        assert_eq!(zone_for_device(&cfgs, "br-lan.1").as_deref(), Some("lan"));
-        assert_eq!(zone_for_device(&cfgs, "br-lan.2"), None);
+        assert_eq!(next_free_listen_port(&cfgs, 51900), 51900);
     }
 }

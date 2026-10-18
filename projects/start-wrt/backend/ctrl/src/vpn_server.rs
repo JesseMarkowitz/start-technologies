@@ -2035,6 +2035,7 @@ pub(crate) fn ensure_wireguard_firewall_rule_in_zone(
         dest_ip: None,
         dest_port: Some(port_str),
         proto: vec!["udp".to_string()],
+        icmp_type: Vec::new(),
         target: FirewallTarget::ACCEPT,
         family: None,
         enabled: None,

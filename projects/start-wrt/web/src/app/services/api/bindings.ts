@@ -178,13 +178,16 @@ export type OutboundVpnSetEnabledRequestInput = z.input<
 export type OutboundVpnUpdateRequestInput = z.input<
   typeof schemas.OutboundVpnUpdateRequest
 >
-export type PairParamsInput = z.input<typeof schemas.PairParams>
-export type PairResponse = z.output<typeof schemas.PairResponse>
 
 /**
- * One satellite the Core has paired with (`/etc/startwrt/satellites.json`).
+ * One access point the Core has adopted (`/etc/startwrt/satellites.json`).
  */
 export type PairedSatellite = z.output<typeof schemas.PairedSatellite>
+
+/**
+ * One Wi-Fi password and the profile VLAN it lands on.
+ */
+export type PasswordSpecInput = z.input<typeof schemas.PasswordSpec>
 
 /**
  * Response from adding a peer, contains client config if keys were generated
@@ -193,25 +196,26 @@ export type PeerAddResponse = z.output<typeof schemas.PeerAddResponse>
 export type PeerDeleteArgsInput = z.input<typeof schemas.PeerDeleteArgs>
 export type ProfileId = z.output<typeof schemas.ProfileId>
 export type ProfileIdOptInput = z.input<typeof schemas.ProfileIdOpt>
+
+/**
+ * A profile as its VLAN crosses the trunk.
+ */
+export type ProfileSpecInput = z.input<typeof schemas.ProfileSpec>
 export type Protocol = z.output<typeof schemas.Protocol>
 export type ProtocolInput = z.input<typeof schemas.Protocol>
-export type ProvisionCoreParamsInput = z.input<
-  typeof schemas.ProvisionCoreParams
->
-export type ProvisionSatelliteParamsInput = z.input<
-  typeof schemas.ProvisionSatelliteParams
->
-export type ProvisionSatelliteProfileParamsInput = z.input<
-  typeof schemas.ProvisionSatelliteProfileParams
->
 export type PublishedPortStatus = z.output<typeof schemas.PublishedPortStatus>
+
+/**
+ * One radio's assignment in the Core's channel plan.
+ */
+export type RadioPlanInput = z.input<typeof schemas.RadioPlan>
 export type ResetPasswordParamsInput = z.input<
   typeof schemas.ResetPasswordParams
 >
 
 /**
- * Which role this physical router plays. Chosen at provisioning; a router with
- * no marker is a standalone **Core** (the common case).
+ * A router with no marker is a standalone Core. An adopted router is a
+ * satellite: an access point of its Core.
  */
 export type RouterRole = z.output<typeof schemas.RouterRole>
 export type ScheduleGetParamsInput = z.input<typeof schemas.ScheduleGetParams>
@@ -301,6 +305,12 @@ export type ScheduleWindowsInput = z.input<typeof schemas.ScheduleWindows>
 export type SetArgsInput = z.input<typeof schemas.SetArgs>
 export type SetupStatusRes = z.output<typeof schemas.SetupStatusRes>
 export type StatusResponse = z.output<typeof schemas.StatusResponse>
+
+/**
+ * What an access point needs from its Core (D5). `generation` is monotonic;
+ * an access point rejects a snapshot older than the one it applied.
+ */
+export type SyncSnapshotInput = z.input<typeof schemas.SyncSnapshot>
 export type UciFile = z.output<typeof schemas.UciFile>
 export type UciFileInput = z.input<typeof schemas.UciFile>
 

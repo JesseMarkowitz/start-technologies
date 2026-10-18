@@ -126,6 +126,8 @@ CONFIG_PACKAGE_kmod-br-netfilter=y
 CONFIG_PACKAGE_kmod-nf-reject6=y
 CONFIG_PACKAGE_kmod-nf-socket=y
 CONFIG_PACKAGE_conntrack=y
+# Bridge-family `meta` matches: the access point's DHCP guard and trunk gating.
+CONFIG_PACKAGE_kmod-nft-bridge=y
 CONFIG_PACKAGE_kmod-nft-core=y
 CONFIG_PACKAGE_kmod-nft-fib=y
 CONFIG_PACKAGE_kmod-nft-nat=y

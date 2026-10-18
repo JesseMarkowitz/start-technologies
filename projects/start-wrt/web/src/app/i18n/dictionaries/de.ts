@@ -548,5 +548,4 @@ export default {
   570: '2,4-GHz-Breite',
   571: '5-GHz-Breite',
   572: 'Nicht verbunden',
-  573: 'Auf einem Satelliten-Router nicht verfügbar. Geräte hier können keine eigenen Ports über UPnP oder PCP öffnen; solche Anfragen werden abgelehnt. Um ein Gerät hinter diesem Router erreichbar zu machen, tragen Sie den Port von Hand auf dem Core-Router ein.',
 } satisfies i18n

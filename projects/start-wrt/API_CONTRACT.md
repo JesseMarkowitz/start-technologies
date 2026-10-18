@@ -693,6 +693,8 @@ struct LanIpv6SetRequest {
 struct Port<Id = ProfileId> {
     /// Security profile assigned to this port, if any
     profile: Option<Id>,
+    /// Trunk to access points: every profile tagged, no profile of its own (design D25)
+    trunk: bool,
 }
 
 #[derive(Serialize)]
@@ -2017,10 +2019,10 @@ struct InjectedDnsRecord {
 
 ## 18. Satellite Router
 
-Router **role** and the Core's **paired-satellite registry**. See
-`docs/design/satellite-router.md`. Foundation slice: `pair` records a satellite in the Core
-registry only — the WireGuard tunnel provisioning, enrollment-token validation, and Core→satellite
-config sync are follow-up work (`docs/design/satellite-router-next-steps.md`).
+Router **role**, the Core's **access-point registry**, adoption, and the sync payload an
+access point applies. See `docs/design/satellite-router.md` (D25): a satellite is a thin
+access point on a tagged trunk from the Core, with one WireGuard management tunnel. A trunk
+port is set on the Ethernet page (`ethernet.set` with `trunk: true`, §6).
 
 ### `satellite.get-role`
 
@@ -2031,7 +2033,10 @@ config sync are follow-up work (`docs/design/satellite-router-next-steps.md`).
 #[serde(rename_all = "camelCase")]
 struct RoleMarker {
     role: RouterRole,              // "core" | "satellite"
-    coreEndpoint: Option<String>, // satellite only: the Core's underlay endpoint
+    coreEndpoint: Option<String>, // satellite: the Core's link-local endpoint, "<addr>%<iface>"
+    coreKey: Option<String>,      // satellite: the Core's WireGuard public key pinned at adoption
+    uplink: Option<String>,       // satellite: the port that carries the trunk
+    generation: u64,              // satellite: the sync generation applied last (0 = none)
 }
 // Response: RoleMarker  (a router with no marker reads as "core")
 ```
@@ -2041,13 +2046,10 @@ struct RoleMarker {
 ```rust
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SetRoleRequest {
-    role: String,                 // "core" | "satellite"
-    coreEndpoint: Option<String>,
-}
+struct SetRoleRequest { role: String } // "core" | "satellite"
 // Response: null
-// Backend: writes /etc/startwrt/role.json (0600). Production flow sets this at
-//          flash time; role is immutable post-provision (reflash to change).
+// Backend: writes /etc/startwrt/role.json (0600) with the role alone. A satellite set
+//          this way waits to be adopted; adoption fills in the rest.
 ```
 
 ### `satellite.list`
@@ -2057,35 +2059,13 @@ struct SetRoleRequest {
 #[serde(rename_all = "camelCase")]
 struct PairedSatellite {
     name: String,               // admin label (unique)
-    publicKey: String,          // satellite WireGuard public key (base64), pinned at pairing
-    mgmtAddress: String,        // management address on the inter-router link
+    publicKey: String,          // the access point's WireGuard public key (base64), pinned at adoption
+    mgmtAddress: String,        // its address inside the management tunnel
     generationApplied: u64,     // config generation last acked (0 = never)
     lastSeen: i64,              // unix seconds of last contact (0 = never)
 }
 // Response: Vec<PairedSatellite>
 // Core-only (Authorization error on a satellite).
-```
-
-### `satellite.pair`
-
-```rust
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PairRequest {
-    name: String,
-    publicKey: String,
-    mgmtAddress: String,
-    enrollmentToken: Option<String>, // validation is follow-up work
-}
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PairResponse {
-    name: String,
-    status: String,  // "registered"
-    note: String,    // states tunnel/sync are not yet provisioned
-}
-// Response: PairResponse. Core-only. Records the satellite in the registry;
-//           does NOT yet bring up tunnels or push config.
 ```
 
 ### `satellite.unpair`
@@ -2094,7 +2074,8 @@ struct PairResponse {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UnpairRequest { name: String }
-// Response: null. Core-only (NotFound if the name is not paired).
+// Response: null. Core-only (NotFound if the name is not adopted). Removes the registry
+// entry and the Core's end of the management tunnel (interface, peer, accept rule).
 ```
 
 ### `satellite.status`
@@ -2105,75 +2086,37 @@ struct UnpairRequest { name: String }
 struct SatelliteStatus {
     role: RouterRole,
     coreEndpoint: Option<String>,
+    uplink: Option<String>,
+    generation: u64,
     satelliteCount: usize,
     satellites: Vec<PairedSatellite>,
 }
 // Response: SatelliteStatus
 ```
 
-### `satellite.provision-core-tunnel` (manual / hardware bring-up)
+### `satellite.apply`
 
 ```rust
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ProvisionCoreParams {
-    satellite: String,
-    profile: String,             // profile interface the tunnel carries
-    coreTransitAddr: String,     // the Core wg interface address
-    satelliteAllowedIp: Vec<String>, // repeatable; CIDR(s) routed to the satellite (its /24, or
-                                 // a /32 for self-ping). One per address family when the
-                                 // profile is dual-stack (D11).
-    satellitePublicKey: String,
-    presharedKey: String,
-    listenPort: u16,
-    transitZone: String,         // firewall zone the handshake arrives on
-    corePrivateKey: String,
+struct SyncSnapshot {
+    generation: u64,                       // monotonic; an older one is refused
+    ssid: String,
+    broadcastSeparately: bool,             // 5 GHz radios broadcast "<ssid>-5G"
+    country: Option<String>,               // regulatory country; unset = world
+    radios: BTreeMap<String, RadioPlan>,   // by this access point's radio name
+    profiles: Vec<ProfileSpec>,            // { fullname, interface, vlanTag }
+    passwords: Vec<PasswordSpec>,          // { label, key, vlanTag }
+    ports: BTreeMap<String, Option<u16>>,  // access port -> profile VLAN untagged, or null for off
+    updateSource: Option<String>,          // the registry the Core updates from
 }
-// Response: null. Core-only. Writes the wg interface + subnet peer + profile-zone
-// membership + transit-zone accept rule to /etc/config and brings the tunnel up.
-// Manual bring-up path for the hardware runbook; pairing (D4) will call the same
-// generator with allocated keys/ports.
-```
-
-### `satellite.provision-satellite-tunnel` (manual / hardware bring-up)
-
-```rust
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProvisionSatelliteParams {
-    satellite: String,
-    profile: String,
-    satWgAddr: String,           // the satellite wg interface address
-    corePublicKey: String,
-    coreEndpointHost: String,    // the Core underlay address to dial
-    coreEndpointPort: u16,
-    presharedKey: String,
-    satPrivateKey: String,
-    allowedIp: Vec<String>,      // routed via the tunnel; default ["0.0.0.0/0"] (egress via Core)
-    firewallZoneMember: String,  // local iface whose zone the tunnel joins (default "lan")
-}
-// Response: null. Satellite-only. Writes the dialing wg interface + peer + zone
-// membership and brings the tunnel up (WAN-less egress via the Core).
-```
-
-### `satellite.provision-satellite-profile` (manual / hardware bring-up)
-
-```rust
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProvisionSatelliteProfileParams {
-    profile: String,             // network interface to create (e.g. "psat_guest")
-    vlanTag: u16,
-    gateway: String,             // the satellite's IPv4 gateway for this profile /24 (its .1)
-    port: String,                // a satellite LAN port to place on the VLAN (untagged)
-    ip6assign: Option<u8>,       // IPv6 prefix length carved from the prefix delegated to
-                                 // the satellite (D11); omit for v4-only, which is all of v1
-    firewallZoneMember: String,  // local iface whose zone this profile joins (default "lan")
-}
-// Response: null. Satellite-only. Writes the VLAN interface, bridge-vlan port, DHCP
-// pool and firewall-zone membership so the satellite serves one profile locally; a
-// client on that port then routes out the tunnel to the Core, which applies policy.
-// Manual stand-in for what config sync (D5) will do automatically.
+struct RadioPlan { band: String, channel: u32, htmode: String }
+// Response: null. Satellite-only; Uninitialized before adoption.
+// Backend: rewrites network (the uplink tagged on every profile VLAN and untagged on the
+// backhaul VLAN, an address-less interface per profile, access ports), wireless (SSID,
+// per-password dynamic VLAN, wifi-vlan per profile, radios enabled with the plan) and
+// firewall (no LAN or WAN zone), then reloads network, firewall, dnsmasq and wifi.
+// Fed by hand until the Core pushes it over the management tunnel.
 ```
 
 ### `satellite.adoption.candidates`
@@ -2184,7 +2127,7 @@ struct ProvisionSatelliteProfileParams {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Candidate {
-    address: String,        // link-local address with interface, e.g. "fe80::1%br-lan.1"
+    address: String,        // link-local address with interface, e.g. "fe80::1%br-lan.4094"
     interface: String,
     satelliteKey: String,   // the candidate's WireGuard public key (base64), as it presents it
     version: String,
@@ -2192,7 +2135,7 @@ struct Candidate {
     lastSeenSecs: u64,
 }
 // Vec<Candidate>. Routers in the satellite role with no pinned Core that answered the
-// Core's link-local announcement on a LAN bridge within the last 30 s (design D21).
+// Core's link-local announcement on the backhaul VLAN of a trunk port within the last 30 s.
 ```
 
 ### `satellite.adoption.adopt`
@@ -2202,26 +2145,24 @@ struct Candidate {
 #[serde(rename_all = "camelCase")]
 struct AdoptParams {
     address: String,                     // as `candidates` lists it
-    name: String,                        // registry name; an existing entry of that name is replaced
+    name: String,                        // registry name, at most 11 characters; an existing
+                                         // entry of that name is replaced
     secret: String,                      // sticker Wi-Fi password, or the code its page shows
-    profile: String,                     // Core profile interface the first tunnel carries
-    transitZone: Option<String>,         // zone the handshake arrives on; derived from the
-                                         // candidate's interface when omitted
-    allowedIp: Vec<String>,              // what the satellite routes via the tunnel; all when empty
-    satelliteSubnet: Vec<String>,        // the satellite's own subnets the Core routes to it
     coreTunnelAddr: Option<String>,      // default: next free 10.42.<n>.1
     satelliteTunnelAddr: Option<String>, // default: 10.42.<n>.2
     listenPort: Option<u16>,             // default: first free from 51900
 }
 // Response:
-struct AdoptResponse { name: String, satelliteKey: String, interface: String }
+struct AdoptResponse { name: String, satelliteKey: String, interface: String } // "sat_<name>"
 // Core-only. Runs the D24 proof exchange with the candidate over link-local UDP 8719:
-// hello → offer → confirm, each proof a keyed hash under the secret over both
+// hello -> offer -> confirm, each proof a keyed hash under the secret over both
 // challenges and both WireGuard keys (the Core's also over the tunnel it dictates).
-// On success both sides provision the tunnel with the pinned keys and a pre-shared key
-// derived from the exchange, and the Core records the satellite in its registry.
-// Errors: IncorrectPassword (wrong secret; the message says how many attempts remain),
-// RateLimited (5 failures → 60 s cooldown, on either side), Timeout (no answer in 5 s).
+// On success the Core provisions its end of the management tunnel (listening on the
+// backhaul zone) and records the access point; the access point puts its uplink into
+// its bridge, drops its WAN and LAN addressing, and dials the Core through the backhaul
+// VLAN. Errors: IncorrectPassword (wrong secret; the message says how many attempts
+// remain), RateLimited (5 failures -> 60 s cooldown, on either side), Timeout (no
+// answer in 5 s).
 ```
 
 ### `satellite.adoption.code`
@@ -2230,7 +2171,7 @@ struct AdoptResponse { name: String, satelliteKey: String, interface: String }
 // Params: none.
 // Response:
 struct CodeResponse {
-    waiting: bool,        // this router is listening for a Core on its WAN port
+    waiting: bool,        // this router is listening for a Core on its uplink port
     hasSticker: bool,     // the sticker Wi-Fi password is the secret; no code is shown
     code: Option<String>, // 16-character adoption code for a board with no sticker password;
                           // valid until adopted or the daemon restarts

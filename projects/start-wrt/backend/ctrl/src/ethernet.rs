@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use rpc_toolkit::{from_fn_async_local, ParentHandler};
@@ -37,6 +37,9 @@ pub const DEFAULT_WAN6_INTERFACE: &str = "wan6";
 #[derive(Debug, Clone, Serialize, Deserialize, visit_rs::VisitFields)]
 pub struct Port<Id: Ord = ProfileId> {
     pub profile: Option<Id>,
+    /// Carries every profile tagged to access points (design D25). No profile.
+    #[serde(default)]
+    pub trunk: bool,
 }
 rpc_toolkit::reflect_ts!(impl [Id: Ord] for Port<Id> where [Option<Id>: rpc_toolkit::ts::TS]);
 
@@ -121,6 +124,7 @@ fn get_config(ctx: impl CtrlContext, cfgs: &Configs) -> Result<Ethernet, Error> 
     let lookup = profiles::Lookup::parse(ctx.clone(), cfgs)?;
     let found_bridge = find_lan_bridge(cfgs)?
         .ok_or_else(|| Error::new(eyre!("missing LAN bridge"), ErrorKind::MissingLanBridge))?;
+    let trunks = crate::backhaul::trunk_ports(cfgs);
 
     let mut wan_ipv6 = false;
     let mut wan_port = None;
@@ -163,12 +167,16 @@ fn get_config(ctx: impl CtrlContext, cfgs: &Configs) -> Result<Ethernet, Error> 
                         .get(name)
                         .and_then(|(tag, _)| lookup.from_vlan(*tag))
                         .cloned(),
+                    trunk: trunks.contains(name),
                 },
             )
         })
         .collect();
     if let Some(ref wp) = wan_port {
-        ports.entry(wp.clone()).or_insert(Port { profile: None });
+        ports.entry(wp.clone()).or_insert(Port {
+            profile: None,
+            trunk: false,
+        });
     }
     for section in &cfgs["network"].sections {
         if section.name().as_deref() == Some(DEFAULT_WAN6_INTERFACE) {
@@ -277,6 +285,7 @@ pub async fn set<C: CtrlContext>(
                                 Some(id) => Some(lookup.resolve(id)?.clone()),
                                 None => None,
                             },
+                            trunk: v.trunk,
                         },
                     ))
                 })
@@ -463,15 +472,25 @@ fn set_config(
         .collect();
 
     bridge.ports.clear();
+    let mut trunks = BTreeSet::new();
     for (port_name, port) in &ethernet.ports {
         if Some(port_name) == ethernet.wan_port.as_ref() {
-            if port.profile.is_some() {
+            if port.profile.is_some() || port.trunk {
                 return Err(Error::new(
                     eyre!("WAN port cannot have profile: {port_name}"),
                     ErrorKind::WanPortWithProfile,
                 ));
             }
         } else {
+            if port.trunk {
+                if port.profile.is_some() {
+                    return Err(Error::new(
+                        eyre!("a trunk port carries every profile tagged, not one: {port_name}"),
+                        ErrorKind::InvalidRequest,
+                    ));
+                }
+                trunks.insert(port_name.clone());
+            }
             bridge.ports.push(port_name.clone());
         }
     }
@@ -571,12 +590,26 @@ fn set_config(
         cfgs["network"].append(&bridge, None)?;
     }
 
-    let needs_vlan_filtering = lookup.list().iter().any(|p| p.vlan_tag != 1);
+    let needs_vlan_filtering = lookup.list().iter().any(|p| p.vlan_tag != 1) || !trunks.is_empty();
+    if needs_vlan_filtering {
+        for section in &mut cfgs["network"].sections {
+            if let Ok(mut iface) = section.get::<NetworkInterface>() {
+                if section.name().as_deref() == Some("lan") && iface.device == bridge.name {
+                    iface.device = format!("{}.1", bridge.name);
+                    section.set(&iface)?;
+                }
+            }
+        }
+    }
 
     for profile in lookup.list() {
         let mut ports = Vec::new();
         for (port_name, port) in &ethernet.ports {
             if Some(port_name) == ethernet.wan_port.as_ref() {
+                continue;
+            }
+            if port.trunk {
+                ports.push(crate::backhaul::tagged(port_name));
                 continue;
             }
             let assigned = port.profile.as_ref() == Some(profile);
@@ -632,6 +665,13 @@ fn set_config(
             None,
         )?;
     }
+    if !trunks.is_empty() {
+        cfgs["network"].append(
+            &crate::backhaul::backhaul_bridge_vlan(&bridge.name, &trunks),
+            None,
+        )?;
+    }
+    crate::backhaul::sync_core_backhaul(cfgs, &bridge.name, !trunks.is_empty())?;
     Ok(())
 }
 
@@ -660,6 +700,7 @@ pub async fn edit<C: CtrlContext + Clone>(ctx: C) -> Result<(), Error> {
                     k,
                     Port {
                         profile: v.profile.map(Into::into),
+                        trunk: v.trunk,
                     },
                 )
             })
@@ -1090,6 +1131,7 @@ config interface 'wan'
                                     interface: Some(p.interface.clone()),
                                     vlan_tag: Some(p.vlan_tag),
                                 }),
+                                trunk: false,
                             },
                         )
                     })
@@ -1133,6 +1175,7 @@ config interface 'wan'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            trunk: false,
                         },
                     ),
                     (
@@ -1143,6 +1186,7 @@ config interface 'wan'
                                 interface: Some("guest".into()),
                                 vlan_tag: None,
                             }),
+                            trunk: false,
                         },
                     ),
                 ]),
@@ -1183,9 +1227,16 @@ config interface 'wan'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            trunk: false,
                         },
                     ),
-                    ("eth1".into(), Port { profile: None }),
+                    (
+                        "eth1".into(),
+                        Port {
+                            profile: None,
+                            trunk: false,
+                        },
+                    ),
                 ]),
             }),
         )
@@ -1221,9 +1272,16 @@ config interface 'wan'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            trunk: false,
                         },
                     ),
-                    ("eth1".into(), Port { profile: None }),
+                    (
+                        "eth1".into(),
+                        Port {
+                            profile: None,
+                            trunk: false,
+                        },
+                    ),
                 ]),
             }),
         )
@@ -1260,10 +1318,23 @@ config interface 'wan'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            trunk: false,
                         },
                     ),
-                    ("eth1".into(), Port { profile: None }),
-                    ("eth2".into(), Port { profile: None }),
+                    (
+                        "eth1".into(),
+                        Port {
+                            profile: None,
+                            trunk: false,
+                        },
+                    ),
+                    (
+                        "eth2".into(),
+                        Port {
+                            profile: None,
+                            trunk: false,
+                        },
+                    ),
                 ]),
             }),
         )
@@ -1287,7 +1358,13 @@ config interface 'wan'
                 wan_ipv6: false,
                 wan_port: Some("eth1".into()),
                 ports: BTreeMap::from([
-                    ("eth0".into(), Port { profile: None }),
+                    (
+                        "eth0".into(),
+                        Port {
+                            profile: None,
+                            trunk: false,
+                        },
+                    ),
                     (
                         "eth1".into(),
                         Port {
@@ -1296,6 +1373,7 @@ config interface 'wan'
                                 interface: Some("guest".into()),
                                 vlan_tag: None,
                             }),
+                            trunk: false,
                         },
                     ),
                 ]),
@@ -1326,7 +1404,13 @@ config interface 'wan'
                 wan_ipv6: false,
                 wan_port: Some("eth0".into()),
                 ports: BTreeMap::from([
-                    ("eth0".into(), Port { profile: None }),
+                    (
+                        "eth0".into(),
+                        Port {
+                            profile: None,
+                            trunk: false,
+                        },
+                    ),
                     (
                         "eth1".into(),
                         Port {
@@ -1335,6 +1419,7 @@ config interface 'wan'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            trunk: false,
                         },
                     ),
                     (
@@ -1345,6 +1430,7 @@ config interface 'wan'
                                 interface: Some("guest".into()),
                                 vlan_tag: None,
                             }),
+                            trunk: false,
                         },
                     ),
                 ]),
@@ -1408,6 +1494,7 @@ config interface 'wan'
                                     interface: Some(p.interface.clone()),
                                     vlan_tag: Some(p.vlan_tag),
                                 }),
+                                trunk: false,
                             },
                         )
                     })
@@ -1454,9 +1541,16 @@ config interface 'wan'
                                 interface: Some("guest".into()),
                                 vlan_tag: None,
                             }),
+                            trunk: false,
                         },
                     ),
-                    ("eth1".into(), Port { profile: None }),
+                    (
+                        "eth1".into(),
+                        Port {
+                            profile: None,
+                            trunk: false,
+                        },
+                    ),
                 ]),
             }),
         )
@@ -1532,6 +1626,7 @@ config interface 'guest'
                             interface: Some("guest".into()),
                             vlan_tag: None,
                         }),
+                        trunk: false,
                     },
                 )]),
             }),
@@ -1589,8 +1684,20 @@ config interface 'guest'
             wan_ipv6: false,
             wan_port: None,
             ports: BTreeMap::from([
-                ("eth0".into(), Port { profile: None }),
-                ("eth1".into(), Port { profile: None }),
+                (
+                    "eth0".into(),
+                    Port {
+                        profile: None,
+                        trunk: false,
+                    },
+                ),
+                (
+                    "eth1".into(),
+                    Port {
+                        profile: None,
+                        trunk: false,
+                    },
+                ),
             ]),
         };
         set_from_config(&ctx, &mut cfgs, &ethernet).unwrap();
@@ -1625,8 +1732,20 @@ config interface 'guest'
             wan_ipv6: true,
             wan_port: Some("eth1".into()),
             ports: BTreeMap::from([
-                ("eth0".into(), Port { profile: None }),
-                ("eth1".into(), Port { profile: None }),
+                (
+                    "eth0".into(),
+                    Port {
+                        profile: None,
+                        trunk: false,
+                    },
+                ),
+                (
+                    "eth1".into(),
+                    Port {
+                        profile: None,
+                        trunk: false,
+                    },
+                ),
             ]),
         };
         set_from_config(&ctx, &mut cfgs, &ethernet).unwrap();
@@ -1667,8 +1786,20 @@ config interface 'guest'
             wan_ipv6: false,
             wan_port: Some("eth1".into()),
             ports: BTreeMap::from([
-                ("eth0".into(), Port { profile: None }),
-                ("eth1".into(), Port { profile: None }),
+                (
+                    "eth0".into(),
+                    Port {
+                        profile: None,
+                        trunk: false,
+                    },
+                ),
+                (
+                    "eth1".into(),
+                    Port {
+                        profile: None,
+                        trunk: false,
+                    },
+                ),
             ]),
         };
         set_from_config(&ctx, &mut cfgs, &ethernet).unwrap();
@@ -1748,6 +1879,7 @@ config interface 'guest'
                                 interface: Some("guest".into()),
                                 vlan_tag: None,
                             }),
+                            trunk: false,
                         },
                     ),
                     (
@@ -1758,6 +1890,7 @@ config interface 'guest'
                                 interface: Some("lan".into()),
                                 vlan_tag: None,
                             }),
+                            trunk: false,
                         },
                     ),
                 ]),

@@ -12,11 +12,12 @@ results stay in `satellite-router-open-questions.md` §22–26. `satellite-route
 `satellite-router-hardware-test.md` describe that design's bench and are kept as its record; the
 D25 bench checks are at the end of design §21 and below.
 
-**State as of 2026-10-18.** Branch tip `904d03f97` on upstream `master` `83c211441`. Capped
-container, `opt-level 0`: **706 unit tests, 0 failures**; rustfmt, prettier, `check:wrt` clean.
+**State as of 2026-10-18.** Batch one written on top of `4eaad8860` (upstream `master`
+`83c211441`). Capped container, `opt-level 0`: **685 + 18 unit tests, 0 failures** (the routed
+code's tests went with it); rustfmt, prettier, `check:wrt`, `check:i18n:wrt` clean.
 Upstream `#4043` has had no maintainer reply since it was filed; it still describes the routed
 design and is left as is until maintainers reply or code lands. Two-router bench: the Start9 K1
-is the Core, a BPI-F3 the satellite, adopted end to end with D24 over IPv6 link-local.
+is the Core, a BPI-F3 the AP, adopted end to end with D24 over the backhaul VLAN of a trunk.
 
 ## Landed on this branch
 
@@ -53,8 +54,10 @@ What batch one removes (routed only):
 
 ## Batch one — trunk and AP bridge (the data path)
 
-No gating, no management tunnel, no sync yet: prove that a client behind an AP is an ordinary
-client of the Core. Removal of the routed code rides in the same batch.
+No gating, no sync yet: prove that a client behind an AP is an ordinary client of the Core.
+Adoption provisions the management tunnel in its D25 shape from the start, so the routed
+per-profile tunnel never has an interim replacement; the tunnel's gating, liveness, time and
+firmware behaviour are batch two. Removal of the routed code rides in this batch.
 
 **Core.**
 
@@ -100,9 +103,25 @@ client of the Core. Removal of the routed code rides in the same batch.
 - ☐ Daemon role gate (D7, first slice): on an AP skip `bootstrap_admin_profile`, WAN setup,
   `apply_remote_access` and schedule regeneration in `bins/daemon.rs::inner_main`. The AP's
   allowlist comes in batch four.
+- ☐ **Management tunnel, provisioned at adoption** (`mgmt_tunnel.rs`): one WireGuard interface
+  per AP on the Core (`sat_<name>`, listening on the backhaul zone, peer endpoint-less), one on
+  the AP (`core`, dialling `[fe80::…%br-lan.4094]:<port>` with `nohostroute 1`), inside addresses
+  `10.42.<n>.1/.2`. Adoption on the AP side writes the base layout (uplink into the bridge, no
+  WAN, no addresses) and the tunnel in one step. Until the tunnel carries management the AP's
+  backhaul zone also admits SSH, for the bench; batch two removes that rule.
 
 **Removal.** The routed list above, in the same batch, with the unit tests that covered it.
 Keep `satellite.rs`'s role, registry and `SyncSnapshot` skeleton.
+
+**Bench record, 2026-10-18.** Trunk, backhaul, announce on the backhaul and adoption over it
+passed on the K1. Two defects found and fixed on the way: both backhaul zones rejected ICMPv6,
+so neither end could resolve the other's link-local address (now a neighbour-discovery rule on
+both roles, design §21); and the daemon's AP gate skipped the Core-only startup work on any
+satellite, adopted or not, which cost an unadopted satellite its WAN-side SSH (now gated on
+`coreKey`). The BPI was adopted while running the first build and became unreachable over the
+network: no neighbour discovery on its backhaul, no address on any VLAN, no serial. Reflash.
+Still to pass: the management tunnel's handshake, `satellite.apply` on the AP, and the client
+checks below.
 
 **Bench exit for batch one.** On the bench the K1's only LAN port is the trunk, so during this
 batch the Core is reached over its Wi-Fi and its WAN-side management port, and the BPI over
@@ -118,13 +137,10 @@ link-local on the backhaul VLAN (`ssh -J wrt-bench root@fe80::…%br-lan.<tag>`)
 
 ## Batch two — management tunnel and trunk gating
 
-- ☐ **Management tunnel.** Adoption provisions one WireGuard interface per AP on the Core and one
-  on the AP, replacing the per-profile tunnel it provisions today: underlay = link-local on the
-  backhaul VLAN, the AP's endpoint `[fe80::…%<uplink>]:<port>` with `nohostroute 1`, the Core's
-  peer endpoint-less and roaming, inside addresses from a reserved block assigned at adoption (the
-  AP is addressed by this and nothing else, open questions §23). Keys and the derived PSK as
-  today. Time: the Core answers NTP on its end (StartWRT runs no NTP server today); the Core
-  initiates the handshake, so an AP rebooting with a stale clock reopens the tunnel (design §21).
+- ☐ **Management tunnel behaviour.** The tunnel batch one provisions gains: the Core initiating
+  the handshake, so an AP rebooting with a stale clock reopens it (design §21); the Core answering
+  NTP on its end (StartWRT runs no NTP server today); the AP's SSH-on-backhaul rule removed, with
+  management reaching the AP through the tunnel alone.
 - ☐ **Trunk gating (D18 shape).** A bridge-family nftables file shipped under `/usr/share/` and
   loaded by an fw4 include the daemon writes on a Core with a trunk, holding a set of live trunk
   ports; profile-tagged frames on a trunk port not in the set are dropped, both directions; the
@@ -161,7 +177,10 @@ the AP reaches no other client. Needs an image with `kmod-nft-bridge` flashed on
   reject an older generation; full reconcile on reconnect; version heartbeat. A payload whose
   profile set changes restarts the AP's network (accepted for v1).
 - ☐ AP reports at adoption: port inventory (name, uplink, link), radios; on request a scan per
-  radio taken while dark (D20 input).
+  radio taken while dark (D20 input). Radios come from the kernel (`iw phy`, board.json), never
+  from UCI `wireless`: a stale `wifi-device` from an earlier detection survives there (the
+  bench BPI carries one for a phy that does not exist), and a single-phy MT7915 serves one band
+  at a time where the K1's MT7916 serves both.
 - ☐ Wi-Fi apply per D20: country and each radio's planned channel and width, never `auto`;
   an unknown country refuses the snapshot; a refused channel takes the plan's next choice.
 - ☐ Core channel planner (D20): pure, unit-testable; runs at adoption, on a country change and on
@@ -191,7 +210,11 @@ the AP reaches no other client. Needs an image with `kmod-nft-bridge` flashed on
   Core and gets no Internet says so on its setup page and asks satellite-or-main.
 - ☐ Recovery mode: `StartWRT-Recovery-<last 4 hex of uplink MAC>` 2.4 GHz SSID and an isolated
   recovery network on an access port (a Wi-Fi-only AP has only the SSID), HTTP, no login, headed
-  `Satellite <name> — recovery mode`, filtered logs, restart, factory reset.
+  `Satellite <name> — recovery mode`, filtered logs, restart, factory reset. An AP has no
+  address outside its tunnel and no console, so any fault in its backhaul layout leaves a
+  reflash as the only way back until this exists (the bench's 2026-10-18 casualty, batch one).
+  The network restart after `adopt_self` is the moment that layout first runs; recovery must
+  come up on a layout that failed to bring the tunnel up, not only on a lost Core.
 - ☐ Factory reset on an AP: overlay erased, waits for adoption broadcasting nothing; the Core
   offers "saved configuration of _name_" or new; saved configurations kept until removed, with a
   multi-select delete at adoption; deleting revokes the old key.

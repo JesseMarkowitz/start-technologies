@@ -548,5 +548,4 @@ export default {
   570: 'Largeur 2,4 GHz',
   571: 'Largeur 5 GHz',
   572: 'Non connecté',
-  573: 'Indisponible sur un routeur satellite. Les appareils connectés ici ne peuvent pas ouvrir leurs propres ports via UPnP ou PCP ; ces demandes sont refusées. Pour exposer un appareil derrière ce routeur, ajoutez le port à la main sur le routeur Core.',
 } satisfies i18n

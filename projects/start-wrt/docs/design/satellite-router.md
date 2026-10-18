@@ -1091,7 +1091,11 @@ its address when it roams between them.
   Admin, untagged as its default (`ensure_vlan_filtering` in `profiles.rs`); a trunk port must
   not, or a device on the jack lands on Admin without tagging anything. The untagged segment
   carries IPv6 link-local only and reaches only the adoption listener and the management tunnel
-  (open questions §25).
+  (open questions §25). Both backhaul zones admit ICMPv6 neighbour discovery as well: a zone that
+  rejects it cannot resolve the other end's link-local address, so multicast announces arrive
+  while the unicast adoption Hello never leaves, and an AP whose zone rejects it is unreachable
+  over the network from the moment it is adopted (bench 2026-10-18: that AP needed a reflash,
+  which is what recovery mode (D22) exists to avoid).
 - AP clients arrive on the Core's existing per-VLAN interfaces, so zones, DHCP, DNS (#4055), IPv6,
   PCP/UPnP and the VPN chains apply to them unchanged. The trunk port and the management tunnel
   are the only satellite-specific parts of the Core.
@@ -1155,6 +1159,10 @@ and its port closes, so a laptop on that cable reaches nothing, as D19 intends.
 - Its one address is inside a single WireGuard management tunnel to the Core, assigned at adoption
   (open questions §23: the Core never addresses a satellite by a transit lease). The underlay is
   IPv6 link-local on the trunk's untagged segment, the path adoption already uses (D21, D24).
+  That link-local address is not stable either: a Linux bridge takes the lowest MAC among its
+  ports, so when adoption moves the uplink into the AP's bridge the backhaul link-local can
+  change (bench 2026-10-18: it did). The Core keeps the AP's tunnel public key and address, never
+  its link-local, and the Core end of the tunnel is endpoint-less for that reason.
 - The tunnel stays encrypted although profile traffic on the trunk is not: the sync payload holds
   every Wi-Fi password, and an unauthenticated configuration path would let anyone at the jack
   reconfigure the AP.
@@ -1228,6 +1236,10 @@ provisions the management tunnel instead of a per-profile one.
 - An AP rebooted with its clock set behind gets its tunnel back without help.
 - A deliberately cabled second path is detected and recovered from.
 - Throughput through an AP, against the raw link.
+
+Passed on the bench 2026-10-18 (batch one build): the Core's trunk carries every profile tagged
+and the backhaul untagged; the Core announces on the backhaul alone; adoption over the backhaul
+provisions both ends of the management tunnel.
 
 **Review of D1–D24 under D25.**
 

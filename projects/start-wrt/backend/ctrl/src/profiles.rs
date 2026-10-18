@@ -1512,11 +1512,12 @@ fn set_config<C: CtrlContext>(
                 .unwrap_or(false)
         });
         if !has_bridge_vlan {
+            let trunks = crate::backhaul::trunk_ports(cfgs);
             cfgs["network"].append(
                 &NetworkBridgeVlan {
                     device: bridge_name.clone(),
                     vlan: profile.id.vlan_tag,
-                    ports: Vec::new(),
+                    ports: trunks.iter().map(|p| crate::backhaul::tagged(p)).collect(),
                 },
                 None,
             )?;
@@ -1774,15 +1775,22 @@ fn create_config(
             })
             .next()
             .unwrap_or_default();
+        let trunks = crate::backhaul::trunk_ports(cfgs);
         cfgs["network"].append(
             &NetworkBridgeVlan {
                 device: found_bridge.clone(),
                 vlan: vlan_tag,
                 ports: bridge_ports
                     .into_iter()
-                    .map(|port| NetworkVlanPort {
-                        port,
-                        tagging: Some(NetworkVlanPortTagging::PRIMARY),
+                    .map(|port| {
+                        if trunks.contains(&port) {
+                            crate::backhaul::tagged(&port)
+                        } else {
+                            NetworkVlanPort {
+                                port,
+                                tagging: Some(NetworkVlanPortTagging::PRIMARY),
+                            }
+                        }
                     })
                     .collect(),
             },
@@ -1802,12 +1810,13 @@ fn create_config(
         )?;
         // Transition to VLAN filtering: ensure VLAN 1 exists for existing bridge ports
         ensure_vlan_filtering(cfgs, &found_bridge)?;
-        // Create a portless bridge-vlan so br-lan.<vlan> can exist
+        // A bridge-vlan with no access ports, so br-lan.<vlan> can exist; trunks carry it tagged.
+        let trunks = crate::backhaul::trunk_ports(cfgs);
         cfgs["network"].append(
             &NetworkBridgeVlan {
                 device: found_bridge.clone(),
                 vlan: vlan_tag,
-                ports: Vec::new(),
+                ports: trunks.iter().map(|p| crate::backhaul::tagged(p)).collect(),
             },
             None,
         )?;

@@ -29,7 +29,6 @@ export abstract class ApiService {
     params: VpnServerPeerAddArgs,
   ): Promise<VpnServerPeerAddResponse>
   abstract vpnServerPeerDelete(params: VpnServerPeerDeleteArgs): Promise<null>
-  abstract satelliteGetRole(): Promise<RouterRoleRes>
   abstract wifiGet(): Promise<WifiConfig>
   abstract wifiSet(params: WifiConfig): Promise<WifiSetResult>
   abstract wifiGeneratePassword(): Promise<string>
@@ -374,5 +373,3 @@ export type ActivityEntry = Bindings.ActivityEntry
 export type ActivityListResponse = RpcReturnType<Api, 'activity.list'>
 
 export type ActivityListParams = RpcParamType<Api, 'activity.list'>
-
-export type RouterRoleRes = RpcReturnType<Api, 'satellite.get-role'>

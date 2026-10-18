@@ -553,5 +553,4 @@ export const ENGLISH: Record<string, number> = {
   '2.4 GHz Width': 570,
   '5 GHz Width': 571,
   'Not connected': 572,
-  'Not available on a satellite router. Devices here cannot open their own ports via UPnP or PCP, and requests to do so are refused. To expose a device behind this router, add the port by hand on the core router.': 573,
 }

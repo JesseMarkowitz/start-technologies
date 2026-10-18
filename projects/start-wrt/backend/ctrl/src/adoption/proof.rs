@@ -100,15 +100,11 @@ impl std::fmt::Debug for Proof {
 pub struct TunnelSpec {
     /// The satellite's registry name.
     pub satellite: String,
-    /// The Core profile interface the tunnel carries.
-    pub profile: String,
     pub core_listen_port: u16,
     /// The Core's host address on the tunnel.
     pub core_tunnel_addr: String,
     /// The satellite's host address on the tunnel.
     pub satellite_tunnel_addr: String,
-    /// What the satellite routes through the tunnel.
-    pub allowed_ips: Vec<String>,
 }
 
 impl TunnelSpec {
@@ -459,11 +455,9 @@ mod tests {
     fn spec() -> TunnelSpec {
         TunnelSpec {
             satellite: "s1".into(),
-            profile: "guest".into(),
             core_listen_port: 51900,
             core_tunnel_addr: "10.42.1.1".into(),
             satellite_tunnel_addr: "10.42.1.2".into(),
-            allowed_ips: vec!["0.0.0.0/0".into()],
         }
     }
 
@@ -529,7 +523,7 @@ mod tests {
         let now = Instant::now();
         let offer = p.sat.respond(&p.core.hello(), &mut p.sg, now).unwrap();
         let (mut confirm, _) = p.core.accept(&offer, spec(), &mut p.cg, now).unwrap();
-        confirm.tunnel.allowed_ips = vec!["10.0.0.0/8".into()];
+        confirm.tunnel.core_listen_port += 1;
         assert!(p.sat.confirm(&confirm, &mut p.sg, now).is_err());
     }
 
