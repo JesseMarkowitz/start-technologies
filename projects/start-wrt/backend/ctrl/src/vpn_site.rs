@@ -157,6 +157,7 @@ fn set_site_interface(
         addresses,
         disabled: None,
         mtu: None,
+        nohostroute: None,
     };
     cfgs["network"].append(&new_iface, Some(interface_name))?;
     Ok(())
@@ -352,6 +353,7 @@ fn set_sat_interface(
     params: &SatelliteTunnelParams,
 ) -> Result<(), Error> {
     let addresses = vec![host_cidr(params.sat_wg_addr)];
+    let nohostroute = params.core_endpoint_host.contains('%').then_some(true);
     for section in &mut cfgs["network"].sections {
         if section.name().as_deref() != Some(interface_name) {
             continue;
@@ -365,6 +367,7 @@ fn set_sat_interface(
         wg.private_key = params.sat_private_key.to_string();
         wg.listen_port = None; // the satellite dials out; it does not listen
         wg.addresses = addresses.clone();
+        wg.nohostroute = nohostroute;
         section.set(&wg)?;
         return Ok(());
     }
@@ -375,6 +378,7 @@ fn set_sat_interface(
         addresses,
         disabled: None,
         mtu: None,
+        nohostroute,
     };
     cfgs["network"].append(&new_iface, Some(interface_name))?;
     Ok(())
@@ -802,6 +806,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn link_local_endpoint_skips_the_host_route() {
+        let dir = tempfile::tempdir().unwrap();
+        write_base(dir.path());
+        let arena = Arena::new();
+        let mut cfgs = parse_all(dir.path(), &arena, &["network", "startwrt", "firewall"])
+            .await
+            .unwrap();
+        let allowed = vec!["0.0.0.0/0".to_string()];
+        let mut params = sat_params(&allowed);
+        params.core_endpoint_host = "fe80::1%eth1";
+        provision_satellite_site_tunnel(&mut cfgs, &arena, &params).unwrap();
+        let iface = cfgs["network"]
+            .sections
+            .iter()
+            .find(|s| s.name().as_deref() == Some("sat_s1_guest"))
+            .and_then(|s| s.get::<WgInterface>().ok())
+            .expect("wg interface should exist");
+        assert_eq!(iface.nohostroute, Some(true));
+        provision_satellite_site_tunnel(&mut cfgs, &arena, &sat_params(&allowed)).unwrap();
+        let iface = cfgs["network"]
+            .sections
+            .iter()
+            .find(|s| s.name().as_deref() == Some("sat_s1_guest"))
+            .and_then(|s| s.get::<WgInterface>().ok())
+            .unwrap();
+        assert_eq!(iface.nohostroute, None);
+    }
+
+    #[tokio::test]
     async fn provisions_satellite_side_tunnel() {
         let dir = tempfile::tempdir().unwrap();
         write_base(dir.path());
@@ -826,6 +859,7 @@ mod tests {
             .expect("wg interface should exist");
         assert_eq!(iface.listen_port, None);
         assert!(iface.addresses.iter().any(|a| a == "192.168.130.2/32"));
+        assert_eq!(iface.nohostroute, None);
 
         // Peer exists and the tunnel joined the local lan zone.
         assert!(cfgs["network"]

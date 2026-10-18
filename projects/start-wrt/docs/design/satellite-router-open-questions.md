@@ -264,3 +264,142 @@ the semantic payload.
 Core and satellites will not update atomically. What is the compatibility contract between a Core on
 version N and a satellite on N-1? Does the Core refuse to sync to an incompatible satellite, how is
 that surfaced, and is there a supported upgrade order?
+
+### 22. A satellite's tunnel default route silently displaces an existing default route.
+
+Observed on the two-router bench, 2026-10-16. The satellite (BPI-F3) had its transit on its **WAN**
+port, leased by DHCP from the Core's Admin profile, so it carried a normal `default via 192.168.0.1
+dev eth1` from `udhcpc`. `provision-satellite-tunnel … --allowed-ip 0.0.0.0/0` (the runbook's
+Step 3, `route_allowed_ips=1`) did not fail against that route and did not add a second one: after
+`ifup` the main table held only `default dev sat_s1_<profile>` — the DHCP default was **gone**, with no
+log line and no error from the command. That was the wanted outcome for the test (the tunnel became
+the satellite's only egress, which is what proved WAN-less egress through the Core), and the Core
+endpoint stayed reachable because the connected `192.168.0.0/24` on `eth1` is more specific.
+
+Why it matters before this ships: the runbook's safety note ("`0.0.0.0/0` is safe here because S1
+has no WAN default to displace") is not what protects a real deployment — netifd replaces an equal
+default, so any satellite that _does_ have a direct default (a transit on a DHCP port, a satellite
+being converted from a standalone router, a WAN plugged in by mistake) loses it the moment the
+tunnel comes up, and regains it only when the DHCP lease renews or the WAN interface reloads, at
+which point the two routes race. Nothing surfaces this to the operator.
+
+To settle in the pairing/sync phase: (a) whether a satellite with a WAN default is a supported
+state at all (the design says a satellite has no WAN — then the daemon should refuse or warn when
+one exists), (b) if it is, policy-route the tunnel per profile (the Phase 2 per-VLAN tables in
+`satellite-router-next-steps.md`) instead of `route_allowed_ips=1` on `0.0.0.0/0`, so the main
+table's default is never touched, and (c) either way, log what route the tunnel displaced. Verify
+by re-running the bench with a WAN default present and checking `ip route` before and after.
+
+### 23. Reboot recovery needs no help on either side, but a satellite's tunnel lives and dies with its transit link, and its transit address is not stable.
+
+Observed on the two-router bench, 2026-10-16. **Satellite reboot:** the Core saw a fresh handshake
+36 s after `reboot` and could ping the satellite's tunnel address at 39 s, with no action on either
+side. **Core reboot:** the satellite lost egress within 10 s. The moment its transit port lost link,
+netifd took `sat_s1_<profile>` down together with `wan` ("Interface `'sat_s1_<profile>'` has lost the
+connection … is now down … is setting up now … is now down"), because a `wireguard` proto interface
+is tied to the interface its endpoint routes through. It re-created the tunnel only once `udhcpc`
+held a lease again, and the handshake followed 1 s later. The lease came ~24 s after the Core's
+link returned, because the Core's dnsmasq answers late in its boot (the Core's own `sat_s1_<profile>`
+was up 25 s earlier). Total outage 73 s from the Core's `reboot`, almost all of it the Core's boot.
+The satellite's transit lease changed across the Core reboot (the Core keeps leases in `/tmp`), and
+the Core's LAN link flapped three times during its boot (U-Boot, kernel, netifd), restarting the
+satellite's `udhcpc` each time — harmless.
+
+Why it matters: (a) D18's reconnect-reconcile must key on the tunnel interface coming up (the
+`ifup` hotplug of the wg interface), not on polling handshakes or on the transit link — netifd
+already owns the teardown and re-setup, and the daemon must not fight it. (b) The Core must never
+address a satellite by its transit lease. The satellite's management address is its tunnel address
+(the Core-assigned 192.168.130.x), and the Core-side peer has no fixed endpoint (it roams), which
+is exactly what made the recovery automatic. This settles the D8/D13 "how does the Core reach a
+satellite" question in favour of the tunnel address only. (c) A satellite's recovery time is bounded
+by when the Core's DHCP starts serving the transit segment, not by WireGuard — the Core's boot order
+(dnsmasq vs. the tunnel) is the only place to shave it. (d) On the satellite, odhcpd logs "No
+default route present, setting ra_lifetime to 0!" throughout: with a v4-only tunnel the satellite
+announces no IPv6 default to its clients, consistent with the D11 note.
+
+### 24. The tunnel throughput ceiling on K1 hardware is ~400 Mbit/s per flow, set by one core of softirq, not by the link.
+
+Measured 2026-10-16 with iperf3 between the two routers (both K1-class boards, `performance`
+governor at 1.6 GHz, 8 cores; kernel ChaCha20 is the generic `chacha20-lib`, no vector
+implementation). Raw transit link, both directions: 112 MB/s (gigabit line rate). Through the
+tunnel: 50.8 MB/s satellite→Core, 55.4 MB/s Core→satellite, and 50.3 MB/s aggregate with four
+parallel streams — about 400–440 Mbit/s. During the run the Core's `cpu0` was 94% busy, 93 points of
+it softirq, while the other seven cores sat at 15–45% (sys; the WireGuard crypto workqueues). Both
+NICs raise their interrupts on `cpu0` (single RX queue each) and receive packet steering is off
+(`rps_cpus` = 0 on `eth0` and `eth1`). Setting `rps_cpus=fe` on both NICs moved a single flow only
+to 54.9 / 57.4 MB/s but four flows to 69.6 MB/s (`cpu0` dropped to 63%); it was restored to 0
+afterwards. The 46.9 MB/s seen earlier the same day from a client behind the satellite to the
+Internet was therefore the tunnel ceiling, not the ISP.
+
+Why it matters: (a) D15's scale target — a Core forwards wired clients at line rate but carries
+only ~0.4 Gbit/s per satellite flow (~0.55 aggregate with RPS), so a satellite's Wi-Fi 6 clients will
+be tunnel-bound, not radio-bound, and N satellites share one Core's crypto budget. (b) D14: the
+bridged (VXLAN inside WireGuard) option adds ~50 bytes per packet on the same crypto budget, so it
+can only be slower; the measurement to make is how much slower, not whether routed wins. (c) IRQ/RPS
+steering is a cheap upstream gain for every StartWRT (its VPN-client path pays the same cost), not a
+satellite matter — worth an upstream issue once measured properly (RPS on the underlay plus XPS; the
+larger lever is a RISC-V vector ChaCha20 in the kernel, which needs the arch crypto options enabled
+in the image's kernel config). Not satellite-branch work either way.
+
+### 25. Transit addressing settled: IPv6 link-local only, verified on the bench.
+
+Decided 2026-10-16 and checked the same afternoon. With the tunnel up over the IPv4 transit, the
+satellite's peer endpoint was switched at runtime to the Core's link-local address on the backhaul
+segment (`wg set … endpoint '[fe80::…%eth1]:51900'`, the same bracketed form netifd's `wireguard.sh`
+writes for any `endpoint_host` containing a colon). Traffic kept flowing at once; the Core's view of
+the peer flipped to the satellite's link-local address on `br-lan.1`; the next rekey, 30 s later,
+completed over link-local on both sides (identical handshake timestamps), and the satellite's egress
+through the Core was unchanged. Switching back to the IPv4 endpoint was equally immediate. The
+Core's `Allow-WireGuard-<tunnel>` accept rule is family-agnostic, so nothing in the firewall needed
+touching.
+
+What this settles: the backhaul segment needs no DHCP and no IPv4 at all — the Core's adoption
+announcement, the pairing exchange and the WireGuard underlay all ride link-local, the Core-side
+peer stays endpoint-less and roams, and a satellite never acquires a WAN lease or a WAN default.
+§22 (a displaced default) and §23's unstable transit address disappear by construction rather than
+by handling. What it does not cover: a Wi-Fi backhaul (design §11) and a backhaul through an
+unmanaged switch (D19) both keep link-local semantics, but the switch case means several satellites
+share one segment, so the Core must key peers by public key, never by address — which WireGuard
+already does.
+
+**Addendum 2026-10-17, from the first adoption run.** netifd's `wireguard.sh` accepts a scoped
+endpoint in `endpoint_host` (it brackets it and `wg syncconf` takes it), but its endpoint
+dependency step afterwards cannot: a `sed` meant to split `[addr]:port` matches inside the scoped
+address and hands `proto_add_host_dependency` the fragment `fe80`, and the interface goes down a
+second after it set up with only `NO_DEVICE` to show for it. `option nohostroute 1` skips that step,
+and is right anyway: a link-local endpoint is on-link by definition and needs no host route. The
+satellite provisioning sets it whenever the endpoint host carries a scope. Upstream candidate: the
+`sed` in `proto_wireguard_setup` should tolerate `%<ifname>` (or skip link-local endpoints).
+
+### 26. Adoption proof: a hash keyed by the sticker password is enough; a PAKE is deferred.
+
+Decided 2026-10-17 (D24). The question was whether the adoption handshake needs a
+password-authenticated key exchange or whether a keyed-hash challenge-response will do. It turns on
+where a listener would have to be and what the secret is worth to them.
+
+A listener must share layer 2 with the backhaul: the adoption exchange runs over IPv6 link-local
+(§25), which no router forwards. On a dedicated Core port cabled straight to the satellite (D19,
+D21) nothing else is on that segment, and the proof is not what protects the exchange. The cases
+that matter are a one-port Core whose backhaul shares the Admin VLAN (the bench today), a backhaul
+through an unmanaged switch, and a Wi-Fi backhaul: there the attacker is a compromised device on
+the segment, present during the seconds of adoption. What the secret buys such an attacker is
+narrow — adopting the satellite before the admin does, or re-adopting it as a fake Core after a
+factory reset — and both need continued active presence on the segment.
+
+The sticker password is 12 characters from the 68-character `PASSWORD_CHARS` set
+(`backend/ctrl/src/eeprom.rs`, `PMK_LEN`), about 73 bits if the factory draws uniformly (the
+firmware validates the charset and length, not the generator — to confirm with manufacturing). A
+captured exchange yields two 32-byte tags; searching 73 bits offline at 10^13 guesses a second
+takes decades. A PAKE adds nothing measurable against that secret. It would matter only for a
+short typed DIY code, which D24 avoids by making the generated code at least as long as a sticker
+password and copyable from the pre-adoption page (or scanned as a QR).
+
+What the proof does carry: a fresh random challenge each way (no replay), both WireGuard public
+keys under each tag (no key substitution), the Core's own proof to the satellite (no fake Core),
+acceptance on the Core only while the Add page is open on that port, and 5 tries then a fixed
+60 s cooldown on both sides, in memory, logged and shown. A fake Core announcement before adoption
+makes a fresh satellite wait, nothing more; the real Core lists it at the same time. Root on the
+satellite reads the EEPROM, which is already game over for that box. The proof is a keyed
+BLAKE3 hash and the `blake3` crate is already in the tree, so this adds no dependency and no
+license review; the PAKE goes to the phase 4 security review as a possible swap of the proof step
+inside the same exchange.

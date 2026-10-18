@@ -80,6 +80,8 @@ export type ActivityDeleteParamsInput = z.input<
 >
 export type ActivityEntry = z.output<typeof schemas.ActivityEntry>
 export type ActivityListParamsInput = z.input<typeof schemas.ActivityListParams>
+export type AdoptParamsInput = z.input<typeof schemas.AdoptParams>
+export type AdoptResponse = z.output<typeof schemas.AdoptResponse>
 
 /**
  * A published port that will be removed because the device it forwards to can
@@ -99,7 +101,17 @@ export type ApChannel = z.output<typeof schemas.ApChannel>
 export type AutomaticPortUse = z.output<typeof schemas.AutomaticPortUse>
 export type BlackoutWindow = z.output<typeof schemas.BlackoutWindow>
 export type BlackoutWindowInput = z.input<typeof schemas.BlackoutWindow>
+
+/**
+ * A router waiting to be adopted, as the Core sees it.
+ */
+export type Candidate = z.output<typeof schemas.Candidate>
 export type CheckInitializedRes = z.output<typeof schemas.CheckInitializedRes>
+
+/**
+ * What the pre-adoption page shows.
+ */
+export type CodeResponse = z.output<typeof schemas.CodeResponse>
 export type DataUsagePeriodInput = z.input<typeof schemas.DataUsagePeriod>
 export type DataUsagePoint = z.output<typeof schemas.DataUsagePoint>
 export type DdnsProvider = z.output<typeof schemas.DdnsProvider>

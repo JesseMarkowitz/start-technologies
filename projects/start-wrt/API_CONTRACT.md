@@ -2176,6 +2176,69 @@ struct ProvisionSatelliteProfileParams {
 // Manual stand-in for what config sync (D5) will do automatically.
 ```
 
+### `satellite.adoption.candidates`
+
+```rust
+// Params: none. Core-only.
+// Response:
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Candidate {
+    address: String,        // link-local address with interface, e.g. "fe80::1%br-lan.1"
+    interface: String,
+    satelliteKey: String,   // the candidate's WireGuard public key (base64), as it presents it
+    version: String,
+    hasSticker: bool,       // true: the secret is its sticker Wi-Fi password; false: a code
+    lastSeenSecs: u64,
+}
+// Vec<Candidate>. Routers in the satellite role with no pinned Core that answered the
+// Core's link-local announcement on a LAN bridge within the last 30 s (design D21).
+```
+
+### `satellite.adoption.adopt`
+
+```rust
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AdoptParams {
+    address: String,                     // as `candidates` lists it
+    name: String,                        // registry name; an existing entry of that name is replaced
+    secret: String,                      // sticker Wi-Fi password, or the code its page shows
+    profile: String,                     // Core profile interface the first tunnel carries
+    transitZone: Option<String>,         // zone the handshake arrives on; derived from the
+                                         // candidate's interface when omitted
+    allowedIp: Vec<String>,              // what the satellite routes via the tunnel; all when empty
+    satelliteSubnet: Vec<String>,        // the satellite's own subnets the Core routes to it
+    coreTunnelAddr: Option<String>,      // default: next free 10.42.<n>.1
+    satelliteTunnelAddr: Option<String>, // default: 10.42.<n>.2
+    listenPort: Option<u16>,             // default: first free from 51900
+}
+// Response:
+struct AdoptResponse { name: String, satelliteKey: String, interface: String }
+// Core-only. Runs the D24 proof exchange with the candidate over link-local UDP 8719:
+// hello → offer → confirm, each proof a keyed hash under the secret over both
+// challenges and both WireGuard keys (the Core's also over the tunnel it dictates).
+// On success both sides provision the tunnel with the pinned keys and a pre-shared key
+// derived from the exchange, and the Core records the satellite in its registry.
+// Errors: IncorrectPassword (wrong secret; the message says how many attempts remain),
+// RateLimited (5 failures → 60 s cooldown, on either side), Timeout (no answer in 5 s).
+```
+
+### `satellite.adoption.code`
+
+```rust
+// Params: none.
+// Response:
+struct CodeResponse {
+    waiting: bool,        // this router is listening for a Core on its WAN port
+    hasSticker: bool,     // the sticker Wi-Fi password is the secret; no code is shown
+    code: Option<String>, // 16-character adoption code for a board with no sticker password;
+                          // valid until adopted or the daemon restarts
+}
+// What the pre-adoption page shows (design §19). Only meaningful on a satellite that
+// has not yet pinned a Core; elsewhere `waiting` is false.
+```
+
 ---
 
 ## HTTP Routes

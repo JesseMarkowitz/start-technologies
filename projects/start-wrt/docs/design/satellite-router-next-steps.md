@@ -128,8 +128,11 @@ all and satellite pairing is a direct beneficiary.
 - ☐ **Daemon gate** — in `bins/daemon.rs::inner_main`, read `satellite::load_role()` and, when
   Satellite, **skip** the Core-only normal-mode block (`profiles::bootstrap_admin_profile`, WAN
   setup, `system::apply_remote_access`, schedule/cron regeneration).
-- ☐ **Set role at flash** — capture the role choice in the setup wizard and write it in
-  `setup.rs::run_setup_flash_inner` (extend `SetupStatusRes`); role is immutable post-flash (D6).
+- ☐ **No role at flash** (D6, reaffirmed 2026-10-16): the wizard never asks. A freshly flashed or
+  factory-reset router starts **neutral** — no role file, broadcasting nothing — and listens on its
+  WAN port for the Core's adoption announcement (Adoption and recovery, below). Adoption writes
+  `satellite`; completing the standalone setup wizard writes `core`. The role is immutable
+  afterwards; changing it is the factory reset.
 
 ## Phase 2 — Site-to-site transport (`vpn_site.rs`, new) ★ top risk
 
@@ -144,8 +147,13 @@ all and satellite pairing is a direct beneficiary.
   run the **basic hardware bring-up test** (`satellite-router-hardware-test.md`).
 - ☐ **Automatic (paired) provisioning** — the pairing flow (D4) calls the same generators with
   allocated keys/ports instead of hand-entered ones.
-- ☐ **Underlay automation** — the transit-port IP + `transit` firewall zone are operator-manual in
-  the runbook today; automate at pairing.
+- ☐ **Underlay: IPv6 link-local only** (decided 2026-10-16, verified on the bench the same day —
+  open questions §25). The backhaul segment carries no DHCP and no IPv4: the Core announces and
+  listens on its link-local address, the satellite's WireGuard endpoint is `[fe80::…%<wan>]:<port>`
+  (netifd's `wireguard.sh` brackets any host containing a colon, so `endpoint_host` carries it as
+  is), and the Core's peer stays endpoint-less and roams. The satellite's tunnel interface carries `nohostroute 1`: netifd's endpoint host-route step cannot parse a scoped endpoint and takes the interface down (open questions §25 addendum). A satellite therefore never holds a WAN
+  lease or a WAN default, which removes §22 and §23 by construction. The runbook's manual
+  transit-port IP + `transit` zone are a test-only arrangement.
 - ☐ **MSS/MTU clamp** on the Core ingress; validate downstream-host (not just self-ping) egress.
 - ☐ **Satellite side** — write each profile tunnel with `route_allowed_ips '0'` (as `vpn_client.rs`
   does, and for the same reason: N tunnels cannot each install a main-table default) and route the
@@ -215,8 +223,20 @@ all and satellite pairing is a direct beneficiary.
 
 ## Phase 6 — Capability gating (D7) & UI
 
-- ☐ Role-aware middleware: on a Satellite, make Core-authoring RPCs (`profiles`, `wifi`, `wan`,
-  `vpn_server`, `published-ports`) read-only/disabled; keep `system`/`lan`/`devices` local.
+- ☐ Role-aware middleware (D7): on a satellite an **allowlist** of satellite-local endpoints is
+  served and every other RPC is refused — absent, not read-only. Local means: its own link, tunnel
+  and sync state, its connected clients, firmware, restart, factory reset, logs.
+- ☐ **Satellite UI (D23, decided 2026-10-16): a different, much smaller app, not the Core's UI with
+  controls greyed out.** It shows nothing the Core controls — no profiles, passwords, Wi-Fi,
+  WAN, VPN, port or DNS settings, not even read-only. It shows what is true of this router alone:
+  an unmistakable "Satellite _name_" heading, a link to the Core (`router.lan`) for everything
+  else, the Core link state (tunnels, last sync generation), its own clients — per Ethernet port
+  and per Wi-Fi radio, with the profile each is in — firmware version against the Core's, and its logs. It is the normal-operation sibling of the
+  recovery page (D22) and shares its shell. **Open:** whether it carries any action at all (restart,
+  factory reset) — a satellite holds no password (D22), so either the page has no actions and the
+  Core issues them over the management tunnel, or the satellite validates the Core's session over
+  that tunnel. Everything else is managed at the Core, and comes from
+  the Core.
 - ☐ Angular "Satellites" surface (`web/`): pair dialog + registry/status list (pattern-match
   `routes/published-ports`); wire `api.service.ts` + `live-api` + `mock-api`; `app.routes.ts`/settings.
 - ☐ Channel plan view: every router's radios with planned channel and width, a pin per radio from
@@ -260,22 +280,28 @@ all and satellite pairing is a direct beneficiary.
   7's refusal. The `arrival_matches` substitute is a _replacement, not an inheritance_ — flag it in
   the phase 4 security review (design §15).
 
-## Adoption and recovery (D6, D21, D22)
+## Adoption and recovery (D6, D21, D22, D24)
 
 - ☐ Core announcement on every LAN port (IPv6 link-local, signed with the Core's key); a fresh
   router that hears it on its WAN port keeps setup Wi-Fi off and waits to be adopted.
 - ☐ Core lists unadopted routers; on a port still serving a profile, asks "Make LAN port _n_ the
   satellite port?" listing the devices that will lose access, and changes nothing until approved.
-- ☐ Adoption handshake keyed by the sticker Wi-Fi password (EEPROM) typed at the Core; pins both
-  WireGuard keys; the password never crosses the wire in the clear. Needs the phase 4 security
-  review.
+- ☐ Adoption handshake (D24, decided 2026-10-17): keyed BLAKE3 challenge-response on the sticker Wi-Fi
+  password (EEPROM) typed at the Core, or by the generated adoption code on a board without one;
+  fresh random challenge each way; each proof covers both challenges and both WireGuard public keys;
+  the secret never crosses the wire. The Core accepts proofs only while the Add page is open, on
+  that port. Both sides: 5 failed attempts, then a fixed 60 s cooldown, counted in memory, logged
+  on the satellite, shown on the Add page. The Core discards the secret and keeps the pinned key.
+  No PAKE in v1; the phase 4 security review decides whether to swap the proof step. Confirm with
+  manufacturing that the EEPROM password is drawn uniformly over the full `PASSWORD_CHARS` set.
 - ☐ A fresh router broadcasts nothing until it has checked its WAN port (link, a DHCP attempt, one
   Core-announcement interval).
 - ☐ A fresh router that hears no Core and gets no Internet on its WAN port says so on its setup
   page (no cable / cable but nothing answering / address but no Internet) and asks whether it is a
   satellite with a cabling fault or a main router to set up.
 - ☐ Board with no EEPROM password: pre-adoption page on the satellite's LAN port at `router.lan`
-  showing a one-time adoption code.
+  showing a generated adoption code at least as long as a sticker password, with a Copy button and
+  a QR code, valid until adopted or power-cycled (D24).
 - ☐ Recovery mode: isolated recovery network on the LAN port and a `StartWRT-Recovery-<last 4 hex of WAN MAC>` 2.4 GHz SSID,
   (the satellite's sticker password, one client, 1 minute after going dark — placeholder); DNS answers `router.lan` with the satellite; page
   headed `Satellite <satellite-specific name> — recovery mode`, served over HTTP, no login;

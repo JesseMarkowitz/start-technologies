@@ -17,11 +17,11 @@
 //!   the role-aware gating in the design's D7).
 //!
 //! ## Deliberately NOT here yet (tracked in the design doc + NEXT_STEPS)
-//! - The site-to-site WireGuard provisioning (`vpn_site`), the WAN-less egress,
-//!   the enrollment-token trust bootstrap and remote-peer auth (D4), and the
-//!   Core→satellite semantic config-sync transport (D5). `pair` therefore records
-//!   a satellite in the registry only; it does **not** yet bring up tunnels or
-//!   push config, and says so in its response rather than implying otherwise.
+//! - The WAN-less egress, remote-peer auth (D4), and the Core→satellite semantic
+//!   config-sync transport (D5). `pair` records a satellite in the registry only;
+//!   it does **not** bring up tunnels or push config, and says so in its response.
+//!   Adoption over the backhaul — the trust bootstrap that pins keys and
+//!   provisions the first tunnel on both sides — lives in `adoption` (D21, D24).
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -63,6 +63,10 @@ pub struct RoleMarker {
     /// (underlay address). `None` on a Core.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_endpoint: Option<String>,
+    /// On a Satellite, the Core's WireGuard public key (base64) pinned at
+    /// adoption. `None` until adopted; a satellite with none waits to be adopted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_key: Option<String>,
 }
 rpc_toolkit::reflect_ts!(RoleMarker);
 
@@ -246,6 +250,7 @@ pub fn satellite<C: CtrlContext>() -> ParentHandler<C> {
                 .no_display()
                 .with_call_remote::<CliContext>(),
         )
+        .subcommand("adoption", crate::adoption::adoption::<C>())
 }
 
 #[instrument(skip_all)]
@@ -277,6 +282,7 @@ pub async fn set_role(
     let marker = RoleMarker {
         role,
         core_endpoint,
+        core_key: None,
     };
     persist_json(ROLE_PATH, &marker).await?;
     crate::activity::log(
@@ -432,26 +438,26 @@ pub async fn status(_ctx: ServerContext) -> Result<StatusResponse, Error> {
 #[serde(rename_all = "camelCase")]
 #[command(rename_all = "kebab-case")]
 pub struct ProvisionCoreParams {
-    satellite: String,
-    profile: String,
+    pub(crate) satellite: String,
+    pub(crate) profile: String,
     #[clap(long)]
-    core_transit_addr: String,
+    pub(crate) core_transit_addr: String,
     /// Repeatable. CIDR(s) to route to the satellite over the tunnel (e.g. the
     /// satellite's /24, or its wg host /32 for a self-ping test). Repeat once per
     /// address family for a dual-stack profile (D11).
     #[clap(long)]
-    satellite_allowed_ip: Vec<String>,
+    pub(crate) satellite_allowed_ip: Vec<String>,
     #[clap(long)]
-    satellite_public_key: String,
+    pub(crate) satellite_public_key: String,
     #[clap(long)]
-    preshared_key: String,
+    pub(crate) preshared_key: String,
     #[clap(long)]
-    listen_port: u16,
+    pub(crate) listen_port: u16,
     /// Firewall zone the handshake arrives on (the transit-link zone).
     #[clap(long)]
-    transit_zone: String,
+    pub(crate) transit_zone: String,
     #[clap(long)]
-    core_private_key: String,
+    pub(crate) core_private_key: String,
 }
 rpc_toolkit::reflect_ts!(ProvisionCoreParams);
 
@@ -517,27 +523,27 @@ pub async fn provision_core_tunnel(
 #[serde(rename_all = "camelCase")]
 #[command(rename_all = "kebab-case")]
 pub struct ProvisionSatelliteParams {
-    satellite: String,
-    profile: String,
+    pub(crate) satellite: String,
+    pub(crate) profile: String,
     #[clap(long)]
-    sat_wg_addr: String,
+    pub(crate) sat_wg_addr: String,
     #[clap(long)]
-    core_public_key: String,
+    pub(crate) core_public_key: String,
     #[clap(long)]
-    core_endpoint_host: String,
+    pub(crate) core_endpoint_host: String,
     #[clap(long)]
-    core_endpoint_port: u16,
+    pub(crate) core_endpoint_port: u16,
     #[clap(long)]
-    preshared_key: String,
+    pub(crate) preshared_key: String,
     #[clap(long)]
-    sat_private_key: String,
+    pub(crate) sat_private_key: String,
     /// Repeatable. What to route through the tunnel; defaults to full egress via
     /// the Core (`0.0.0.0/0`) when omitted.
     #[clap(long)]
-    allowed_ip: Vec<String>,
+    pub(crate) allowed_ip: Vec<String>,
     /// A local interface whose firewall zone the tunnel joins.
     #[clap(long, default_value = "lan")]
-    firewall_zone_member: String,
+    pub(crate) firewall_zone_member: String,
 }
 rpc_toolkit::reflect_ts!(ProvisionSatelliteParams);
 
@@ -696,11 +702,19 @@ pub fn load_role() -> RoleMarker {
         .unwrap_or_default()
 }
 
-fn load_registry() -> Vec<PairedSatellite> {
+pub(crate) fn load_registry() -> Vec<PairedSatellite> {
     std::fs::read_to_string(REGISTRY_PATH)
         .ok()
         .and_then(|c| serde_json::from_str(&c).ok())
         .unwrap_or_default()
+}
+
+pub(crate) async fn persist_registry(list: &[PairedSatellite]) -> Result<(), Error> {
+    persist_json(REGISTRY_PATH, &list).await
+}
+
+pub(crate) async fn persist_role(marker: &RoleMarker) -> Result<(), Error> {
+    persist_json(ROLE_PATH, marker).await
 }
 
 async fn persist_json<T: Serialize>(path: &str, value: &T) -> Result<(), Error> {
@@ -737,7 +751,7 @@ fn parse_role(s: &str) -> Result<RouterRole, Error> {
 
 /// Reject Core-only operations when running as a Satellite (a first slice of the
 /// role-aware capability gating in the design's D7).
-fn ensure_core() -> Result<(), Error> {
+pub(crate) fn ensure_core() -> Result<(), Error> {
     if load_role().role == RouterRole::Satellite {
         return Err(Error::new(
             eyre!("this operation is only available on a Core router"),
@@ -747,7 +761,7 @@ fn ensure_core() -> Result<(), Error> {
     Ok(())
 }
 
-fn ensure_satellite() -> Result<(), Error> {
+pub(crate) fn ensure_satellite() -> Result<(), Error> {
     if load_role().role != RouterRole::Satellite {
         return Err(Error::new(
             eyre!("this operation is only available on a Satellite router"),
@@ -757,7 +771,10 @@ fn ensure_satellite() -> Result<(), Error> {
     Ok(())
 }
 
-fn add_satellite(list: &mut Vec<PairedSatellite>, sat: PairedSatellite) -> Result<(), Error> {
+pub(crate) fn add_satellite(
+    list: &mut Vec<PairedSatellite>,
+    sat: PairedSatellite,
+) -> Result<(), Error> {
     if list.iter().any(|s| s.name == sat.name) {
         return Err(Error::new(
             eyre!("a satellite named '{}' is already paired", sat.name),
@@ -774,7 +791,7 @@ fn add_satellite(list: &mut Vec<PairedSatellite>, sat: PairedSatellite) -> Resul
     Ok(())
 }
 
-fn remove_satellite(list: &mut Vec<PairedSatellite>, name: &str) -> bool {
+pub(crate) fn remove_satellite(list: &mut Vec<PairedSatellite>, name: &str) -> bool {
     let before = list.len();
     list.retain(|s| s.name != name);
     list.len() != before
@@ -831,6 +848,7 @@ mod tests {
         let m = RoleMarker {
             role: RouterRole::Satellite,
             core_endpoint: Some("10.0.0.1:51820".to_string()),
+            core_key: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RoleMarker = serde_json::from_str(&json).unwrap();

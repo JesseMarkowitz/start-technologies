@@ -42,6 +42,129 @@ export const ActivityListParams: z.ZodObject<{
 }).meta({
   id: 'ActivityListParams',
 })
+export const AdoptParams: z.ZodObject<{
+  /**
+   * A candidate's address as `candidates` lists it.
+   */
+  address: z.ZodString
+  /**
+   * The satellite's registry name. An existing entry of that name is
+   * replaced: a satellite re-adopted after a factory reset keeps its name.
+   */
+  name: z.ZodString
+  /**
+   * The candidate's sticker Wi-Fi password, or its adoption code.
+   */
+  secret: z.ZodString
+  /**
+   * The Core profile interface the first tunnel carries.
+   */
+  profile: z.ZodString
+  /**
+   * Firewall zone the handshake arrives on; derived from the candidate's
+   * interface when omitted.
+   */
+  transitZone: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodString>>,
+    z.ZodNullable<z.ZodString>
+  >
+  /**
+   * Repeatable. What the satellite routes through the tunnel; all traffic
+   * when omitted.
+   */
+  allowedIp: z.ZodArray<z.ZodString>
+  /**
+   * Repeatable. The satellite's own subnets the Core routes to it over the
+   * tunnel, besides its tunnel address.
+   */
+  satelliteSubnet: z.ZodArray<z.ZodString>
+  coreTunnelAddr: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodString>>,
+    z.ZodNullable<z.ZodString>
+  >
+  satelliteTunnelAddr: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodString>>,
+    z.ZodNullable<z.ZodString>
+  >
+  listenPort: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodInt>>,
+    z.ZodNullable<z.ZodInt>
+  >
+}> = /* @__PURE__ */ object({
+  /**
+   * A candidate's address as `candidates` lists it.
+   */
+  address: z.string().meta({
+    description: "A candidate's address as `candidates` lists it.",
+  }),
+  /**
+   * The satellite's registry name. An existing entry of that name is
+   * replaced: a satellite re-adopted after a factory reset keeps its name.
+   */
+  name: z.string().meta({
+    description:
+      "The satellite's registry name. An existing entry of that name is\nreplaced: a satellite re-adopted after a factory reset keeps its name.",
+  }),
+  /**
+   * The candidate's sticker Wi-Fi password, or its adoption code.
+   */
+  secret: z.string().meta({
+    description:
+      "The candidate's sticker Wi-Fi password, or its adoption code.",
+  }),
+  /**
+   * The Core profile interface the first tunnel carries.
+   */
+  profile: z.string().meta({
+    description: 'The Core profile interface the first tunnel carries.',
+  }),
+  /**
+   * Firewall zone the handshake arrives on; derived from the candidate's
+   * interface when omitted.
+   */
+  transitZone: wire(
+    z.string().nullable().optional(),
+    z.string().nullable(),
+  ).meta({
+    description:
+      "Firewall zone the handshake arrives on; derived from the candidate's\ninterface when omitted.",
+  }),
+  /**
+   * Repeatable. What the satellite routes through the tunnel; all traffic
+   * when omitted.
+   */
+  allowedIp: z.array(z.string()).meta({
+    description:
+      'Repeatable. What the satellite routes through the tunnel; all traffic\nwhen omitted.',
+  }),
+  /**
+   * Repeatable. The satellite's own subnets the Core routes to it over the
+   * tunnel, besides its tunnel address.
+   */
+  satelliteSubnet: z.array(z.string()).meta({
+    description:
+      "Repeatable. The satellite's own subnets the Core routes to it over the\ntunnel, besides its tunnel address.",
+  }),
+  coreTunnelAddr: wire(z.string().nullable().optional(), z.string().nullable()),
+  satelliteTunnelAddr: wire(
+    z.string().nullable().optional(),
+    z.string().nullable(),
+  ),
+  listenPort: wire(z.int().nullable().optional(), z.int().nullable()),
+}).meta({
+  id: 'AdoptParams',
+})
+export const AdoptResponse: z.ZodObject<{
+  name: z.ZodString
+  satelliteKey: z.ZodString
+  interface: z.ZodString
+}> = /* @__PURE__ */ object({
+  name: z.string(),
+  satelliteKey: z.string(),
+  interface: z.string(),
+}).meta({
+  id: 'AdoptResponse',
+})
 
 /**
  * A published port that will be removed because the device it forwards to can
@@ -217,10 +340,76 @@ export const BlackoutWindow: z.ZodObject<{
 }).meta({
   id: 'BlackoutWindow',
 })
+
+/**
+ * A router waiting to be adopted, as the Core sees it.
+ */
+export const Candidate: z.ZodObject<{
+  /**
+   * Link-local address with its interface, e.g. `fe80::1%br-lan.1`.
+   */
+  address: z.ZodString
+  interface: z.ZodString
+  satelliteKey: z.ZodString
+  version: z.ZodString
+  hasSticker: z.ZodBoolean
+  lastSeenSecs: z.ZodInt
+}> = /* @__PURE__ */ object({
+  /**
+   * Link-local address with its interface, e.g. `fe80::1%br-lan.1`.
+   */
+  address: z.string().meta({
+    description:
+      'Link-local address with its interface, e.g. `fe80::1%br-lan.1`.',
+  }),
+  interface: z.string(),
+  satelliteKey: z.string(),
+  version: z.string(),
+  hasSticker: z.boolean(),
+  lastSeenSecs: z.int(),
+}).meta({
+  id: 'Candidate',
+  description: 'A router waiting to be adopted, as the Core sees it.',
+})
 export const CheckInitializedRes: z.ZodObject<{ initialized: z.ZodBoolean }> =
   /* @__PURE__ */ object({ initialized: z.boolean() }).meta({
     id: 'CheckInitializedRes',
   })
+
+/**
+ * What the pre-adoption page shows.
+ */
+export const CodeResponse: z.ZodObject<{
+  /**
+   * Listening for a Core.
+   */
+  waiting: z.ZodBoolean
+  /**
+   * The sticker Wi-Fi password is the secret; no code is shown.
+   */
+  hasSticker: z.ZodBoolean
+  code: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodString>>,
+    z.ZodNullable<z.ZodString>
+  >
+}> = /* @__PURE__ */ object({
+  /**
+   * Listening for a Core.
+   */
+  waiting: z.boolean().meta({
+    description: 'Listening for a Core.',
+  }),
+  /**
+   * The sticker Wi-Fi password is the secret; no code is shown.
+   */
+  hasSticker: z.boolean().meta({
+    description: 'The sticker Wi-Fi password is the secret; no code is shown.',
+  }),
+  code: wire(z.string().nullable().optional(), z.string().nullable()),
+}).meta({
+  id: 'CodeResponse',
+  description: 'What the pre-adoption page shows.',
+})
 export const DataUsagePeriod: z.ZodEnum<{
   week: 'week'
   month: 'month'
@@ -2100,6 +2289,11 @@ export const RoleMarker: z.ZodObject<{
    * (underlay address). `None` on a Core.
    */
   coreEndpoint: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  /**
+   * On a Satellite, the Core's WireGuard public key (base64) pinned at
+   * adoption. `None` until adopted; a satellite with none waits to be adopted.
+   */
+  coreKey: z.ZodOptional<z.ZodNullable<z.ZodString>>
 }> = /* @__PURE__ */ object({
   role: RouterRole,
   /**
@@ -2109,6 +2303,14 @@ export const RoleMarker: z.ZodObject<{
   coreEndpoint: z.string().nullable().optional().meta({
     description:
       "On a Satellite, the Core's reachable endpoint on the inter-router link\n(underlay address). `None` on a Core.",
+  }),
+  /**
+   * On a Satellite, the Core's WireGuard public key (base64) pinned at
+   * adoption. `None` until adopted; a satellite with none waits to be adopted.
+   */
+  coreKey: z.string().nullable().optional().meta({
+    description:
+      "On a Satellite, the Core's WireGuard public key (base64) pinned at\nadoption. `None` until adopted; a satellite with none waits to be adopted.",
   }),
 }).meta({
   id: 'RoleMarker',
@@ -3354,6 +3556,56 @@ export const Api = {
     satellite: {
       _PARAMS: /* @__PURE__ */ empty,
       _CHILDREN: {
+        adoption: {
+          _PARAMS: /* @__PURE__ */ empty,
+          _CHILDREN: {
+            adopt: {
+              _PARAMS: /* @__PURE__ */ z.intersection(
+                z.intersection(
+                  object({
+                    format: wire(
+                      IoFormat.nullable().optional(),
+                      IoFormat.nullable(),
+                    ),
+                  }),
+                  empty,
+                ),
+                AdoptParams,
+              ),
+              _RETURN: /* @__PURE__ */ AdoptResponse,
+            },
+            candidates: {
+              _PARAMS: /* @__PURE__ */ z.intersection(
+                z.intersection(
+                  object({
+                    format: wire(
+                      IoFormat.nullable().optional(),
+                      IoFormat.nullable(),
+                    ),
+                  }),
+                  empty,
+                ),
+                empty,
+              ),
+              _RETURN: /* @__PURE__ */ z.array(Candidate),
+            },
+            code: {
+              _PARAMS: /* @__PURE__ */ z.intersection(
+                z.intersection(
+                  object({
+                    format: wire(
+                      IoFormat.nullable().optional(),
+                      IoFormat.nullable(),
+                    ),
+                  }),
+                  empty,
+                ),
+                empty,
+              ),
+              _RETURN: /* @__PURE__ */ CodeResponse,
+            },
+          },
+        },
         'get-role': {
           _PARAMS: /* @__PURE__ */ z.intersection(
             z.intersection(

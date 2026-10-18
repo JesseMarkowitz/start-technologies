@@ -396,6 +396,7 @@ async fn inner_main() -> Result<(), Error> {
         if crate::dns_inject::DNS_INJECT.set(di.clone()).is_ok() {
             tokio::spawn(crate::dns_inject::run(di));
         }
+        crate::adoption::start();
     }
 
     let ctx = ServerContext {

@@ -1,0 +1,821 @@
+//! Satellite adoption over the backhaul (design D21, D24).
+//!
+//! A Core announces itself on every LAN bridge with an IPv6 link-local
+//! multicast. A candidate — a router in the `satellite` role that has not yet
+//! pinned a Core — answers on its WAN port with its identity, which puts it on
+//! the Core's candidate list. The admin then picks it and types its secret at
+//! the Core; the [`proof`] exchange runs over the same link-local segment and,
+//! on success, both sides provision the tunnel the Core dictated with the keys
+//! the exchange pinned and the pre-shared key it derived. Nothing here crosses a
+//! router: link-local traffic is confined to one segment.
+//!
+//! The candidate accepts datagrams from its WAN port only; the Core accepts
+//! offers only from a candidate it has sent a hello to.
+
+mod proof;
+
+use std::collections::{BTreeMap, HashMap};
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use clap::Parser;
+use proof::{b64, Adopter, AttemptGuard, Confirm, Hello, Offer, Reject, Responder};
+pub use proof::{generate_code, Secret, TunnelSpec, ATTEMPT_LIMIT, CODE_LEN, COOLDOWN};
+use rpc_toolkit::{from_fn_async, from_fn_async_local, HandlerExt, ParentHandler};
+use serde::{Deserialize, Serialize};
+use tokio::net::UdpSocket;
+use tokio::sync::oneshot;
+use uciedit::openwrt::{FirewallRule, FirewallTarget, FirewallZone, NetworkInterface};
+use uciedit::{dump_all, parse_all, Arena, Configs};
+
+use crate::prelude::*;
+use crate::satellite::{self, PairedSatellite, RouterRole};
+use crate::utils::HandlerExtSerde;
+use crate::wg::WgKey;
+use crate::{CliContext, CtrlContext, ServerContext};
+
+/// UDP port both sides listen on, link-local only.
+pub const PORT: u16 = 8719;
+const ANNOUNCE_EVERY: Duration = Duration::from_secs(5);
+const CANDIDATE_TTL: Duration = Duration::from_secs(30);
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
+const ALL_NODES: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+const MAX_DATAGRAM: usize = 4096;
+const CANDIDATE_RULE_NAME: &str = "Allow-Adoption";
+const CANDIDATE_RULE_SECTION: &str = "startwrt_adoption";
+const LISTEN_PORT_BASE: u16 = 51900;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "body", rename_all = "camelCase")]
+enum Message {
+    Announce,
+    Present(Present),
+    Hello(Hello),
+    Offer(Offer),
+    Confirm(Confirm),
+    Reject(Reject),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Present {
+    satellite_key: String,
+    version: String,
+    has_sticker: bool,
+}
+
+// ── Core side ───────────────────────────────────────────────────────────────
+
+struct Seen {
+    present: Present,
+    at: Instant,
+}
+
+struct CoreLink {
+    socket: UdpSocket,
+    candidates: Mutex<BTreeMap<SocketAddrV6, Seen>>,
+    pending: Mutex<HashMap<SocketAddrV6, oneshot::Sender<Message>>>,
+    guards: Mutex<HashMap<Ipv6Addr, AttemptGuard>>,
+}
+
+static CORE: OnceLock<Arc<CoreLink>> = OnceLock::new();
+
+/// Starts the side of adoption this router's role calls for. A Core announces
+/// and listens for candidates; an unadopted satellite waits to be adopted.
+pub fn start() {
+    let role = satellite::load_role();
+    match role.role {
+        RouterRole::Core => {
+            tokio::spawn(async {
+                if let Err(e) = run_core().await {
+                    tracing::error!("adoption: Core listener failed: {e}");
+                }
+            });
+        }
+        RouterRole::Satellite if role.core_key.is_none() => {
+            // Provisioning holds a uciedit `Arena` across awaits (!Send).
+            if let Err(e) = std::thread::Builder::new()
+                .name("adoption".into())
+                .spawn(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("adoption runtime")
+                        .block_on(async {
+                            if let Err(e) = run_candidate().await {
+                                tracing::error!("adoption: candidate listener failed: {e}");
+                            }
+                        });
+                })
+            {
+                tracing::error!("adoption: failed to start candidate thread: {e}");
+            }
+        }
+        RouterRole::Satellite => {}
+    }
+}
+
+async fn bind() -> Result<UdpSocket, Error> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .with_kind(ErrorKind::Network)?;
+    sock.set_only_v6(true).with_kind(ErrorKind::Network)?;
+    sock.set_reuse_address(true).with_kind(ErrorKind::Network)?;
+    sock.set_nonblocking(true).with_kind(ErrorKind::Network)?;
+    sock.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, PORT)).into())
+        .with_kind(ErrorKind::Network)?;
+    UdpSocket::from_std(sock.into()).with_kind(ErrorKind::Network)
+}
+
+fn encode(m: &Message) -> Vec<u8> {
+    serde_json::to_vec(m).expect("Message serializes")
+}
+
+fn if_index(name: &str) -> Option<u32> {
+    nix::net::if_::if_nametoindex(name).ok()
+}
+
+fn if_name(index: u32) -> Option<String> {
+    std::fs::read_dir("/sys/class/net").ok()?.find_map(|e| {
+        let e = e.ok()?;
+        let n = std::fs::read_to_string(e.path().join("ifindex")).ok()?;
+        (n.trim().parse::<u32>().ok()? == index).then(|| e.file_name().into_string().ok())?
+    })
+}
+
+fn lan_bridges() -> Vec<String> {
+    std::fs::read_dir("/sys/class/net")
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| n.starts_with("br-lan"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn run_core() -> Result<(), Error> {
+    let link = Arc::new(CoreLink {
+        socket: bind().await?,
+        candidates: Mutex::new(BTreeMap::new()),
+        pending: Mutex::new(HashMap::new()),
+        guards: Mutex::new(HashMap::new()),
+    });
+    if CORE.set(link.clone()).is_err() {
+        return Ok(());
+    }
+    tracing::info!("adoption: Core announcing on LAN bridges, port {PORT}");
+    let announce = encode(&Message::Announce);
+    let mut tick = tokio::time::interval(ANNOUNCE_EVERY);
+    let mut buf = vec![0u8; MAX_DATAGRAM];
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                for iface in lan_bridges() {
+                    let Some(idx) = if_index(&iface) else { continue };
+                    let dst = SocketAddrV6::new(ALL_NODES, PORT, 0, idx);
+                    if let Err(e) = link.socket.send_to(&announce, dst).await {
+                        tracing::debug!("adoption: announce on {iface}: {e}");
+                    }
+                }
+            }
+            r = link.socket.recv_from(&mut buf) => {
+                let Ok((n, SocketAddr::V6(src))) = r else { continue };
+                if !src.ip().is_unicast_link_local() {
+                    continue;
+                }
+                let Ok(msg) = serde_json::from_slice::<Message>(&buf[..n]) else { continue };
+                match msg {
+                    Message::Present(p) => {
+                        link.candidates.lock().unwrap().insert(src, Seen { present: p, at: Instant::now() });
+                    }
+                    m @ (Message::Offer(_) | Message::Reject(_)) => {
+                        if let Some(tx) = link.pending.lock().unwrap().remove(&src) {
+                            let _ = tx.send(m);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// A router waiting to be adopted, as the Core sees it.
+#[derive(Clone, Debug, Serialize, Deserialize, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+pub struct Candidate {
+    /// Link-local address with its interface, e.g. `fe80::1%br-lan.1`.
+    pub address: String,
+    pub interface: String,
+    pub satellite_key: String,
+    pub version: String,
+    pub has_sticker: bool,
+    pub last_seen_secs: u64,
+}
+rpc_toolkit::reflect_ts!(Candidate);
+
+fn core_link() -> Result<Arc<CoreLink>, Error> {
+    CORE.get().cloned().ok_or_else(|| {
+        Error::new(
+            eyre!("adoption listener is not running on this router"),
+            ErrorKind::Uninitialized,
+        )
+    })
+}
+
+pub fn adoption<C: CtrlContext>() -> ParentHandler<C> {
+    ParentHandler::new()
+        .subcommand(
+            "candidates",
+            from_fn_async(candidates)
+                .with_display_serializable()
+                .with_call_remote::<CliContext>(),
+        )
+        .subcommand(
+            "adopt",
+            from_fn_async_local(adopt)
+                .with_display_serializable()
+                .with_call_remote::<CliContext>(),
+        )
+        .subcommand(
+            "code",
+            from_fn_async(code)
+                .with_display_serializable()
+                .with_call_remote::<CliContext>(),
+        )
+}
+
+#[instrument(skip_all)]
+pub async fn candidates(_ctx: ServerContext) -> Result<Vec<Candidate>, Error> {
+    satellite::ensure_core()?;
+    let link = core_link()?;
+    let now = Instant::now();
+    let mut seen = link.candidates.lock().unwrap();
+    seen.retain(|_, s| now.duration_since(s.at) < CANDIDATE_TTL);
+    Ok(seen
+        .iter()
+        .map(|(addr, s)| {
+            let interface = if_name(addr.scope_id()).unwrap_or_default();
+            Candidate {
+                address: format!("{}%{}", addr.ip(), interface),
+                interface,
+                satellite_key: s.present.satellite_key.clone(),
+                version: s.present.version.clone(),
+                has_sticker: s.present.has_sticker,
+                last_seen_secs: now.duration_since(s.at).as_secs(),
+            }
+        })
+        .collect())
+}
+
+#[derive(Deserialize, Serialize, Parser, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+#[command(rename_all = "kebab-case")]
+pub struct AdoptParams {
+    /// A candidate's address as `candidates` lists it.
+    address: String,
+    /// The satellite's registry name. An existing entry of that name is
+    /// replaced: a satellite re-adopted after a factory reset keeps its name.
+    name: String,
+    /// The candidate's sticker Wi-Fi password, or its adoption code.
+    #[clap(long)]
+    secret: String,
+    /// The Core profile interface the first tunnel carries.
+    #[clap(long)]
+    profile: String,
+    /// Firewall zone the handshake arrives on; derived from the candidate's
+    /// interface when omitted.
+    #[clap(long)]
+    transit_zone: Option<String>,
+    /// Repeatable. What the satellite routes through the tunnel; all traffic
+    /// when omitted.
+    #[clap(long)]
+    allowed_ip: Vec<String>,
+    /// Repeatable. The satellite's own subnets the Core routes to it over the
+    /// tunnel, besides its tunnel address.
+    #[clap(long)]
+    satellite_subnet: Vec<String>,
+    #[clap(long)]
+    core_tunnel_addr: Option<String>,
+    #[clap(long)]
+    satellite_tunnel_addr: Option<String>,
+    #[clap(long)]
+    listen_port: Option<u16>,
+}
+rpc_toolkit::reflect_ts!(AdoptParams);
+
+#[derive(Debug, Serialize, Deserialize, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptResponse {
+    pub name: String,
+    pub satellite_key: String,
+    pub interface: String,
+}
+rpc_toolkit::reflect_ts!(AdoptResponse);
+
+fn parse_candidate_address(s: &str) -> Result<SocketAddrV6, Error> {
+    let (ip, iface) = s.split_once('%').ok_or_else(|| {
+        Error::new(
+            eyre!("address must be <link-local>%<interface>"),
+            ErrorKind::InvalidRequest,
+        )
+    })?;
+    let ip: Ipv6Addr = ip
+        .parse()
+        .map_err(|_| Error::new(eyre!("invalid address '{ip}'"), ErrorKind::InvalidRequest))?;
+    let idx = if_index(iface)
+        .ok_or_else(|| Error::new(eyre!("no interface '{iface}'"), ErrorKind::NotFound))?;
+    Ok(SocketAddrV6::new(ip, PORT, 0, idx))
+}
+
+fn zone_for_device(cfgs: &Configs<'_>, device: &str) -> Option<String> {
+    let logical = cfgs["network"]
+        .sections
+        .iter()
+        .find(|s| {
+            s.get::<NetworkInterface>()
+                .map(|i| i.device == device)
+                .unwrap_or(false)
+        })
+        .and_then(|s| s.name().map(|n| n.to_string()))?;
+    cfgs["firewall"]
+        .sections
+        .iter()
+        .filter_map(|s| s.get::<FirewallZone>().ok())
+        .find(|z| z.network.iter().any(|n| *n == logical))
+        .map(|z| z.name)
+}
+
+fn used_listen_ports(cfgs: &Configs<'_>) -> Vec<u16> {
+    cfgs["network"]
+        .sections
+        .iter()
+        .filter_map(|s| s.get::<crate::vpn_server::WgInterface>().ok())
+        .filter_map(|w| w.listen_port)
+        .collect()
+}
+
+fn next_transit_index(registry: &[PairedSatellite]) -> u8 {
+    registry
+        .iter()
+        .filter_map(|s| s.mgmt_address.parse::<std::net::Ipv4Addr>().ok())
+        .filter(|a| a.octets()[..2] == satellite::TRANSIT_BASE)
+        .map(|a| a.octets()[2])
+        .max()
+        .map_or(1, |n| n.saturating_add(1))
+}
+
+#[instrument(skip_all)]
+pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse, Error> {
+    satellite::ensure_core()?;
+    let link = core_link()?;
+    let target = parse_candidate_address(&p.address)?;
+    let iface = if_name(target.scope_id()).unwrap_or_default();
+    {
+        let mut guards = link.guards.lock().unwrap();
+        if let Some(r) = guards
+            .entry(*target.ip())
+            .or_default()
+            .check(Instant::now())
+        {
+            return Err(Error::new(eyre!("{r}"), ErrorKind::RateLimited));
+        }
+    }
+
+    let (transit_zone, listen_port, registry) = {
+        let arena = Arena::new();
+        let cfgs = parse_all("/etc/config", &arena, &["network", "firewall"]).await?;
+        let zone = match p.transit_zone.clone() {
+            Some(z) => z,
+            None => zone_for_device(&cfgs, &iface).unwrap_or_else(|| "lan".to_string()),
+        };
+        let port = match p.listen_port {
+            Some(port) => port,
+            None => {
+                satellite::allocate_listen_ports(&used_listen_ports(&cfgs), 1, LISTEN_PORT_BASE)
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::new(eyre!("no free listen port"), ErrorKind::Network))?
+            }
+        };
+        (zone, port, satellite::load_registry())
+    };
+    let index = next_transit_index(&registry);
+    let (core_default, sat_default) = satellite::transit_addrs(index);
+    let tunnel = TunnelSpec {
+        satellite: p.name.clone(),
+        profile: p.profile.clone(),
+        core_listen_port: listen_port,
+        core_tunnel_addr: p
+            .core_tunnel_addr
+            .clone()
+            .unwrap_or_else(|| core_default.to_string()),
+        satellite_tunnel_addr: p
+            .satellite_tunnel_addr
+            .clone()
+            .unwrap_or_else(|| sat_default.to_string()),
+        allowed_ips: if p.allowed_ip.is_empty() {
+            vec!["0.0.0.0/0".to_string()]
+        } else {
+            p.allowed_ip.clone()
+        },
+    };
+
+    let core_key = WgKey::generate();
+    let mut adopter = Adopter::new(Secret::new(p.secret), core_key.public_key());
+    let (tx, rx) = oneshot::channel();
+    link.pending.lock().unwrap().insert(target, tx);
+    link.socket
+        .send_to(&encode(&Message::Hello(adopter.hello())), target)
+        .await
+        .with_kind(ErrorKind::Network)?;
+    let reply = tokio::time::timeout(EXCHANGE_TIMEOUT, rx).await;
+    link.pending.lock().unwrap().remove(&target);
+    let offer = match reply {
+        Ok(Ok(Message::Offer(o))) => o,
+        Ok(Ok(Message::Reject(r))) => {
+            return Err(Error::new(
+                eyre!("the router refused: {r}"),
+                ErrorKind::RateLimited,
+            ))
+        }
+        _ => {
+            return Err(Error::new(
+                eyre!(
+                    "no answer from {} within {} s",
+                    p.address,
+                    EXCHANGE_TIMEOUT.as_secs()
+                ),
+                ErrorKind::Timeout,
+            ))
+        }
+    };
+
+    let now = Instant::now();
+    let accepted = {
+        let mut guards = link.guards.lock().unwrap();
+        let guard = guards.entry(*target.ip()).or_default();
+        adopter.accept(&offer, tunnel.clone(), guard, now)
+    };
+    let (confirm, adopted) = match accepted {
+        Ok(ok) => ok,
+        Err(r) => {
+            let _ = link
+                .socket
+                .send_to(&encode(&Message::Reject(r.clone())), target)
+                .await;
+            crate::activity::log(
+                "satellite",
+                "adopt",
+                false,
+                &format!("Adoption of '{}' refused: {r}", p.name),
+                None,
+            );
+            let kind = match r {
+                Reject::Locked { .. } => ErrorKind::RateLimited,
+                _ => ErrorKind::IncorrectPassword,
+            };
+            return Err(Error::new(eyre!("{r}"), kind));
+        }
+    };
+    link.socket
+        .send_to(&encode(&Message::Confirm(confirm)), target)
+        .await
+        .with_kind(ErrorKind::Network)?;
+
+    let satellite_key = b64(adopted.satellite_key.as_bytes());
+    satellite::provision_core_tunnel(
+        ServerContext::default(),
+        satellite::ProvisionCoreParams {
+            satellite: p.name.clone(),
+            profile: p.profile.clone(),
+            core_transit_addr: tunnel.core_tunnel_addr.clone(),
+            satellite_allowed_ip: std::iter::once(format!("{}/32", tunnel.satellite_tunnel_addr))
+                .chain(p.satellite_subnet.iter().cloned())
+                .collect(),
+            satellite_public_key: satellite_key.clone(),
+            preshared_key: b64(&adopted.preshared_key),
+            listen_port,
+            transit_zone,
+            core_private_key: b64(core_key.as_ref()),
+        },
+    )
+    .await?;
+    let mut registry = registry;
+    satellite::remove_satellite(&mut registry, &p.name);
+    satellite::add_satellite(
+        &mut registry,
+        PairedSatellite {
+            name: p.name.clone(),
+            public_key: satellite_key.clone(),
+            mgmt_address: tunnel.satellite_tunnel_addr.clone(),
+            generation_applied: 0,
+            last_seen: 0,
+        },
+    )?;
+    satellite::persist_registry(&registry).await?;
+    crate::activity::log(
+        "satellite",
+        "adopt",
+        true,
+        &format!("Adopted satellite '{}' on {iface}", p.name),
+        None,
+    );
+    Ok(AdoptResponse {
+        name: p.name,
+        satellite_key,
+        interface: crate::vpn_site::site_interface_name(&tunnel.satellite, &tunnel.profile),
+    })
+}
+
+// ── Candidate side ──────────────────────────────────────────────────────────
+
+struct CandidateState {
+    code: Option<String>,
+    has_sticker: bool,
+}
+
+static CANDIDATE: OnceLock<CandidateState> = OnceLock::new();
+
+/// What the pre-adoption page shows.
+#[derive(Debug, Serialize, Deserialize, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeResponse {
+    /// Listening for a Core.
+    pub waiting: bool,
+    /// The sticker Wi-Fi password is the secret; no code is shown.
+    pub has_sticker: bool,
+    pub code: Option<String>,
+}
+rpc_toolkit::reflect_ts!(CodeResponse);
+
+#[instrument(skip_all)]
+pub async fn code(_ctx: ServerContext) -> Result<CodeResponse, Error> {
+    let adopted = satellite::load_role().core_key.is_some();
+    Ok(match CANDIDATE.get() {
+        Some(s) if !adopted => CodeResponse {
+            waiting: true,
+            has_sticker: s.has_sticker,
+            code: s.code.clone(),
+        },
+        _ => CodeResponse {
+            waiting: false,
+            has_sticker: false,
+            code: None,
+        },
+    })
+}
+
+fn wan_device(cfgs: &Configs<'_>) -> Option<String> {
+    cfgs["network"]
+        .sections
+        .iter()
+        .find(|s| s.name().as_deref() == Some(crate::wan::WAN_INTERFACE))
+        .and_then(|s| s.get::<NetworkInterface>().ok())
+        .map(|i| i.device)
+        .filter(|d| !d.is_empty())
+}
+
+fn ensure_candidate_firewall_rule(cfgs: &mut Configs<'_>) -> Result<bool, Error> {
+    let exists = cfgs["firewall"]
+        .sections
+        .iter()
+        .filter_map(|s| s.get::<FirewallRule>().ok())
+        .any(|r| r.name == CANDIDATE_RULE_NAME);
+    if exists {
+        return Ok(false);
+    }
+    let rule = FirewallRule {
+        name: CANDIDATE_RULE_NAME.to_string(),
+        src: crate::wan::WAN_INTERFACE.to_string(),
+        src_ip: Some("fe80::/10".to_string()),
+        dest_port: Some(PORT.to_string()),
+        proto: vec!["udp".to_string()],
+        target: FirewallTarget::ACCEPT,
+        family: Some("ipv6".to_string()),
+        ..Default::default()
+    };
+    cfgs["firewall"].append(&rule, Some(CANDIDATE_RULE_SECTION))?;
+    Ok(true)
+}
+
+async fn run_candidate() -> Result<(), Error> {
+    let (secret, has_sticker, code) = match crate::eeprom::read_wifi_password()? {
+        Some(p) => (Secret::new(p), true, None),
+        None => {
+            let c = generate_code();
+            (Secret::new(c.clone()), false, Some(c))
+        }
+    };
+    let wan = {
+        let arena = Arena::new();
+        let mut cfgs = parse_all("/etc/config", &arena, &["network", "firewall"]).await?;
+        let wan = wan_device(&cfgs)
+            .ok_or_else(|| Error::new(eyre!("no WAN device configured"), ErrorKind::Network))?;
+        if ensure_candidate_firewall_rule(&mut cfgs)? {
+            dump_all("/etc/config", cfgs).await?;
+            let _ = crate::run_quiet_async(
+                tokio::process::Command::new("/etc/init.d/firewall").arg("reload"),
+            )
+            .await;
+        }
+        wan
+    };
+    let socket = bind().await?;
+    let key = WgKey::generate();
+    let mut responder = Responder::new(secret, key.public_key());
+    let mut guard = AttemptGuard::default();
+    let present = Present {
+        satellite_key: b64(key.public_key().as_bytes()),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        has_sticker,
+    };
+    let _ = CANDIDATE.set(CandidateState { code, has_sticker });
+    tracing::info!("adoption: waiting for a Core on {wan}, port {PORT}");
+
+    let mut buf = vec![0u8; MAX_DATAGRAM];
+    loop {
+        let Ok((n, SocketAddr::V6(src))) = socket.recv_from(&mut buf).await else {
+            continue;
+        };
+        if !src.ip().is_unicast_link_local() || Some(src.scope_id()) != if_index(&wan) {
+            continue;
+        }
+        let Ok(msg) = serde_json::from_slice::<Message>(&buf[..n]) else {
+            continue;
+        };
+        let now = Instant::now();
+        let reply = match msg {
+            Message::Announce => Message::Present(present.clone()),
+            Message::Hello(h) => match responder.respond(&h, &mut guard, now) {
+                Ok(o) => Message::Offer(o),
+                Err(r) => Message::Reject(r),
+            },
+            Message::Confirm(c) => match responder.confirm(&c, &mut guard, now) {
+                Ok(by) => {
+                    let endpoint = format!("{}%{}", src.ip(), wan);
+                    match adopt_self(&key, &by, &endpoint).await {
+                        Ok(()) => {
+                            crate::activity::log(
+                                "satellite",
+                                "adopted",
+                                true,
+                                &format!(
+                                    "Adopted by the Core at {endpoint} as '{}'",
+                                    by.tunnel.satellite
+                                ),
+                                None,
+                            );
+                            tracing::info!("adoption: adopted by {endpoint}; listener stopping");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::error!("adoption: provisioning after adoption failed: {e}");
+                            crate::activity::log(
+                                "satellite",
+                                "adopted",
+                                false,
+                                "Adoption succeeded but provisioning failed",
+                                Some(&e.to_string()),
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Err(r) => {
+                    tracing::warn!("adoption: refused a Core at {}: {r}", src.ip());
+                    Message::Reject(r)
+                }
+            },
+            _ => continue,
+        };
+        if let Err(e) = socket.send_to(&encode(&reply), src).await {
+            tracing::debug!("adoption: reply to {}: {e}", src.ip());
+        }
+    }
+}
+
+async fn adopt_self(key: &WgKey, by: &proof::AdoptedBy, endpoint: &str) -> Result<(), Error> {
+    let t = &by.tunnel;
+    satellite::provision_satellite_tunnel(
+        ServerContext::default(),
+        satellite::ProvisionSatelliteParams {
+            satellite: t.satellite.clone(),
+            profile: t.profile.clone(),
+            sat_wg_addr: t.satellite_tunnel_addr.clone(),
+            core_public_key: b64(by.core_key.as_bytes()),
+            core_endpoint_host: endpoint.to_string(),
+            core_endpoint_port: t.core_listen_port,
+            preshared_key: b64(&by.preshared_key),
+            sat_private_key: b64(key.as_ref()),
+            allowed_ip: t.allowed_ips.clone(),
+            firewall_zone_member: "lan".to_string(),
+        },
+    )
+    .await?;
+    let mut role = satellite::load_role();
+    role.core_endpoint = Some(endpoint.to_string());
+    role.core_key = Some(b64(by.core_key.as_bytes()));
+    satellite::persist_role(&role).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sat(addr: &str) -> PairedSatellite {
+        PairedSatellite {
+            name: "s".into(),
+            public_key: "k".into(),
+            mgmt_address: addr.into(),
+            generation_applied: 0,
+            last_seen: 0,
+        }
+    }
+
+    #[test]
+    fn transit_index_follows_the_registry() {
+        assert_eq!(next_transit_index(&[]), 1);
+        assert_eq!(next_transit_index(&[sat("10.42.1.2")]), 2);
+        assert_eq!(next_transit_index(&[sat("10.42.3.2"), sat("10.42.1.2")]), 4);
+        assert_eq!(next_transit_index(&[sat("192.168.130.2")]), 1);
+    }
+
+    #[test]
+    fn candidate_address_needs_an_interface() {
+        assert!(parse_candidate_address("fe80::1").is_err());
+        assert!(parse_candidate_address("nope%lo").is_err());
+        let a = parse_candidate_address("fe80::1%lo").unwrap();
+        assert_eq!(a.port(), PORT);
+        assert_eq!(a.scope_id(), if_index("lo").unwrap());
+    }
+
+    #[test]
+    fn messages_are_adjacently_tagged() {
+        let s = serde_json::to_string(&Message::Announce).unwrap();
+        assert_eq!(s, r#"{"type":"announce"}"#);
+        let r = Message::Reject(Reject::NoExchange);
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(s, r#"{"type":"reject","body":{"reason":"noExchange"}}"#);
+        assert!(matches!(
+            serde_json::from_str::<Message>(&s).unwrap(),
+            Message::Reject(Reject::NoExchange)
+        ));
+    }
+
+    #[tokio::test]
+    async fn candidate_rule_is_added_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("network"), "").unwrap();
+        std::fs::write(
+            dir.path().join("firewall"),
+            "config zone\n\toption name 'wan'\n\tlist network 'wan'\n\toption input 'REJECT'\n\
+             \toption output 'ACCEPT'\n\toption forward 'REJECT'\n",
+        )
+        .unwrap();
+        let arena = Arena::new();
+        let mut cfgs = parse_all(dir.path(), &arena, &["network", "firewall"])
+            .await
+            .unwrap();
+        assert!(ensure_candidate_firewall_rule(&mut cfgs).unwrap());
+        assert!(!ensure_candidate_firewall_rule(&mut cfgs).unwrap());
+        let rule = cfgs["firewall"]
+            .sections
+            .iter()
+            .filter_map(|s| s.get::<FirewallRule>().ok())
+            .find(|r| r.name == CANDIDATE_RULE_NAME)
+            .unwrap();
+        assert_eq!(rule.src, "wan");
+        assert_eq!(rule.dest_port.as_deref(), Some("8719"));
+        assert_eq!(rule.family.as_deref(), Some("ipv6"));
+    }
+
+    #[tokio::test]
+    async fn zone_and_wan_device_resolve_from_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("network"),
+            "config interface 'wan'\n\toption device 'eth1'\n\toption proto 'dhcp'\n\n\
+             config interface 'lan'\n\toption device 'br-lan.1'\n\toption proto 'static'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("firewall"),
+            "config zone\n\toption name 'lan'\n\tlist network 'lan'\n\toption input 'ACCEPT'\n\
+             \toption output 'ACCEPT'\n\toption forward 'ACCEPT'\n",
+        )
+        .unwrap();
+        let arena = Arena::new();
+        let cfgs = parse_all(dir.path(), &arena, &["network", "firewall"])
+            .await
+            .unwrap();
+        assert_eq!(wan_device(&cfgs).as_deref(), Some("eth1"));
+        assert_eq!(zone_for_device(&cfgs, "br-lan.1").as_deref(), Some("lan"));
+        assert_eq!(zone_for_device(&cfgs, "br-lan.2"), None);
+    }
+}

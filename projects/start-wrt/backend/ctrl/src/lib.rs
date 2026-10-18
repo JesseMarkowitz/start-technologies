@@ -3,6 +3,7 @@ pub mod invoke;
 pub mod prelude;
 
 pub mod activity;
+pub mod adoption;
 pub mod auth;
 pub mod backup;
 pub mod bins;

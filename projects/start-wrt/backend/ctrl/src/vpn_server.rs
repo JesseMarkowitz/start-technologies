@@ -39,6 +39,11 @@ pub struct WgInterface {
     /// (1420 on a clean 1500-byte path).
     #[uci(default)]
     pub mtu: Option<u16>,
+    /// Skips netifd's host route to the endpoint. Set for a link-local
+    /// endpoint, which is on-link and which netifd's endpoint parsing takes
+    /// the interface down over.
+    #[uci(default)]
+    pub nohostroute: Option<bool>,
 }
 
 impl WgInterface {
@@ -1864,6 +1869,7 @@ fn set_wireguard_interface(
             addresses,
             disabled: None,
             mtu: None,
+            nohostroute: None,
         };
         cfgs["network"].append(&new_iface, Some(interface_name))?;
     }
