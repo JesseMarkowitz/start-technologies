@@ -377,6 +377,11 @@ pub struct WifiInterface {
     #[uci(default)]
     pub dynamic_vlan: WifiDynamicVlan,
     pub maxassoc: Option<u32>,
+    /// The network interface hostapd attaches this SSID to.
+    #[uci(default)]
+    pub network: Option<String>,
+    #[uci(default)]
+    pub disabled: Option<bool>,
 }
 
 #[derive(Debug, TypedSection)]
@@ -508,6 +513,9 @@ pub struct Dhcp {
 pub struct ProfileDnsmasq {
     #[uci(default)]
     pub server: Vec<String>,
+    /// `/name/address` answers dnsmasq gives itself.
+    #[uci(default)]
+    pub address: Vec<String>,
     #[uci(default)]
     pub noresolv: Option<String>,
     #[uci(default)]

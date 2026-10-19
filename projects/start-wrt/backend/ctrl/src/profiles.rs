@@ -450,6 +450,7 @@ pub(crate) fn rewrite_dns_forwarding(cfgs: &mut Configs, profile: &Profile) -> R
             &ProfileDnsmasq {
                 noresolv,
                 server,
+                address: vec![],
                 // An unscoped instance serves every profile's DHCP pool.
                 interface: vec![profile.id.interface.clone()],
                 localservice: Some("1".to_string()),

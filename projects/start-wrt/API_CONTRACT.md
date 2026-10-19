@@ -2048,12 +2048,17 @@ and answers only the Core's tunnel address. Methods: `apply` (params: a `SyncSna
 generation older than the applied one, treats the same as done), `status` (params
 `{ coreGeneration, coreVersion, name }`, the name being what the Core adopted it under, which an
 access point without one on record keeps; returns
-`TunnelStatus { generation, tunnelLive, dark, inventory, clients, version }`, where `clients` lists
-every device the access point's bridge learned on a port other than its uplink as
+`TunnelStatus { generation, tunnelLive, dark, inventory, clients, version, recoverySsid }`, where
+`clients` lists every device the access point's bridge learned on a port other than its uplink as
 `{ mac, via, vlan }`, `via` being a Wi-Fi band label when hostapd knows the device or else the port
-name), `release` (the Core has forgotten this access point). The Core keeps the clients in the
-registry and the device list shows such a device as, for example, `Wi-Fi 2.4GHz (garage)` or
-`Ethernet (garage)` instead of Ethernet on the Core's trunk port (D13).
+name), `release` (the Core has forgotten this access point). The access point reads its inventory
+from the kernel: ports from `/sys/class/net` with link state, radios from its wireless config's
+`path` resolved to a phy and the bands `iw phy` lists, so a stale `wifi-device` with no phy is
+absent. The Core keeps the clients in the registry and the device list shows such a device as, for
+example, `Wi-Fi 2.4GHz (garage)` or `Ethernet (garage)` instead of Ethernet on the Core's trunk
+port (D13). The Core answers NTP and DNS on its end of every tunnel and forwards an access point
+only to the update source it is itself configured with (HTTPS to the registry host and the hosts
+its asset URLs name, resolved every 10 minutes into fw4 sets `sat_reach4`/`sat_reach6`).
 
 **Role gate (D7).** On an adopted access point the RPC server answers only `satellite.get-role`,
 `satellite.status`, `satellite.adoption.code`, `system.info`, `system.restart` and `auth.logout`;
@@ -2061,11 +2066,26 @@ every other method returns an Authorization error ("not available on an access p
 Core") before session validation. The access point serves its own page (D23) in place of the web
 UI at every path: "Satellite _name_", a link to `router.lan`, the tunnel state, the generation
 applied against the Core's, firmware against the Core's, its ports and radios, its devices with
-their profile, and the last log lines. The page holds nothing the Core controls. The access point reads its inventory from the
-kernel: ports from `/sys/class/net` with link state, radios from its wireless config's `path`
-resolved to a phy and the bands `iw phy` lists, so a stale `wifi-device` with no phy is absent. The Core answers NTP and DNS on its end of every tunnel and forwards an access point
-only to the update source it is itself configured with (HTTPS to the registry host and the
-hosts its asset URLs name, resolved every 10 minutes into fw4 sets `sat_reach4`/`sat_reach6`).
+their profile, and the last log lines. The page holds nothing the Core controls.
+
+**Recovery mode (D22).** An access point dark for 60 s brings up an isolated recovery network:
+its access ports move to VLAN 4093 with `192.168.255.1/24`, DHCP and `router.lan` answered by
+the access point itself, in a firewall zone that forwards nowhere; with a sticker password it also
+broadcasts `StartWRT-Recovery-<last four hex digits of the uplink MAC>` on 2.4 GHz, one client at
+a time, protected by that password, with every profile SSID disabled. There `http://router.lan`
+is a page headed "Satellite _name_ — recovery mode": why it is dark (uplink link, whether the Core
+answers on the cable, tunnel handshake age, firmware against the Core's, a refused payload),
+Restart and Factory reset (`firstboot -y`) behind confirmations, and the log filtered to link,
+tunnel, firewall and sync lines, viewable and downloadable. No login: being on the recovery
+network is the credential. When the tunnel is back the layout applied last is restored and the
+recovery network goes. `PairedSatellite.recoverySsid` tells the admin the name in advance;
+`PairedSatellite.version` is the access point's firmware.
+
+**Fresh and reset routers (§19).** A router with no password yet runs the candidate listener on
+its WAN port whatever its role, so one that hears a Core joins it instead of becoming one; its
+setup page says so and shows the adoption code (`satellite.adoption.code`, answered without a
+session while uninitialized). Re-adopting a name whose entry is still in the registry takes over
+that saved configuration's port assignments; removing the entry (`satellite.unpair`) revokes it.
 
 ### `satellite.get-role`
 
@@ -2115,6 +2135,8 @@ struct PairedSatellite {
     inventory: Option<Inventory>,          // what it reported last
     clients: Vec<ClientInfo>,              // its devices, as it reported them last
     plan: BTreeMap<String, RadioPlan>,     // the Core's channel plan for its radios (D20)
+    version: String,                       // its firmware, as it reported it last
+    recoverySsid: Option<String>,          // its recovery network's name, if it has a sticker password
 }
 struct ClientInfo { mac: String, via: String, vlan: Option<u16> }
 struct Inventory { ports: Vec<PortInfo>, radios: Vec<RadioInfo> }

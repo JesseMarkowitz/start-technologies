@@ -84,9 +84,24 @@ struct CoreLink {
 static CORE: OnceLock<Arc<CoreLink>> = OnceLock::new();
 
 /// Starts the side of adoption this router's role calls for. A Core announces
-/// and listens for candidates; an unadopted satellite waits to be adopted.
+/// and listens for candidates; an unadopted satellite waits to be adopted, and
+/// so does a router with no password yet (design §19: a fresh or reset router
+/// that hears a Core on its uplink joins it instead of becoming one).
 pub fn start() {
     let role = satellite::load_role();
+    let fresh = role.role == RouterRole::Core
+        && std::thread::spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(crate::auth::get_shadow_hash("root"))
+                .ok()
+                .flatten()
+                .is_none()
+        })
+        .join()
+        .unwrap_or(false);
     match role.role {
         RouterRole::Core => {
             tokio::spawn(async {
@@ -94,27 +109,34 @@ pub fn start() {
                     tracing::error!("adoption: Core listener failed: {e}");
                 }
             });
-        }
-        RouterRole::Satellite if role.core_key.is_none() => {
-            // Provisioning holds a uciedit `Arena` across awaits (!Send).
-            if let Err(e) = std::thread::Builder::new()
-                .name("adoption".into())
-                .spawn(|| {
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("adoption runtime")
-                        .block_on(async {
-                            if let Err(e) = run_candidate().await {
-                                tracing::error!("adoption: candidate listener failed: {e}");
-                            }
-                        });
-                })
-            {
-                tracing::error!("adoption: failed to start candidate thread: {e}");
+            if fresh {
+                start_candidate();
             }
         }
+        RouterRole::Satellite if role.core_key.is_none() => start_candidate(),
         RouterRole::Satellite => {}
+    }
+}
+
+fn start_candidate() {
+    {
+        // Provisioning holds a uciedit `Arena` across awaits (!Send).
+        if let Err(e) = std::thread::Builder::new()
+            .name("adoption".into())
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("adoption runtime")
+                    .block_on(async {
+                        if let Err(e) = run_candidate().await {
+                            tracing::error!("adoption: candidate listener failed: {e}");
+                        }
+                    });
+            })
+        {
+            tracing::error!("adoption: failed to start candidate thread: {e}");
+        }
     }
 }
 
@@ -513,6 +535,13 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
         .await;
     }
     let mut registry = registry;
+    // A saved configuration (design §19): re-adopting a name keeps its port
+    // assignments; everything else the new router reports afresh.
+    let saved_ports = registry
+        .iter()
+        .find(|s| s.name == p.name)
+        .map(|s| s.ports.clone())
+        .unwrap_or_default();
     satellite::remove_satellite(&mut registry, &p.name);
     satellite::add_satellite(
         &mut registry,
@@ -520,6 +549,7 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
             name: p.name.clone(),
             public_key: satellite_key.clone(),
             mgmt_address: tunnel.satellite_tunnel_addr.clone(),
+            ports: saved_ports,
             ..Default::default()
         },
     )?;
@@ -781,6 +811,7 @@ async fn adopt_self(key: &WgKey, by: &proof::AdoptedBy, core_ip: &Ipv6Addr) -> R
         dump_all("/etc/config", cfgs).await?;
     }
     let mut role = satellite::load_role();
+    role.role = RouterRole::Satellite;
     role.core_endpoint = Some(endpoint);
     role.core_key = Some(b64(by.core_key.as_bytes()));
     role.core_address = Some(t.core_tunnel_addr.clone());

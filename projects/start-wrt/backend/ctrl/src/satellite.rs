@@ -97,6 +97,13 @@ pub struct PairedSatellite {
     /// The Core's channel plan for its radios (D20).
     #[serde(default)]
     pub plan: BTreeMap<String, RadioPlan>,
+    /// Its firmware version, as it reported it last.
+    #[serde(default)]
+    pub version: String,
+    /// The recovery network it broadcasts while dark (D22), when it has a
+    /// sticker password to protect it with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_ssid: Option<String>,
 }
 rpc_toolkit::reflect_ts!(PairedSatellite);
 
@@ -156,6 +163,9 @@ pub struct TunnelStatus {
     /// Its firmware version.
     #[serde(default)]
     pub version: String,
+    /// The recovery network it would broadcast while dark (D22).
+    #[serde(default)]
+    pub recovery_ssid: Option<String>,
 }
 rpc_toolkit::reflect_ts!(TunnelStatus);
 

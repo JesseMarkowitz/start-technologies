@@ -87,6 +87,7 @@ import {
   AccessPointAdopted,
   AccessPointCandidate,
   AccessPointSetPorts,
+  AdoptionCode,
 } from './api.service'
 import { UciFile, UciSection } from './types'
 import { dhcpLanSlaacDhcpv6 } from 'src/app/routes/lan/routes/ipv6/uci/mocks'
@@ -1807,6 +1808,20 @@ export class MockApiService extends ApiService {
         { mac: '6C:1F:F7:1D:F6:10', via: 'eth0', vlan: 100 },
       ],
       plan: { radio0: { band: '2g', channel: 6, htmode: 'HE20' } },
+      version: '1.2.1',
+      recoverySsid: 'StartWRT-Recovery-5D09',
+    },
+    {
+      name: 'shed',
+      publicKey: 'mock-key-shed=',
+      mgmtAddress: '10.42.2.2',
+      generationApplied: 2,
+      lastSeen: Math.floor(Date.now() / 1000) - 86400 * 3,
+      live: false,
+      ports: { eth0: 1 },
+      clients: [],
+      plan: {},
+      version: '1.3.0',
     },
   ]
 
@@ -1852,6 +1867,11 @@ export class MockApiService extends ApiService {
     return structuredClone(this.mockCandidates)
   }
 
+  async satelliteAdoptionCode(): Promise<AdoptionCode> {
+    await pauseFor(100)
+    return { waiting: false, hasSticker: false, code: null }
+  }
+
   async satelliteAdopt(params: AccessPointAdopt): Promise<AccessPointAdopted> {
     await pauseFor(1500)
     const candidate = this.mockCandidates.find(
@@ -1871,6 +1891,7 @@ export class MockApiService extends ApiService {
         ports: {},
         clients: [],
         plan: {},
+        version: '',
       })
     return {
       name: params.name,

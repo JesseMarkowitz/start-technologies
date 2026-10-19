@@ -2800,6 +2800,15 @@ export const PairedSatellite: z.ZodObject<{
     z.ZodOptional<z.ZodRecord<z.ZodString, typeof RadioPlan>>,
     z.ZodRecord<z.ZodString, typeof RadioPlan>
   >
+  /**
+   * Its firmware version, as it reported it last.
+   */
+  version: z.ZodCodec<z.ZodOptional<z.ZodString>, z.ZodString>
+  /**
+   * The recovery network it broadcasts while dark (D22), when it has a
+   * sticker password to protect it with.
+   */
+  recoverySsid: z.ZodOptional<z.ZodNullable<z.ZodString>>
 }> = /* @__PURE__ */ object({
   /**
    * Admin-facing label (unique).
@@ -2885,6 +2894,20 @@ export const PairedSatellite: z.ZodObject<{
     z.record(z.string(), RadioPlan),
   ).meta({
     description: "The Core's channel plan for its radios (D20).",
+  }),
+  /**
+   * Its firmware version, as it reported it last.
+   */
+  version: wire(z.string().optional(), z.string()).meta({
+    description: 'Its firmware version, as it reported it last.',
+  }),
+  /**
+   * The recovery network it broadcasts while dark (D22), when it has a
+   * sticker password to protect it with.
+   */
+  recoverySsid: z.string().nullable().optional().meta({
+    description:
+      'The recovery network it broadcasts while dark (D22), when it has a\nsticker password to protect it with.',
   }),
 }).meta({
   id: 'PairedSatellite',

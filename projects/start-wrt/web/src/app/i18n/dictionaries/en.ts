@@ -581,4 +581,8 @@ export const ENGLISH: Record<string, number> = {
   'Trunk to access points': 599,
   'Make Trunk Port': 600,
   'Devices plugged into this port lose access until an access point is adopted on it.': 601,
+  'Recovery network': 602,
+  'Older than the Core': 603,
+  'Or take over a saved configuration:': 604,
+  'This router hears a StartWRT router on its WAN port and can join it as an access point. To make it your main router instead, create a password below.': 605,
 }

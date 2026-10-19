@@ -576,4 +576,8 @@ export default {
   599: 'Troncal hacia puntos de acceso',
   600: 'Convertir en puerto troncal',
   601: 'Los dispositivos conectados a este puerto pierden el acceso hasta que se adopte un punto de acceso en él.',
+  602: 'Red de recuperación',
+  603: 'Más antiguo que el Core',
+  604: 'O retomar una configuración guardada:',
+  605: 'Este router oye un router StartWRT en su puerto WAN y puede unirse a él como punto de acceso. Para convertirlo en su router principal, cree una contraseña abajo.',
 } satisfies i18n

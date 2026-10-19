@@ -12,6 +12,7 @@ import {
   TuiIcon,
   TuiInput,
   TuiLabel,
+  TuiLink,
   TuiTextfield,
   TuiTitle,
 } from '@taiga-ui/core'
@@ -27,13 +28,22 @@ export interface AdoptResult {
   secret: string
 }
 
+export interface AdoptData {
+  candidate: AccessPointCandidate
+  /** Saved configurations: names of access points out of contact. */
+  saved: string[]
+}
+
 @Component({
   template: `
     <form tuiForm="m" [formGroup]="form" (submit.prevent)="adopt()">
       <header tuiHeader>
         <hgroup tuiTitle>
           <h2 [id]="context.id">{{ 'Adopt Access Point' | i18n }}</h2>
-          <p>{{ context.data.address }} · {{ context.data.version }}</p>
+          <p>
+            {{ context.data.candidate.address }} ·
+            {{ context.data.candidate.version }}
+          </p>
         </hgroup>
       </header>
       <tui-textfield>
@@ -46,10 +56,24 @@ export interface AdoptResult {
           'A short name: up to 11 lowercase letters, digits and dashes.' | i18n
         }}
       </p>
+      @if (context.data.saved.length) {
+        <p class="g-secondary">
+          {{ 'Or take over a saved configuration:' | i18n }}
+          @for (name of context.data.saved; track name) {
+            <button
+              tuiLink
+              type="button"
+              (click)="form.controls.name.setValue(name)"
+            >
+              {{ name }}
+            </button>
+          }
+        </p>
+      }
       <tui-textfield>
         <label tuiLabel>
           {{
-            (context.data.hasSticker
+            (context.data.candidate.hasSticker
               ? 'Sticker Wi-Fi password'
               : 'Adoption code'
             ) | i18n
@@ -61,7 +85,7 @@ export interface AdoptResult {
       <tui-error formControlName="secret" />
       <p class="g-secondary">
         {{
-          (context.data.hasSticker
+          (context.data.candidate.hasSticker
             ? 'The Wi-Fi password printed on the router you are adopting.'
             : 'The code shown on the router you are adopting.'
           ) | i18n
@@ -98,12 +122,13 @@ export interface AdoptResult {
     TuiIcon,
     TuiPassword,
     TuiButton,
+    TuiLink,
     i18nPipe,
   ],
 })
 export class AdoptDialog {
   protected readonly context =
-    injectContext<TuiDialogContext<AdoptResult, AccessPointCandidate>>()
+    injectContext<TuiDialogContext<AdoptResult, AdoptData>>()
 
   protected readonly form = inject(NonNullableFormBuilder).group({
     name: ['', [Validators.required, Validators.pattern(/^[a-z0-9-]{1,11}$/)]],

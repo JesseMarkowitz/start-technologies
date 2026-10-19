@@ -363,7 +363,7 @@ fn reconciled() -> bool {
 }
 
 /// Bridge ports that are neither the uplink nor a radio.
-fn access_ports(uplink: &str) -> Vec<String> {
+pub fn access_ports(uplink: &str) -> Vec<String> {
     let bridge = crate::ethernet::DEFAULT_LAN_BRIDGE;
     std::fs::read_dir(format!("/sys/class/net/{bridge}/brif"))
         .map(|d| {
@@ -399,6 +399,9 @@ async fn go_dark(uplink: &str) {
 
 async fn resume(uplink: &str) {
     tracing::info!("liveness: the Core is back; SSIDs up, access ports restored");
+    if let Err(e) = crate::recovery::exit(uplink).await {
+        tracing::error!("liveness: recovery mode not removed: {e}");
+    }
     set_ports(&access_ports(uplink), "up").await;
     let _ = crate::run_quiet_async(tokio::process::Command::new("wifi").arg("up")).await;
     crate::activity::log(
@@ -418,11 +421,26 @@ async fn run_ap() {
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut live_since: Option<Instant> = None;
+    let mut dark_since: Option<Instant> = None;
     loop {
         tick.tick().await;
         let now = Instant::now();
         if !core_address.is_empty() {
             probe(&core_address);
+        }
+        // Recovery mode (D22) a minute into the dark, so a blip does not
+        // flash it on and off.
+        if AP_STATE.load(Ordering::Relaxed) == STATE_DARK {
+            let since = *dark_since.get_or_insert(now);
+            if now.duration_since(since) >= crate::recovery::AFTER_DARK
+                && !crate::recovery::active()
+            {
+                if let Err(e) = crate::recovery::enter(&uplink).await {
+                    tracing::error!("liveness: recovery mode not started: {e}");
+                }
+            }
+        } else {
+            dark_since = None;
         }
         let obs = observe_interface(crate::mgmt_tunnel::AP_INTERFACE).await;
         let live = monitor.observe(obs.as_ref(), now, unix_now());

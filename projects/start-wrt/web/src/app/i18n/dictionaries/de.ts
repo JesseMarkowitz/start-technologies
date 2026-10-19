@@ -576,4 +576,8 @@ export default {
   599: 'Trunk zu Zugangspunkten',
   600: 'Zum Trunk-Port machen',
   601: 'Geräte an diesem Port verlieren den Zugang, bis ein Zugangspunkt darauf aufgenommen wird.',
+  602: 'Wiederherstellungsnetz',
+  603: 'Älter als der Core',
+  604: 'Oder eine gespeicherte Konfiguration übernehmen:',
+  605: 'Dieser Router hört einen StartWRT-Router an seinem WAN-Port und kann ihm als Zugangspunkt beitreten. Um ihn stattdessen zum Hauptrouter zu machen, legen Sie unten ein Passwort fest.',
 } satisfies i18n

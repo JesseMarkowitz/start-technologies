@@ -22,3 +22,9 @@
   trunk after a confirmation. Devices behind an access point show where they really are in
   the device list. An access point's own address offers only a status page pointing to the
   Core, and its settings cannot be changed there.
+- **A dark access point can be reached and reset.** A minute after losing its Core, an access
+  point opens a recovery network on its ports and, where it has a sticker password, as
+  `StartWRT-Recovery-…` on Wi-Fi. There, `router.lan` says what it can tell about the fault
+  and offers a restart and a factory reset. A fresh or reset router cabled to a Core waits to
+  be adopted instead of becoming a main router, and a replaced access point can take over the
+  saved configuration of the one it replaces.

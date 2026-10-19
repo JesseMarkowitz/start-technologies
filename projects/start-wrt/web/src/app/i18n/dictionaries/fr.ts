@@ -576,4 +576,8 @@ export default {
   599: 'Trunk vers les points d’accès',
   600: 'Faire un port trunk',
   601: 'Les appareils branchés sur ce port perdent l’accès jusqu’à ce qu’un point d’accès y soit adopté.',
+  602: 'Réseau de récupération',
+  603: 'Plus ancien que le Core',
+  604: 'Ou reprendre une configuration enregistrée :',
+  605: 'Ce routeur entend un routeur StartWRT sur son port WAN et peut le rejoindre comme point d’accès. Pour en faire plutôt votre routeur principal, créez un mot de passe ci-dessous.',
 } satisfies i18n

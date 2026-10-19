@@ -33,6 +33,20 @@ pub fn load_applied() -> Option<SyncSnapshot> {
         .and_then(|c| serde_json::from_str(&c).ok())
 }
 
+static LAST_APPLY_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Why the last payload was refused, until one applies.
+pub fn last_apply_error() -> Option<String> {
+    LAST_APPLY_ERROR.lock().unwrap().clone()
+}
+
+fn record_apply(result: &Result<(), Error>, generation: u64) {
+    *LAST_APPLY_ERROR.lock().unwrap() = result
+        .as_ref()
+        .err()
+        .map(|e| format!("generation {generation}: {e}"));
+}
+
 fn bridge_name(cfgs: &Configs) -> Result<String, Error> {
     Ok(find_lan_bridge(cfgs)?
         .map(|d| d.name)
@@ -377,6 +391,12 @@ pub fn accept_generation(applied: u64, incoming: u64) -> Result<bool, Error> {
 /// follows restarts the tunnel interface, so it runs after the reply is sent.
 #[instrument(skip_all)]
 pub async fn apply_snapshot(snapshot: &SyncSnapshot) -> Result<(), Error> {
+    let result = apply_snapshot_inner(snapshot).await;
+    record_apply(&result, snapshot.generation);
+    result
+}
+
+async fn apply_snapshot_inner(snapshot: &SyncSnapshot) -> Result<(), Error> {
     let role = satellite::load_role();
     if role.role != RouterRole::Satellite || role.core_key.is_none() {
         return Err(Error::new(

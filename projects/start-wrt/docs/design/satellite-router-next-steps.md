@@ -296,7 +296,47 @@ browser.
 
 ## Batch five — recovery and the rest of adoption (D22)
 
-- ☐ A fresh router broadcasts nothing until it has checked its uplink port; one that hears no
+Written 2026-10-18 (`recovery.rs`; API contract §18).
+
+- ☑ A router with no password yet runs the candidate listener on its WAN port whatever its role
+  (`adoption::start`), so a fresh or reset router that hears a Core waits to be adopted; its
+  setup page carries a banner saying so, with the adoption code, and offers "create a password"
+  as the way to become a main router instead. Not built: the "no cable / nothing answering / no
+  Internet" diagnosis on the setup page.
+- ☑ Recovery mode: 60 s into the dark the AP moves its access ports to VLAN 4093 with
+  `192.168.255.1/24`, DHCP and `router.lan` from its own dnsmasq, a zone that forwards nowhere;
+  with a sticker password, `StartWRT-Recovery-<last 4 hex of the uplink MAC>` on the 2.4 GHz
+  radio, psk2 with that password, one client, every profile SSID disabled. A second axum server
+  bound to the recovery address (reuse-port beside the daemon's wildcard listener) serves the page
+  headed "Satellite _name_ — recovery mode": uplink link, whether the Core's link-local answers,
+  tunnel handshake age, firmware against the Core's, the last refused payload; Restart and
+  Factory reset (`firstboot -y`) behind confirmations; the log filtered to kernel, netifd,
+  WireGuard, firewall and daemon lines with DHCP and hostapd client lines dropped, viewable and
+  downloadable. Resume restores the applied payload's layout (`/etc/startwrt/applied.json`) and
+  removes every recovery section. Recovery runs on the dark-state machine, so it also covers an
+  adoption whose layout never brought the tunnel up. Not built: the 1-minute delay is still the
+  placeholder; the Core's own radios do not take the recovery SSID into the plan.
+- ☑ Saved configurations: re-adopting a name keeps that entry's port assignments; the adopt dialog
+  lists access points out of contact as names to take over; Remove on the Access Points page is
+  the deletion and revokes the key. Not built: a multi-select delete inside the adopt flow.
+- ☑ Core status per AP: firmware with an "Older than the Core" badge (D17), the recovery SSID
+  shown while out of contact, each port's assignment and link (already), device count. Not built:
+  Wi-Fi client counts per profile as a column.
+- ☐ Not built from §19: the AP staying dark until its firmware matches the Core's (D17), only the
+  badge; the original bullets below stay as the record of what was asked.
+
+**Bench record, 2026-10-18.** The Core's tunnel interface was taken down at 23:22:50: the BPI
+went dark at 23:23:40 and opened recovery at 23:24:50, its LAN jack on VLAN 4093 with
+`192.168.255.1`, and a laptop on that jack leased `192.168.255.123` from it. Over link-local
+(a bench rule, removed after) the page read "Satellite s1 — recovery mode", uplink link up, the
+Core answering on the cable (its link-local still did; only the tunnel was down), last handshake
+3 min ago, both actions present. The link came back at 23:25:26; at 23:25:47 recovery was off and
+the AP resumed, the jack back on guest, the laptop back on its guest lease from the Core, every
+recovery section gone. Not exercised: the recovery SSID (the BPI has no sticker password), the
+Restart and Factory reset buttons (destructive on the bench), the fresh-router banner (needs a
+router with no password cabled to the trunk).
+
+- ☐ (original) A fresh router broadcasts nothing until it has checked its uplink port; one that hears no
   Core and gets no Internet says so on its setup page and asks satellite-or-main.
 - ☐ Recovery mode: `StartWRT-Recovery-<last 4 hex of uplink MAC>` 2.4 GHz SSID and an isolated
   recovery network on an access port (a Wi-Fi-only AP has only the SSID), HTTP, no login, headed

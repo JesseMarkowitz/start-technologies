@@ -81,6 +81,7 @@ import {
   AccessPointAdopted,
   AccessPointCandidate,
   AccessPointSetPorts,
+  AdoptionCode,
 } from './api.service'
 import { RpcService } from '../rpc.service'
 import type { Api, RpcParamType, RpcReturnType } from './bindings'
@@ -426,6 +427,10 @@ export class LiveApiService extends ApiService {
 
   async satelliteAdopt(params: AccessPointAdopt): Promise<AccessPointAdopted> {
     return this.rpc.request({ method: 'satellite.adoption.adopt', params })
+  }
+
+  async satelliteAdoptionCode(): Promise<AdoptionCode> {
+    return this.rpc.request({ method: 'satellite.adoption.code', params: {} })
   }
 
   async ethernetSet(params: EthernetSetConfig): Promise<EthernetSetResult> {

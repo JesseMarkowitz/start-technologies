@@ -162,7 +162,7 @@ pub struct LoginParams {
 rpc_toolkit::reflect_ts!(LoginParams);
 
 /// Read and parse the shadow file to get the password hash for a user
-async fn get_shadow_hash(username: &str) -> Result<Option<String>, Error> {
+pub(crate) async fn get_shadow_hash(username: &str) -> Result<Option<String>, Error> {
     let shadow_content = tokio::fs::read_to_string("/etc/shadow")
         .await
         .map_err(|e| {

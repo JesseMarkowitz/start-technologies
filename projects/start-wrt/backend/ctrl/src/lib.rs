@@ -40,6 +40,7 @@ pub mod port_control;
 pub mod profiles;
 pub mod progress;
 pub mod published_ports;
+pub mod recovery;
 pub mod registry;
 pub mod satellite;
 pub mod setup;

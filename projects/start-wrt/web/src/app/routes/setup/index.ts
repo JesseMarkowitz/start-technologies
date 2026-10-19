@@ -1,4 +1,6 @@
 import { Component, inject, linkedSignal, signal } from '@angular/core'
+import { toSignal } from '@angular/core/rxjs-interop'
+import { catchError, from, of, switchMap, timer } from 'rxjs'
 import {
   AbstractControl,
   NonNullableFormBuilder,
@@ -13,6 +15,7 @@ import {
   TuiIcon,
   TuiInput,
   TuiLabel,
+  TuiNotification,
   TuiTextfield,
   TuiTitle,
 } from '@taiga-ui/core'
@@ -53,6 +56,24 @@ function passwordsMatch(control: AbstractControl): ValidationErrors | null {
         {{ 'Open router.lan' | i18n }}
       </a>
     } @else {
+      @if (adoption(); as adoption) {
+        @if (adoption.waiting) {
+          <div tuiNotification appearance="info">
+            <p>
+              {{
+                'This router hears a StartWRT router on its WAN port and can join it as an access point. To make it your main router instead, create a password below.'
+                  | i18n
+              }}
+            </p>
+            @if (adoption.code) {
+              <p>
+                {{ 'Adoption code' | i18n }}:
+                <code>{{ adoption.code }}</code>
+              </p>
+            }
+          </div>
+        }
+      }
       <header tuiHeader>
         <h2 tuiTitle>{{ 'Create admin password' | i18n }}</h2>
       </header>
@@ -113,6 +134,7 @@ function passwordsMatch(control: AbstractControl): ValidationErrors | null {
     TuiIcon,
     TuiInput,
     TuiLabel,
+    TuiNotification,
     TuiPassword,
     TuiTextfield,
     TuiHeader,
@@ -125,6 +147,17 @@ export default class Setup {
   private readonly api = inject(ApiService)
   private readonly auth = inject(AuthService)
   private readonly i18n = inject(i18nPipe)
+
+  // A fresh router that hears a Core on its WAN port waits to be adopted
+  // (design §19); the page says so and shows the code a board with no
+  // sticker password needs.
+  protected readonly adoption = toSignal(
+    timer(0, 5000).pipe(
+      switchMap(() =>
+        from(this.api.satelliteAdoptionCode()).pipe(catchError(() => of(null))),
+      ),
+    ),
+  )
 
   protected readonly loading = signal(false)
   protected readonly complete = signal(false)

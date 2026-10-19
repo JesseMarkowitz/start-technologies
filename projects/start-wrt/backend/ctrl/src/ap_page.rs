@@ -10,7 +10,7 @@ use axum::http::{header, Response};
 
 use crate::satellite;
 
-fn esc(s: &str) -> String {
+pub fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

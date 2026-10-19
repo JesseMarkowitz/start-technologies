@@ -16,18 +16,28 @@ export class AccessPointsService extends FormService<AccessPoint[]> {
 
   readonly candidates = signal<AccessPointCandidate[]>([])
   readonly profiles = signal<ProfileId[]>([])
+  /** The Core's own firmware version, which an access point should match. */
+  readonly coreVersion = signal('')
 
   async load(): Promise<AccessPoint[]> {
-    const [list, candidates, profiles] = await Promise.all([
+    const [list, candidates, profiles, info] = await Promise.all([
       this.api.satelliteList(),
       this.api.satelliteCandidates().catch(() => []),
       this.api.profilesList(),
+      this.api.systemInfo().catch(() => null),
     ])
 
     this.candidates.set(candidates)
     this.profiles.set(profiles)
+    if (info) this.coreVersion.set(info.version)
 
     return list
+  }
+
+  /** Names of access points out of contact: saved configurations a new
+   *  router can take over (design §19). */
+  saved(): string[] {
+    return (this.data() || []).filter(s => !s.live).map(s => s.name)
   }
 
   async store(): Promise<void> {}

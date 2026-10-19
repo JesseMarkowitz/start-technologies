@@ -25,6 +25,7 @@ const BAND = { '2g': '2.4 GHz', '5g': '5 GHz', '6g': '6 GHz' } as const
       <tr>
         <th tuiTh [sorter]="'name' | tuiSorter">{{ 'Name' | i18n }}</th>
         <th tuiTh>{{ 'Status' | i18n }}</th>
+        <th tuiTh>{{ 'Version' | i18n }}</th>
         <th tuiTh>{{ 'Trunk port' | i18n }}</th>
         <th tuiTh>{{ 'Radios' | i18n }}</th>
         <th tuiTh>{{ 'Ports' | i18n }}</th>
@@ -49,6 +50,19 @@ const BAND = { '2g': '2.4 GHz', '5g': '5 GHz', '6g': '6 GHz' } as const
             <div class="g-secondary">
               {{ 'Generation' | i18n }} {{ item.generationApplied }}
             </div>
+            @if (!item.live && item.recoverySsid) {
+              <div class="g-secondary">
+                {{ 'Recovery network' | i18n }}: {{ item.recoverySsid }}
+              </div>
+            }
+          </td>
+          <td tuiTd>
+            {{ item.version || '—' }}
+            @if (outdated(item)) {
+              <span tuiBadge size="s" appearance="warning">
+                {{ 'Older than the Core' | i18n }}
+              </span>
+            }
           </td>
           <td tuiTd>{{ item.port || '—' }}</td>
           <td tuiTd>
@@ -116,7 +130,7 @@ const BAND = { '2g': '2.4 GHz', '5g': '5 GHz', '6g': '6 GHz' } as const
         </tr>
       } @empty {
         <tr>
-          <td tuiTd colspan="7">
+          <td tuiTd colspan="8">
             <app-placeholder icon="@tui.radio">
               {{ 'No access points yet' | i18n }}
             </app-placeholder>
@@ -147,6 +161,11 @@ export class AccessPointsTable {
   private readonly i18n = inject(i18nPipe)
 
   readonly accessPoints = input<AccessPoint[]>([])
+
+  outdated(item: AccessPoint): boolean {
+    const core = this.service.coreVersion()
+    return !!item.version && !!core && item.version !== core
+  }
 
   plan(item: AccessPoint): { name: string; text: string }[] {
     return Object.entries(item.plan).map(([name, p]) => ({

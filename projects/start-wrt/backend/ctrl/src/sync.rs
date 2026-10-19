@@ -274,6 +274,14 @@ pub async fn tick(
                     sat.plan = snapshot.radios.clone();
                     changed = true;
                 }
+                if sat.version != status.version {
+                    sat.version = status.version;
+                    changed = true;
+                }
+                if sat.recovery_ssid != status.recovery_ssid {
+                    sat.recovery_ssid = status.recovery_ssid;
+                    changed = true;
+                }
             }
             Err(e) => {
                 tracing::debug!("sync: status of '{}': {e}", sat.name);

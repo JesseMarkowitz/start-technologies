@@ -117,6 +117,7 @@ async fn status_handler(_ctx: ServerContext, p: StatusParams) -> Result<TunnelSt
         inventory: inventory(&uplink),
         clients: clients(&uplink).await,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        recovery_ssid: crate::recovery::wifi_available().then(|| crate::recovery::ssid(&uplink)),
     })
 }
 

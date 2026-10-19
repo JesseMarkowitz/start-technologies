@@ -576,4 +576,8 @@ export default {
   599: 'Trunk do punktów dostępowych',
   600: 'Ustaw jako port trunk',
   601: 'Urządzenia podłączone do tego portu tracą dostęp, dopóki nie zostanie na nim przyjęty punkt dostępowy.',
+  602: 'Sieć ratunkowa',
+  603: 'Starszy niż Core',
+  604: 'Albo przejmij zapisaną konfigurację:',
+  605: 'Ten router słyszy router StartWRT na porcie WAN i może dołączyć do niego jako punkt dostępowy. Aby zamiast tego uczynić go routerem głównym, utwórz hasło poniżej.',
 } satisfies i18n

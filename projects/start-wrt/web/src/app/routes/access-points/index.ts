@@ -74,7 +74,10 @@ export default class AccessPoints {
 
   adopt(candidate: AccessPointCandidate) {
     this.dialogs
-      .open<AdoptResult>(ADOPT_DIALOG, { size: 's', data: candidate })
+      .open<AdoptResult>(ADOPT_DIALOG, {
+        size: 's',
+        data: { candidate, saved: this.service.saved() },
+      })
       .subscribe(({ name, secret }) =>
         this.service.adopt({ address: candidate.address, name, secret }),
       )
