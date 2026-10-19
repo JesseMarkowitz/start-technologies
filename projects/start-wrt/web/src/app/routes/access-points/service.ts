@@ -1,6 +1,7 @@
 import { inject, Injectable, signal } from '@angular/core'
 import { FormService } from 'src/app/services/form.service'
 import { i18nPipe } from 'src/app/i18n/i18n.pipe'
+import { compareVersions } from 'src/app/utils/versions'
 import {
   AccessPoint,
   AccessPointAdopt,
@@ -32,6 +33,29 @@ export class AccessPointsService extends FormService<AccessPoint[]> {
     if (info) this.coreVersion.set(info.version)
 
     return list
+  }
+
+  /** Running older firmware than the Core, or unable to read its configuration. */
+  behind(item: AccessPoint): boolean {
+    return item.needsUpdate || this.compare(item) < 0
+  }
+
+  newer(item: AccessPoint): boolean {
+    return this.compare(item) > 0
+  }
+
+  /** Behind and not already queued or updating. */
+  updatable(item: AccessPoint): boolean {
+    return (
+      this.behind(item) &&
+      item.update?.state !== 'queued' &&
+      item.update?.state !== 'updating'
+    )
+  }
+
+  private compare(item: AccessPoint): number {
+    const core = this.coreVersion()
+    return item.version && core ? compareVersions(item.version, core) : 0
   }
 
   /** Names of access points out of contact: saved configurations a new
@@ -70,6 +94,17 @@ export class AccessPointsService extends FormService<AccessPoint[]> {
         await this.refreshAndWait()
       },
       { success: this.i18n.transform('Port assignments saved') },
+    )
+  }
+
+  /** Updates `names`, or every access point behind the Core, one at a time. */
+  update(names: string[]): Promise<boolean> {
+    return this.actions.run(
+      async () => {
+        await this.api.satelliteUpdate({ names })
+        await this.refreshAndWait()
+      },
+      { success: this.i18n.transform('Access point update started') },
     )
   }
 

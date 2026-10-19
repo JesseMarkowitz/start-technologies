@@ -81,6 +81,7 @@ import {
   AccessPointAdopted,
   AccessPointCandidate,
   AccessPointSetPorts,
+  AccessPointUpdate,
   AdoptionCode,
 } from './api.service'
 import { RpcService } from '../rpc.service'
@@ -416,6 +417,10 @@ export class LiveApiService extends ApiService {
 
   async satelliteSetPorts(params: AccessPointSetPorts): Promise<null> {
     return this.rpc.request({ method: 'satellite.set-ports', params })
+  }
+
+  async satelliteUpdate(params: AccessPointUpdate): Promise<string[]> {
+    return this.rpc.request({ method: 'satellite.update', params })
   }
 
   async satelliteCandidates(): Promise<AccessPointCandidate[]> {

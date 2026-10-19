@@ -384,17 +384,17 @@ async fn set_ports(ports: &[String], state: &str) {
     }
 }
 
-async fn go_dark(uplink: &str) {
-    tracing::warn!("liveness: the Core is unreachable; SSIDs down, access ports cut");
+/// Lost the Core, or it sends a payload this firmware cannot read (D17).
+async fn go_dark(uplink: &str, needs_update: bool) {
+    let message = if needs_update {
+        "The Core's configuration needs newer firmware: Wi-Fi off and access ports cut until this access point is updated"
+    } else {
+        "Lost the Core: Wi-Fi off and access ports cut until it is back"
+    };
+    tracing::warn!("liveness: {message}");
     let _ = crate::run_quiet_async(tokio::process::Command::new("wifi").arg("down")).await;
     set_ports(&access_ports(uplink), "down").await;
-    crate::activity::log(
-        "satellite",
-        "dark",
-        false,
-        "Lost the Core: Wi-Fi off and access ports cut until it is back",
-        None,
-    );
+    crate::activity::log("satellite", "dark", false, message, None);
 }
 
 async fn resume(uplink: &str) {
@@ -422,6 +422,9 @@ async fn run_ap() {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut live_since: Option<Instant> = None;
     let mut dark_since: Option<Instant> = None;
+    if let Err(e) = crate::recovery::exit(&uplink).await {
+        tracing::error!("liveness: recovery mode left by a reboot not removed: {e}");
+    }
     loop {
         tick.tick().await;
         let now = Instant::now();
@@ -445,13 +448,15 @@ async fn run_ap() {
         let obs = observe_interface(crate::mgmt_tunnel::AP_INTERFACE).await;
         let live = monitor.observe(obs.as_ref(), now, unix_now());
         TUNNEL_LIVE.store(live as u8, Ordering::Relaxed);
+        let needs_update = crate::ap::needs_update();
+        let serve = live && !needs_update;
         match AP_STATE.load(Ordering::Relaxed) {
-            STATE_UP if !live => {
-                go_dark(&uplink).await;
+            STATE_UP if !serve => {
+                go_dark(&uplink, needs_update).await;
                 AP_STATE.store(STATE_DARK, Ordering::Relaxed);
             }
             STATE_UP => {}
-            STATE_DARK if live => {
+            STATE_DARK if serve => {
                 let since = *live_since.get_or_insert(now);
                 if now.duration_since(since) >= RESUME_AFTER && reconciled() {
                     resume(&uplink).await;
@@ -460,9 +465,9 @@ async fn run_ap() {
                 }
             }
             STATE_DARK => live_since = None,
-            _ if live => AP_STATE.store(STATE_UP, Ordering::Relaxed),
+            _ if serve => AP_STATE.store(STATE_UP, Ordering::Relaxed),
             _ => {
-                go_dark(&uplink).await;
+                go_dark(&uplink, needs_update).await;
                 AP_STATE.store(STATE_DARK, Ordering::Relaxed);
             }
         }

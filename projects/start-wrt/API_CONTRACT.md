@@ -213,6 +213,9 @@ struct UpdateSystemParams {
     /// `https://startwrt-registry.start9.com`.
     registry: Option<String>,
     target_version: Option<String>, // wire: `targetVersion` (default: latest)
+    /// On a Core: once it has booted the target and stayed up 3 minutes,
+    /// update its access points to it one at a time (`satellite.update`).
+    update_access_points: bool, // wire: `updateAccessPoints` (default: false)
 }
 
 // Response:
@@ -2045,13 +2048,18 @@ Core's current generation (D18).
 
 **Tunnel API.** An adopted access point serves JSON-RPC at `http://<its tunnel address>:8720/rpc`
 and answers only the Core's tunnel address. Methods: `apply` (params: a `SyncSnapshot`; refuses a
-generation older than the applied one, treats the same as done), `status` (params
-`{ coreGeneration, coreVersion, name }`, the name being what the Core adopted it under, which an
-access point without one on record keeps; returns
-`TunnelStatus { generation, tunnelLive, dark, inventory, clients, version, recoverySsid }`, where
+`format` newer than its firmware reads and a generation older than the applied one, treats the
+same generation as done), `status` (params `{ coreGeneration, coreVersion, name, coreFormat }`, the
+name being what the Core adopted it under, which an access point without one on record keeps;
+returns `TunnelStatus { generation, tunnelLive, dark, inventory, clients, version, recoverySsid,
+format, needsUpdate, update }`, where
 `clients` lists every device the access point's bridge learned on a port other than its uplink as
 `{ mac, via, vlan }`, `via` being a Wi-Fi band label when hostapd knows the device or else the port
-name), `release` (the Core has forgotten this access point). The access point reads its inventory
+name, `format` the newest payload format the access point reads (absent: it predates the number
+and reads format 1), and `update` its own firmware update while one runs or after one failed),
+`release` (the Core has forgotten this access point), `update` (params `{ registry, targetVersion }`:
+answers at once, then downloads that exact version from that registry, checks it and runs
+`sysupgrade`; a failure shows in `status`). The access point reads its inventory
 from the kernel: ports from `/sys/class/net` with link state, radios from its wireless config's
 `path` resolved to a phy and the bands `iw phy` lists, so a stale `wifi-device` with no phy is
 absent. The Core keeps the clients in the registry and the device list shows such a device as, for
@@ -2059,6 +2067,20 @@ example, `Wi-Fi 2.4GHz (garage)` or `Ethernet (garage)` instead of Ethernet on t
 port (D13). The Core answers NTP and DNS on its end of every tunnel and forwards an access point
 only to the update source it is itself configured with (HTTPS to the registry host and the hosts
 its asset URLs name, resolved every 10 minutes into fw4 sets `sat_reach4`/`sat_reach6`).
+
+**Fleet updates (D17).** Every payload carries `format`, the Core's `SYNC_FORMAT`, raised only when
+an access point that ignored a new field would serve something the Core's settings forbid. An
+access point told of a newer format, by `status` or `apply`, writes `/etc/startwrt/needs-update`
+(outside the sysupgrade keep list, so new firmware starts without it), refuses the payload and goes
+dark with its tunnel up; the Core marks it `needsUpdate` and stops pushing to it. Older firmware
+that reads the format keeps serving. `satellite.update` queues access points (`PairedSatellite.update`
+`{ target, state: "queued" | "updating" | "failed", message }`) and a single sequence works through
+them: wait up to 10 minutes for the access point to be in contact, send the tunnel `update` with the
+Core's own version and update source, then poll `status` until it reports that version (up to 15
+minutes) before starting the next. A failure the access point reports before rebooting marks that
+one failed and moves on; one that restarts on an older version or does not come back marks it and
+every one still queued as failed and stops. A dark access point's recovery layout left in its
+configs by a reboot is removed when its daemon starts.
 
 **Role gate (D7).** On an adopted access point the RPC server answers only `satellite.get-role`,
 `satellite.status`, `satellite.adoption.code`, `system.info`, `system.restart` and `auth.logout`;
@@ -2137,7 +2159,10 @@ struct PairedSatellite {
     plan: BTreeMap<String, RadioPlan>,     // the Core's channel plan for its radios (D20)
     version: String,                       // its firmware, as it reported it last
     recoverySsid: Option<String>,          // its recovery network's name, if it has a sticker password
+    needsUpdate: bool,                     // it cannot read the Core's payload format; dark until updated
+    update: Option<ApUpdate>,              // its firmware update, queued until back on the new version
 }
+struct ApUpdate { target: String, state: String, message: Option<String> } // "queued" | "updating" | "failed"
 struct ClientInfo { mac: String, via: String, vlan: Option<u16> }
 struct Inventory { ports: Vec<PortInfo>, radios: Vec<RadioInfo> }
 struct PortInfo { name: String, uplink: bool, link: bool }
@@ -2196,6 +2221,20 @@ struct SetPortsRequest {
 // access point's assignments; the next sync tick carries them.
 ```
 
+### `satellite.update`
+
+```rust
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateRequest {
+    names: Vec<String>,  // CLI: --name, repeatable; empty = every access point behind the Core
+}
+// Response: Vec<String>, the names queued. Core-only. NotFound for an unknown name;
+// InvalidRequest for a named access point that is not behind the Core (older firmware, or
+// `needsUpdate`). One already queued or updating stays as it is; a failed one is queued again.
+// Updates run one at a time to the Core's own version (Fleet updates, above).
+```
+
 ### The sync payload
 
 ```rust
@@ -2203,6 +2242,7 @@ struct SetPortsRequest {
 #[serde(rename_all = "camelCase")]
 struct SyncSnapshot {
     generation: u64,                       // monotonic; an older one is refused
+    format: u32,                           // the Core's SYNC_FORMAT; a newer one than the AP reads is refused
     ssid: String,
     broadcastSeparately: bool,             // 5 GHz radios broadcast "<ssid>-5G"
     country: Option<String>,               // regulatory country; unset = world

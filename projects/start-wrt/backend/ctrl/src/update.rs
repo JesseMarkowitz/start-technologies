@@ -25,6 +25,10 @@ pub struct UpdateSystemParams {
     pub registry: Option<String>,
     #[arg(long)]
     pub target_version: Option<String>,
+    /// On a Core, update its access points to the same version once it is back.
+    #[arg(long)]
+    #[serde(default)]
+    pub update_access_points: bool,
 }
 rpc_toolkit::reflect_ts!(UpdateSystemParams);
 
@@ -67,52 +71,29 @@ pub async fn fetch_newer_versions(
     Ok(versions)
 }
 
-/// Main update handler: fetch, validate, download, verify, sysupgrade.
-pub async fn update_system(
-    ctx: ServerContext,
-    UpdateSystemParams {
-        registry,
-        target_version,
-    }: UpdateSystemParams,
-) -> Result<UpdateSystemRes, Error> {
+type Asset = crate::registry::asset::RegistryAsset<crate::sign::commitment::Blake3Commitment>;
+
+/// The version to install, `target` or else the newest offered, and its
+/// signature-checked image for this platform. `None` when nothing newer is offered.
+async fn select(registry: &str, target: Option<&str>) -> Result<Option<(String, Asset)>, Error> {
     let platform = DeviceInfo::load()?.os.platform;
-    let registry = registry.unwrap_or_else(|| {
-        crate::system::read_registry_url()
-            .unwrap_or_else(|| crate::system::DEFAULT_REGISTRY_URL.to_string())
-    });
-
-    // 1. Fetch available versions
-    let versions = fetch_newer_versions(&registry).await?;
-
-    if versions.is_empty() {
-        return Ok(UpdateSystemRes {
-            target: None,
-            progress: None,
-        });
-    }
-
-    // 2. Select target version. Note: BTreeMap keys sort lexicographically,
-    // which is wrong for semver (e.g. "9.0.0" > "10.0.0"). Select the max via
-    // numeric comparison instead.
-    let (target_ver, version_info) = if let Some(ref target) = target_version {
-        let info = versions
-            .get(target)
-            .ok_or_else(|| Error::other(format!("requested version {target} not available")))?;
-        (target.clone(), info)
-    } else {
-        let Some((ver, info)) = versions
+    let versions = fetch_newer_versions(registry).await?;
+    // BTreeMap keys sort lexicographically, which is wrong for semver.
+    let (target_ver, version_info) = match target {
+        Some(target) => {
+            let info = versions
+                .get(target)
+                .ok_or_else(|| Error::other(format!("requested version {target} not available")))?;
+            (target.to_string(), info)
+        }
+        None => match versions
             .iter()
             .max_by(|(a, _), (b, _)| crate::system::cmp_versions(a, b))
-        else {
-            return Ok(UpdateSystemRes {
-                target: None,
-                progress: None,
-            });
-        };
-        (ver.clone(), info)
+        {
+            Some((ver, info)) => (ver.clone(), info),
+            None => return Ok(None),
+        },
     };
-
-    // 3. Find asset for our platform
     let asset = version_info
         .asset_for_platform(&platform)
         .ok_or_else(|| {
@@ -121,11 +102,55 @@ pub async fn update_system(
             ))
         })?
         .clone();
-
-    // 4. Validate signatures
     asset.validate(SIG_CONTEXT, asset.all_signers())?;
+    Ok(Some((target_ver, asset)))
+}
 
-    // 5. Create progress tracker
+/// Updates to exactly `target` from `registry` with no progress stream; an
+/// access point's update, ordered by its Core. Returns only if it failed.
+pub async fn install(registry: &str, target: &str) -> Result<(), Error> {
+    let (target_ver, asset) = select(registry, Some(target))
+        .await?
+        .ok_or_else(|| Error::other(format!("requested version {target} not available")))?;
+    let tracker = FullProgressTracker::new();
+    let mut download_phase = tracker.add_phase("Downloading firmware".into(), Some(100));
+    download_phase.start();
+    let mut verify_phase = tracker.add_phase("Verifying integrity".into(), Some(10));
+    let mut apply_phase = tracker.add_phase("Applying update".into(), Some(1));
+    do_update(
+        &reqwest::Client::new(),
+        asset,
+        &target_ver,
+        false,
+        &mut download_phase,
+        &mut verify_phase,
+        &mut apply_phase,
+    )
+    .await
+}
+
+/// Main update handler: fetch, validate, download, verify, sysupgrade.
+pub async fn update_system(
+    ctx: ServerContext,
+    UpdateSystemParams {
+        registry,
+        target_version,
+        update_access_points,
+    }: UpdateSystemParams,
+) -> Result<UpdateSystemRes, Error> {
+    let registry = registry.unwrap_or_else(|| {
+        crate::system::read_registry_url()
+            .unwrap_or_else(|| crate::system::DEFAULT_REGISTRY_URL.to_string())
+    });
+
+    let Some((target_ver, asset)) = select(&registry, target_version.as_deref()).await? else {
+        return Ok(UpdateSystemRes {
+            target: None,
+            progress: None,
+        });
+    };
+
+    // Create progress tracker
     let tracker = FullProgressTracker::new();
     let mut download_phase = tracker.add_phase("Downloading firmware".into(), Some(100));
     // start() must precede set_units/set_total: those only mutate an
@@ -137,7 +162,7 @@ pub async fn update_system(
     let mut verify_phase = tracker.add_phase("Verifying integrity".into(), Some(10));
     let mut apply_phase = tracker.add_phase("Applying update".into(), Some(1));
 
-    // 6. Register WebSocket continuation for progress streaming.
+    // Register WebSocket continuation for progress streaming.
     // The WS handler creates its own stream from the tracker clone, so the
     // tracker must outlive both the handler and the background update task.
     let guid = Guid::new();
@@ -172,7 +197,7 @@ pub async fn update_system(
         ),
     );
 
-    // 7. Spawn background update task (owns tracker + phase handles)
+    // Spawn background update task (owns tracker + phase handles)
     let client = reqwest::Client::new();
     let target_ver_for_task = target_ver.clone();
     tokio::spawn(async move {
@@ -181,6 +206,7 @@ pub async fn update_system(
             &client,
             asset,
             &target_ver,
+            update_access_points,
             &mut download_phase,
             &mut verify_phase,
             &mut apply_phase,
@@ -221,13 +247,21 @@ pub async fn update_system(
 // sysupgrade overlay wipe.
 const PENDING_UPDATE_MARKER: &str = "/etc/startwrt/pending-update";
 
+/// The marker's line asking the Core to update its access points after it.
+const ACCESS_POINTS_LINE: &str = "access-points";
+
 /// Record the in-flight update target so the next boot can confirm it.
 /// Best-effort — a marker failure must not abort the update.
-fn write_pending_marker(target_ver: &str) {
+fn write_pending_marker(target_ver: &str, access_points: bool) {
     if let Some(dir) = Path::new(PENDING_UPDATE_MARKER).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Err(e) = std::fs::write(PENDING_UPDATE_MARKER, target_ver) {
+    let content = if access_points {
+        format!("{target_ver}\n{ACCESS_POINTS_LINE}\n")
+    } else {
+        target_ver.to_string()
+    };
+    if let Err(e) = std::fs::write(PENDING_UPDATE_MARKER, content) {
         tracing::warn!("failed to write pending-update marker: {e}");
     }
 }
@@ -240,12 +274,15 @@ fn clear_pending_marker() {
 /// On boot, confirm the outcome of a pending update in the Activity log.
 /// Called once from the daemon's normal-mode startup.
 pub fn check_pending_update_marker() {
-    let target = match std::fs::read_to_string(PENDING_UPDATE_MARKER) {
-        Ok(s) => s.trim().to_string(),
+    let (target, access_points) = match std::fs::read_to_string(PENDING_UPDATE_MARKER) {
+        Ok(s) => parse_marker(&s),
         Err(_) => return, // no marker — an ordinary boot
     };
     let current = env!("CARGO_PKG_VERSION");
     if target == current {
+        if access_points {
+            crate::fleet_update::after_core_update();
+        }
         crate::activity::log(
             "system",
             "update",
@@ -265,11 +302,19 @@ pub fn check_pending_update_marker() {
     clear_pending_marker();
 }
 
+/// The target version, and whether the access points follow.
+fn parse_marker(content: &str) -> (String, bool) {
+    let mut lines = content.lines().map(str::trim);
+    let target = lines.next().unwrap_or_default().to_string();
+    (target, lines.any(|l| l == ACCESS_POINTS_LINE))
+}
+
 /// Execute the actual update: download, verify, sysupgrade.
 async fn do_update(
     client: &reqwest::Client,
-    asset: crate::registry::asset::RegistryAsset<crate::sign::commitment::Blake3Commitment>,
+    asset: Asset,
     target_ver: &str,
+    access_points: bool,
     download_phase: &mut crate::progress::PhaseProgressTrackerHandle,
     verify_phase: &mut crate::progress::PhaseProgressTrackerHandle,
     apply_phase: &mut crate::progress::PhaseProgressTrackerHandle,
@@ -298,7 +343,7 @@ async fn do_update(
         &format!("Applying update to v{target_ver}"),
         None,
     );
-    write_pending_marker(target_ver);
+    write_pending_marker(target_ver, access_points);
     let status = Command::new("sysupgrade")
         .arg("/tmp/firmware.bin")
         .status()
@@ -317,4 +362,19 @@ async fn do_update(
 
     // Device reboots — this point is likely unreachable
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marker_carries_the_access_point_choice() {
+        assert_eq!(parse_marker("1.3.1"), ("1.3.1".into(), false));
+        assert_eq!(parse_marker("1.3.1\n"), ("1.3.1".into(), false));
+        assert_eq!(
+            parse_marker("1.3.1\naccess-points\n"),
+            ("1.3.1".into(), true)
+        );
+    }
 }

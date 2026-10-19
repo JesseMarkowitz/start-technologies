@@ -347,8 +347,8 @@ Written 2026-10-18 (`recovery.rs`; API contract §18).
 - ☑ Core status per AP: firmware with an "Older than the Core" badge (D17), the recovery SSID
   shown while out of contact, each port's assignment and link (already), device count. Not built:
   Wi-Fi client counts per profile as a column.
-- ☐ Not built from §19: the AP staying dark until its firmware matches the Core's (D17), only the
-  badge; the original bullets below stay as the record of what was asked.
+- ☑ D17 replaced "dark until its firmware matches" (2026-10-19); see Fleet updates below. The
+  original bullets below stay as the record of what was asked.
 
 **Bench record, 2026-10-18.** The Core's tunnel interface was taken down at 23:22:50: the BPI
 went dark at 23:23:40 and opened recovery at 23:24:50, its LAN jack on VLAN 4093 with
@@ -376,6 +376,48 @@ router with no password cabled to the trunk).
 - ☐ Core status per AP: state, last seen, firmware and older-than-Core marker (D17), recovery SSID,
   each port's profile and link, Wi-Fi client counts per profile.
 - ☐ Factory password on boards without one: deferred (design §21). Today's behaviour stays.
+
+## Fleet updates (D17)
+
+Decided 2026-10-19: older firmware alone never darkens an AP; a payload it cannot read does.
+
+- ☑ `SyncSnapshot.format` = `SYNC_FORMAT` (1), sent in every payload and in `status` as
+  `coreFormat`. An AP told of a newer format writes `/etc/startwrt/needs-update` (outside the
+  keep list), refuses the payload and goes dark with its tunnel up; the Core marks it
+  `needsUpdate` and stops pushing to it. An AP reporting no format reads format 1.
+- ☑ Tunnel `update { registry, targetVersion }`: the AP downloads exactly the Core's version from
+  the Core's source (`update::install`, sharing the selection and signature check with
+  `system.update`) and reports a failure in `status.update`.
+- ☑ `satellite.update` (`fleet_update.rs`): queue in the registry, one sequence, contact wait 10
+  min, return wait 15 min; a failure before reboot moves on, an AP that restarts on an older
+  version or does not come back stops the sequence.
+- ☑ `system.update { updateAccessPoints }`: carried across the Core's reboot as a second line of
+  `/etc/startwrt/pending-update` (already in the keep list); the sequence starts 3 min after the
+  Core boots the target version.
+- ☑ UI: "Update required" / "Update available" / "Newer than the Core" badges replace "Older
+  than the Core" (ID 603 reused, unreleased), the update state under the version, an Update
+  action per AP, Update all in the page header, and the checkbox on the Core's update card.
+- ☑ Found while building it: a recovery layout left in an AP's configs by a reboot was never
+  removed (the cleanup keyed on the in-memory recovery flag), leaving its access ports on the
+  recovery VLAN. `recovery::exit` now removes the layout whenever it is present, and the AP's
+  liveness loop calls it once at start.
+- ☑ A failed update's note on the Core clears itself once the access point is no longer behind.
+
+**Bench record, 2026-10-19.** Both routers on the D17 build, then the Core on a test build
+sending format 2. Within 5 s the AP logged that the Core sends format 2, went dark (Wi-Fi off,
+`eth0` down) with its tunnel live, and the Core marked it `needsUpdate` and pushed nothing
+(generation 13 never sent). Recovery mode opened at +75 s with the page lead "The main router's
+settings need newer firmware…". Update all from the web UI queued it, sent the update, and the
+AP's failure ("requested version 1.3.0 not available": it reached Start9's registry through the
+Core's update reach) showed under its version. The first run instead marked it done, because the
+version already matched: completion now also needs the AP to read the Core's format. An AP
+rebooted while in recovery came back in 40 s, removed the leftover recovery layout at start and
+went dark again (the needs-update file survives a reboot). A planted
+`pending-update` marker with `access-points` on the Core logged "Updated to v1.3.0" and queued
+the AP exactly 3 minutes later. Back on format 1, the AP cleared the file, applied generation 14
+and resumed 15 s later with Wi-Fi and `eth0` up and no recovery layout. `bench.sh smoke` passed.
+Not exercised: a real download and flash of an AP (needs a registry offering a newer image for
+the K1 platform), a halt on an AP that does not come back, more than one AP in sequence.
 
 ## Packaging, docs, upstream
 

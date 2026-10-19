@@ -2,6 +2,7 @@ import type { Api, RpcParamType, RpcReturnType } from './bindings'
 import { inject, Injectable } from '@angular/core'
 import { pauseFor } from '@start9labs/shared'
 import { GIT_HASH } from 'src/app/utils/workspace-config'
+import { compareVersions } from 'src/app/utils/versions'
 import {
   ApiService,
   ExecReq,
@@ -87,6 +88,7 @@ import {
   AccessPointAdopted,
   AccessPointCandidate,
   AccessPointSetPorts,
+  AccessPointUpdate,
   AdoptionCode,
 } from './api.service'
 import { UciFile, UciSection } from './types'
@@ -1808,7 +1810,8 @@ export class MockApiService extends ApiService {
         { mac: '6C:1F:F7:1D:F6:10', via: 'eth0', vlan: 100 },
       ],
       plan: { radio0: { band: '2g', channel: 6, htmode: 'HE20' } },
-      version: '1.2.1',
+      version: '0.9.2',
+      needsUpdate: false,
       recoverySsid: 'StartWRT-Recovery-5D09',
     },
     {
@@ -1821,7 +1824,8 @@ export class MockApiService extends ApiService {
       ports: { eth0: 1 },
       clients: [],
       plan: {},
-      version: '1.3.0',
+      version: '0.9.2',
+      needsUpdate: true,
     },
   ]
 
@@ -1862,6 +1866,43 @@ export class MockApiService extends ApiService {
     return null
   }
 
+  async satelliteUpdate(params: AccessPointUpdate): Promise<string[]> {
+    await pauseFor(250)
+    const target = this.mockSystemInfo.version
+    const queued = this.mockAccessPoints.filter(
+      s =>
+        (!params.names?.length || params.names.includes(s.name)) &&
+        (s.needsUpdate || compareVersions(s.version, target) < 0) &&
+        s.update?.state !== 'queued' &&
+        s.update?.state !== 'updating',
+    )
+    queued.forEach(s => (s.update = { target, state: 'queued' }))
+    this.runMockFleetUpdate(target)
+    return queued.map(s => s.name)
+  }
+
+  private mockFleetUpdating = false
+
+  private async runMockFleetUpdate(target: string) {
+    if (this.mockFleetUpdating) return
+    this.mockFleetUpdating = true
+    let next
+    while (
+      (next = this.mockAccessPoints.find(s => s.update?.state === 'queued'))
+    ) {
+      next.update = { target, state: 'updating' }
+      await pauseFor(5000)
+      if (next.live) {
+        next.version = target
+        next.needsUpdate = false
+        delete next.update
+      } else {
+        next.update = { target, state: 'failed', message: 'out of contact' }
+      }
+    }
+    this.mockFleetUpdating = false
+  }
+
   async satelliteCandidates(): Promise<AccessPointCandidate[]> {
     await pauseFor(250)
     return structuredClone(this.mockCandidates)
@@ -1892,6 +1933,7 @@ export class MockApiService extends ApiService {
         clients: [],
         plan: {},
         version: '',
+        needsUpdate: false,
       })
     return {
       name: params.name,

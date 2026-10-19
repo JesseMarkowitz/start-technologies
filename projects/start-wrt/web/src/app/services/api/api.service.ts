@@ -114,6 +114,7 @@ export abstract class ApiService {
   abstract satelliteList(): Promise<AccessPoint[]>
   abstract satelliteUnpair(params: { name: string }): Promise<null>
   abstract satelliteSetPorts(params: AccessPointSetPorts): Promise<null>
+  abstract satelliteUpdate(params: AccessPointUpdate): Promise<string[]>
   abstract satelliteCandidates(): Promise<AccessPointCandidate[]>
   abstract satelliteAdopt(params: AccessPointAdopt): Promise<AccessPointAdopted>
   abstract satelliteAdoptionCode(): Promise<AdoptionCode>
@@ -124,6 +125,8 @@ export type AdoptionCode = RpcReturnType<Api, 'satellite.adoption.code'>
 export type AccessPoint = RpcReturnType<Api, 'satellite.list'>[number]
 
 export type AccessPointSetPorts = RpcParamType<Api, 'satellite.set-ports'>
+
+export type AccessPointUpdate = RpcParamType<Api, 'satellite.update'>
 
 export type AccessPointCandidate = RpcReturnType<
   Api,

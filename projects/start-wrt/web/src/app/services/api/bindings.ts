@@ -94,6 +94,7 @@ export type AffectedPublishedPort = z.output<
   typeof schemas.AffectedPublishedPort
 >
 export type ApChannel = z.output<typeof schemas.ApChannel>
+export type ApUpdateState = z.output<typeof schemas.ApUpdateState>
 
 /**
  * One automatic port use for the published-ports UI.
@@ -238,6 +239,7 @@ export type SshKeyDeleteParamsInput = z.input<typeof schemas.SshKeyDeleteParams>
 export type SshKeyResponse = z.output<typeof schemas.SshKeyResponse>
 export type SystemInfoResponse = z.output<typeof schemas.SystemInfoResponse>
 export type UnpairParamsInput = z.input<typeof schemas.UnpairParams>
+export type UpdateParamsInput = z.input<typeof schemas.UpdateParams>
 export type UpdateSystemParamsInput = z.input<typeof schemas.UpdateSystemParams>
 export type UpdateSystemRes = z.output<typeof schemas.UpdateSystemRes>
 export type VerifyPasswordParamsInput = z.input<
@@ -268,6 +270,11 @@ export type WanIpv6ModeInput = z.input<typeof schemas.WanIpv6Mode>
 export type WifiRadio = z.output<typeof schemas.WifiRadio>
 export type WifiRadioInput = z.input<typeof schemas.WifiRadio>
 export type ActivityListResponse = z.output<typeof schemas.ActivityListResponse>
+
+/**
+ * An access point's firmware update (D17).
+ */
+export type ApUpdate = z.output<typeof schemas.ApUpdate>
 export type BackupCreateRes = z.output<typeof schemas.BackupCreateRes>
 export type BackupRestoreRes = z.output<typeof schemas.BackupRestoreRes>
 export type BandChannels = z.output<typeof schemas.BandChannels>

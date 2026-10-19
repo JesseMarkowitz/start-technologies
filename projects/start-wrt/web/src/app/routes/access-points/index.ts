@@ -1,4 +1,4 @@
-import { Component, inject } from '@angular/core'
+import { Component, computed, inject } from '@angular/core'
 import { TuiResponsiveDialogService } from '@taiga-ui/addon-mobile'
 import { TuiButton, TuiCell, TuiTitle } from '@taiga-ui/core'
 import { TuiSkeleton } from '@taiga-ui/kit'
@@ -17,6 +17,17 @@ import { AccessPointsTable } from './table'
       <hgroup tuiTitle>
         <h2>{{ 'Access Points' | i18n }}</h2>
       </hgroup>
+      @if (updatable()) {
+        <aside tuiAccessories>
+          <button
+            tuiButton
+            iconStart="@tui.download"
+            (click)="service.update([])"
+          >
+            {{ 'Update all' | i18n }}
+          </button>
+        </aside>
+      }
     </header>
     <table
       [tuiSkeleton]="!service.data()"
@@ -71,6 +82,9 @@ export default class AccessPoints {
   private readonly dialogs = inject(TuiResponsiveDialogService)
 
   protected readonly service = inject(AccessPointsService)
+  protected readonly updatable = computed(() =>
+    (this.service.data() || []).some(item => this.service.updatable(item)),
+  )
 
   adopt(candidate: AccessPointCandidate) {
     this.dialogs

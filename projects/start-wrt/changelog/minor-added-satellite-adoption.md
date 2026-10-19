@@ -28,3 +28,7 @@
   and offers a restart and a factory reset. A fresh or reset router cabled to a Core waits to
   be adopted instead of becoming a main router, and a replaced access point can take over the
   saved configuration of the one it replaces.
+- **Access points update from the Core.** An access point on older firmware keeps serving and
+  is marked as having an update; one that cannot carry the Core's settings stays dark until it
+  is updated. The Access Points page updates one access point or all of them, one at a time,
+  and the Core's own update can go on to update its access points once it is back.

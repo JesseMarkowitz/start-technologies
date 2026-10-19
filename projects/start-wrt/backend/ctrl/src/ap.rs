@@ -33,6 +33,37 @@ pub fn load_applied() -> Option<SyncSnapshot> {
         .and_then(|c| serde_json::from_str(&c).ok())
 }
 
+/// Present while the Core's payload format is newer than this firmware reads.
+/// Outside the sysupgrade keep list: new firmware starts without it.
+const NEEDS_UPDATE_PATH: &str = "/etc/startwrt/needs-update";
+
+/// The Core's payload needs newer firmware than this (D17).
+pub fn needs_update() -> bool {
+    std::path::Path::new(NEEDS_UPDATE_PATH).exists()
+}
+
+/// Records whether the Core's payload format is readable here; true when it is.
+pub fn check_format(core_format: u32) -> bool {
+    let readable = core_format <= satellite::SYNC_FORMAT;
+    if readable {
+        let _ = std::fs::remove_file(NEEDS_UPDATE_PATH);
+    } else if !needs_update() {
+        let _ = std::fs::write(NEEDS_UPDATE_PATH, core_format.to_string());
+        crate::activity::log(
+            "satellite",
+            "needs-update",
+            false,
+            &format!(
+                "The Core sends configuration format {core_format}; this firmware reads up to {}. \
+                 Update this access point from the Core.",
+                satellite::SYNC_FORMAT
+            ),
+            None,
+        );
+    }
+    readable
+}
+
 static LAST_APPLY_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Why the last payload was refused, until one applies.
@@ -410,6 +441,16 @@ async fn apply_snapshot_inner(snapshot: &SyncSnapshot) -> Result<(), Error> {
             ErrorKind::Uninitialized,
         ));
     };
+    if !check_format(snapshot.format) {
+        return Err(Error::new(
+            eyre!(
+                "configuration format {} needs newer firmware (this one reads up to {})",
+                snapshot.format,
+                satellite::SYNC_FORMAT
+            ),
+            ErrorKind::InvalidRequest,
+        ));
+    }
     if !accept_generation(role.generation, snapshot.generation)? {
         return Ok(());
     }
@@ -509,6 +550,7 @@ config dhcp 'lan'\n\toption interface 'lan'\n\toption start '100'\n\toption limi
     fn snapshot() -> SyncSnapshot {
         SyncSnapshot {
             generation: 3,
+            format: crate::satellite::SYNC_FORMAT,
             ssid: "Home".into(),
             broadcast_separately: false,
             country: Some("US".into()),

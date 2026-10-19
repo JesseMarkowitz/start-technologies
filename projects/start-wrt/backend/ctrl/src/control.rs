@@ -25,7 +25,8 @@ use uciedit::{dump_all, parse_all, Arena};
 
 use crate::prelude::*;
 use crate::satellite::{
-    self, ClientInfo, Inventory, PortInfo, RadioInfo, RouterRole, SyncSnapshot, TunnelStatus,
+    self, ApUpdate, ApUpdateState, ClientInfo, Inventory, PortInfo, RadioInfo, RouterRole,
+    SyncSnapshot, TunnelStatus,
 };
 use crate::utils::DeserializeStdin;
 use crate::ServerContext;
@@ -39,6 +40,8 @@ static RUNNING: Mutex<bool> = Mutex::new(false);
 static CORE_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// The Core's firmware version, as its last status call said it.
 static CORE_VERSION: Mutex<String> = Mutex::new(String::new());
+/// This access point's own firmware update, once the Core has ordered one.
+static AP_UPDATE: Mutex<Option<ApUpdate>> = Mutex::new(None);
 
 /// The generation the Core last announced; 0 before any contact.
 pub fn core_generation() -> u64 {
@@ -63,6 +66,7 @@ fn tunnel_api() -> ParentHandler<ServerContext> {
         .subcommand("apply", from_fn_async_local(apply).no_display())
         .subcommand("status", from_fn_async(status_handler).no_display())
         .subcommand("release", from_fn_async_local(release_handler).no_display())
+        .subcommand("update", from_fn_async(update_handler).no_display())
 }
 
 /// The Core's payload; an older generation is refused, the applied one is a no-op.
@@ -92,6 +96,11 @@ pub struct StatusParams {
     #[serde(default)]
     #[clap(long, default_value = "")]
     pub name: String,
+    /// The Core's payload format; one newer than this firmware reads darkens
+    /// the access point until it is updated (D17).
+    #[serde(default)]
+    #[clap(long, default_value_t = 0)]
+    pub core_format: u32,
 }
 rpc_toolkit::reflect_ts!(StatusParams);
 
@@ -102,6 +111,9 @@ async fn status_handler(_ctx: ServerContext, p: StatusParams) -> Result<TunnelSt
     }
     if !p.core_version.is_empty() {
         *CORE_VERSION.lock().unwrap() = p.core_version;
+    }
+    if p.core_format > 0 {
+        crate::ap::check_format(p.core_format);
     }
     let mut role = satellite::load_role();
     if role.name.is_none() && !p.name.is_empty() {
@@ -118,7 +130,70 @@ async fn status_handler(_ctx: ServerContext, p: StatusParams) -> Result<TunnelSt
         clients: clients(&uplink).await,
         version: env!("CARGO_PKG_VERSION").to_string(),
         recovery_ssid: crate::recovery::wifi_available().then(|| crate::recovery::ssid(&uplink)),
+        format: satellite::SYNC_FORMAT,
+        needs_update: crate::ap::needs_update(),
+        update: AP_UPDATE.lock().unwrap().clone(),
     })
+}
+
+#[derive(Debug, Serialize, Deserialize, Parser, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+#[command(rename_all = "kebab-case")]
+pub struct UpdateParams {
+    /// The Core's update source.
+    #[clap(long)]
+    pub registry: String,
+    /// The Core's version.
+    #[clap(long)]
+    pub target_version: String,
+}
+rpc_toolkit::reflect_ts!(UpdateParams);
+
+/// Answers first; the download, check and sysupgrade run after. Status reports
+/// the outcome until the reboot.
+#[instrument(skip_all)]
+async fn update_handler(_ctx: ServerContext, p: UpdateParams) -> Result<(), Error> {
+    {
+        let mut current = AP_UPDATE.lock().unwrap();
+        if current
+            .as_ref()
+            .is_some_and(|u| u.state == ApUpdateState::Updating)
+        {
+            return Err(Error::new(
+                eyre!("an update is already running"),
+                ErrorKind::InvalidRequest,
+            ));
+        }
+        *current = Some(ApUpdate {
+            target: p.target_version.clone(),
+            state: ApUpdateState::Updating,
+            message: None,
+        });
+    }
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("update runtime")
+            .block_on(async {
+                if let Err(e) = crate::update::install(&p.registry, &p.target_version).await {
+                    tracing::error!("control: update to {} failed: {e}", p.target_version);
+                    crate::activity::log(
+                        "system",
+                        "update",
+                        false,
+                        &format!("Update to v{} failed", p.target_version),
+                        Some(&e.to_string()),
+                    );
+                    *AP_UPDATE.lock().unwrap() = Some(ApUpdate {
+                        target: p.target_version,
+                        state: ApUpdateState::Failed,
+                        message: Some(e.to_string()),
+                    });
+                }
+            });
+    });
+    Ok(())
 }
 
 /// Answers first; the release tears the tunnel down a moment later.
@@ -543,9 +618,21 @@ pub async fn status(addr: IpAddr, name: &str, core_generation: u64) -> Result<Tu
             "coreGeneration": core_generation,
             "coreVersion": env!("CARGO_PKG_VERSION"),
             "name": name,
+            "coreFormat": satellite::SYNC_FORMAT,
         }),
     )
     .await
+}
+
+/// Orders the access point at `addr` to update to `target` from `registry`.
+pub async fn update(addr: IpAddr, registry: &str, target: &str) -> Result<(), Error> {
+    call::<serde_json::Value>(
+        addr,
+        "update",
+        serde_json::json!({ "registry": registry, "targetVersion": target }),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Tells the access point at `addr` that the Core has forgotten it. `Ok(false)`

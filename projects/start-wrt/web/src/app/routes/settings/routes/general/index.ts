@@ -6,7 +6,11 @@ import {
   inject,
   signal,
 } from '@angular/core'
-import { NonNullableFormBuilder, ReactiveFormsModule } from '@angular/forms'
+import {
+  FormsModule,
+  NonNullableFormBuilder,
+  ReactiveFormsModule,
+} from '@angular/forms'
 import { WA_LOCAL_STORAGE } from '@ng-web-apis/common'
 import { TuiResponsiveDialogService } from '@taiga-ui/addon-mobile'
 import { TuiAnimated, TuiValueChanges } from '@taiga-ui/cdk'
@@ -15,6 +19,7 @@ import {
   TUI_DARK_MODE_KEY,
   TuiAppearance,
   TuiButton,
+  TuiCheckbox,
   TuiDataList,
   TuiFilterByInputPipe,
   TuiIcon,
@@ -71,6 +76,16 @@ const getTheme = (theme: string): Theme =>
           @for (v of system.newerVersions(); track v.version) {
             <h2>v{{ v.version }}</h2>
             <div [innerHTML]="v.releaseNotes | markdown | dompurify"></div>
+          }
+          @if (system.hasAccessPoints()) {
+            <label tuiLabel [style.margin-top.rem]="1">
+              <input
+                type="checkbox"
+                tuiCheckbox
+                [(ngModel)]="system.updateAccessPoints"
+              />
+              {{ 'Also update access points afterwards, one at a time' | i18n }}
+            </label>
           }
           <div [style.margin-top.rem]="1">
             <button
@@ -226,7 +241,7 @@ const getTheme = (theme: string): Theme =>
         display: flex;
       }
 
-      label {
+      fieldset label {
         text-transform: capitalize;
       }
 
@@ -246,6 +261,8 @@ const getTheme = (theme: string): Theme =>
   providers: [tuiTextfieldOptionsProvider({ cleaner: signal(false) })],
   imports: [
     ReactiveFormsModule,
+    FormsModule,
+    TuiCheckbox,
     Form,
     Footer,
     TuiHeader,

@@ -104,8 +104,36 @@ pub struct PairedSatellite {
     /// sticker password to protect it with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_ssid: Option<String>,
+    /// It cannot read the Core's payload format and is dark until updated (D17).
+    #[serde(default)]
+    pub needs_update: bool,
+    /// Its firmware update, from queued until it is back on the new version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<ApUpdate>,
 }
 rpc_toolkit::reflect_ts!(PairedSatellite);
+
+/// An access point's firmware update (D17).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+pub struct ApUpdate {
+    /// The version it is updating to: the Core's.
+    pub target: String,
+    pub state: ApUpdateState,
+    /// Why it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+rpc_toolkit::reflect_ts!(ApUpdate);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, visit_rs::VisitVariants)]
+#[serde(rename_all = "lowercase")]
+pub enum ApUpdateState {
+    Queued,
+    Updating,
+    Failed,
+}
+rpc_toolkit::reflect_ts!(ApUpdateState);
 
 /// A device on an access point: which port or radio it is on, and its VLAN.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, visit_rs::VisitFields)]
@@ -166,8 +194,22 @@ pub struct TunnelStatus {
     /// The recovery network it would broadcast while dark (D22).
     #[serde(default)]
     pub recovery_ssid: Option<String>,
+    /// The newest payload format it reads; 0 predates the number and reads 1.
+    #[serde(default)]
+    pub format: u32,
+    /// It cannot read the Core's payload format (D17).
+    #[serde(default)]
+    pub needs_update: bool,
+    /// Its own firmware update, while one runs or after one failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<ApUpdate>,
 }
 rpc_toolkit::reflect_ts!(TunnelStatus);
+
+/// The payload format this firmware writes and the newest it reads (D17).
+/// Raise it only when an access point that ignored a new field would serve
+/// something the Core's settings forbid.
+pub const SYNC_FORMAT: u32 = 1;
 
 /// Serializes every read-modify-write of the registry across the daemon.
 pub(crate) static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -178,6 +220,9 @@ pub(crate) static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::co
 #[serde(rename_all = "camelCase")]
 pub struct SyncSnapshot {
     pub generation: u64,
+    /// `SYNC_FORMAT` of the Core that built it.
+    #[serde(default)]
+    pub format: u32,
     pub ssid: String,
     #[serde(default)]
     pub broadcast_separately: bool,
@@ -278,7 +323,35 @@ pub fn satellite<C: CtrlContext>() -> ParentHandler<C> {
                 .no_display()
                 .with_call_remote::<CliContext>(),
         )
+        .subcommand(
+            "update",
+            from_fn_async(update)
+                .with_display_serializable()
+                .with_call_remote::<CliContext>(),
+        )
         .subcommand("adoption", crate::adoption::adoption::<C>())
+}
+
+#[derive(Deserialize, Serialize, Parser, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+#[command(rename_all = "kebab-case")]
+pub struct UpdateParams {
+    /// Access points to update; none means every one older than the Core.
+    #[arg(long = "name")]
+    #[serde(default)]
+    names: Vec<String>,
+}
+rpc_toolkit::reflect_ts!(UpdateParams);
+
+/// Queues access points to update to the Core's version, one at a time (D17).
+/// Returns the names queued.
+#[instrument(skip_all)]
+pub async fn update(
+    _ctx: ServerContext,
+    UpdateParams { names }: UpdateParams,
+) -> Result<Vec<String>, Error> {
+    ensure_core()?;
+    crate::fleet_update::start(names).await
 }
 
 #[instrument(skip_all)]
@@ -728,6 +801,7 @@ mod tests {
     fn sync_snapshot_round_trips() {
         let snap = SyncSnapshot {
             generation: 7,
+            format: SYNC_FORMAT,
             ssid: "Home".into(),
             broadcast_separately: true,
             country: Some("US".into()),

@@ -18,7 +18,8 @@ use crate::ap::ADMIN_VLAN;
 use crate::prelude::*;
 use crate::profiles::ProfileId;
 use crate::satellite::{
-    PairedSatellite, PasswordSpec, ProfileSpec, RadioInfo, RadioPlan, SyncSnapshot,
+    ApUpdateState, PairedSatellite, PasswordSpec, ProfileSpec, RadioInfo, RadioPlan, SyncSnapshot,
+    SYNC_FORMAT,
 };
 use crate::wifi::Wifi;
 use crate::ServerContext;
@@ -154,6 +155,7 @@ pub fn build(
     });
     SyncSnapshot {
         generation,
+        format: SYNC_FORMAT,
         ssid: inputs.wifi.ssid.clone(),
         broadcast_separately: inputs.wifi.broadcast_separately,
         country: inputs.wifi.country.clone(),
@@ -220,6 +222,25 @@ pub fn floor_generation(generation: u64, registry: &[PairedSatellite]) -> u64 {
         .iter()
         .map(|s| s.generation_applied)
         .fold(generation, u64::max)
+}
+
+/// An access point reporting `format` reads the Core's payload; one reporting
+/// none predates the number and reads format 1.
+pub fn reads(format: u32) -> bool {
+    format.max(1) >= SYNC_FORMAT
+}
+
+/// Drops a failed update's note once the access point no longer needs one.
+fn clear_stale_failure(sat: &mut PairedSatellite) -> bool {
+    let stale = sat
+        .update
+        .as_ref()
+        .is_some_and(|u| u.state == ApUpdateState::Failed)
+        && !crate::fleet_update::behind(sat, env!("CARGO_PKG_VERSION"));
+    if stale {
+        sat.update = None;
+    }
+    stale
 }
 
 /// Per-access-point push bookkeeping across ticks.
@@ -291,6 +312,16 @@ pub async fn tick(
                 if sat.recovery_ssid != status.recovery_ssid {
                     sat.recovery_ssid = status.recovery_ssid;
                     changed = true;
+                }
+                if sat.needs_update != status.needs_update {
+                    sat.needs_update = status.needs_update;
+                    changed = true;
+                }
+                if clear_stale_failure(sat) {
+                    changed = true;
+                }
+                if !reads(status.format) {
+                    continue;
                 }
             }
             Err(e) => {
@@ -365,6 +396,34 @@ mod tests {
         s.generation_applied = 11;
         assert_eq!(floor_generation(0, &[s.clone()]), 11);
         assert_eq!(floor_generation(12, &[s]), 12);
+    }
+
+    #[test]
+    fn an_access_point_without_a_format_reads_format_one() {
+        assert_eq!(reads(0), reads(1));
+        assert!(reads(SYNC_FORMAT));
+        assert!(reads(SYNC_FORMAT + 1));
+        assert!(SYNC_FORMAT == 1 || !reads(SYNC_FORMAT - 1));
+    }
+
+    #[test]
+    fn a_failed_update_clears_once_nothing_is_behind() {
+        let failed = Some(crate::satellite::ApUpdate {
+            target: env!("CARGO_PKG_VERSION").into(),
+            state: ApUpdateState::Failed,
+            message: Some("x".into()),
+        });
+        let mut s = sat();
+        s.version = env!("CARGO_PKG_VERSION").into();
+        s.update = failed.clone();
+        s.needs_update = true;
+        assert!(!clear_stale_failure(&mut s));
+        s.needs_update = false;
+        assert!(clear_stale_failure(&mut s));
+        assert!(s.update.is_none());
+        s.version = "0.0.1".into();
+        s.update = failed;
+        assert!(!clear_stale_failure(&mut s));
     }
 
     #[test]

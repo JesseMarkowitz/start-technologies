@@ -198,6 +198,14 @@ pub fn write_layout(cfgs: &mut Configs, uplink: &str, sticker: Option<&str>) -> 
     Ok(())
 }
 
+/// The recovery network is in the configs, served or not.
+pub fn layout_present(cfgs: &Configs) -> bool {
+    cfgs["network"]
+        .sections
+        .iter()
+        .any(|s| s.ty() == "interface" && s.name().as_deref() == Some(INTERFACE))
+}
+
 /// Removes the recovery network and restores the applied layout.
 pub fn remove_layout(cfgs: &mut Configs, uplink: &str) -> Result<(), Error> {
     let bridge = crate::ethernet::find_lan_bridge(cfgs)?
@@ -286,26 +294,24 @@ pub async fn enter(uplink: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Takes the recovery network down and restores the applied layout.
+/// Takes the recovery network down and restores the applied layout,
+/// including one a reboot left in the configs.
 pub async fn exit(uplink: &str) -> Result<(), Error> {
-    let Some(handle) = ACTIVE.lock().unwrap().take() else {
-        return Ok(());
-    };
-    handle.abort();
+    let handle = ACTIVE.lock().unwrap().take();
+    if let Some(handle) = &handle {
+        handle.abort();
+    }
     {
         let arena = Arena::new();
         let mut cfgs = parse_all("/etc/config", &arena, CONFIGS).await?;
+        if handle.is_none() && !layout_present(&cfgs) {
+            return Ok(());
+        }
         remove_layout(&mut cfgs, uplink)?;
         dump_all("/etc/config", cfgs).await?;
     }
     crate::ap::reload_all().await;
-    crate::activity::log(
-        "satellite",
-        "recovery",
-        true,
-        "Recovery mode off: the Core is back",
-        None,
-    );
+    crate::activity::log("satellite", "recovery", true, "Recovery mode off", None);
     Ok(())
 }
 
@@ -320,6 +326,8 @@ pub struct Reasons {
     pub version: String,
     pub core_version: String,
     pub refused: Option<String>,
+    /// The Core's payload needs newer firmware (D17).
+    pub needs_update: bool,
 }
 
 async fn reasons(uplink: &str) -> Reasons {
@@ -375,6 +383,7 @@ async fn reasons(uplink: &str) -> Reasons {
         version: env!("CARGO_PKG_VERSION").to_string(),
         core_version: crate::control::core_version(),
         refused: crate::ap::last_apply_error(),
+        needs_update: crate::ap::needs_update(),
     }
 }
 
@@ -418,6 +427,11 @@ async fn log_text() -> String {
     lines[start..].join("\n")
 }
 
+/// Firmware behind the Core's; unknown is not behind.
+fn older(version: &str, core: &str) -> bool {
+    !core.is_empty() && crate::system::cmp_versions(version, core) == std::cmp::Ordering::Less
+}
+
 pub fn render(name: &str, r: &Reasons, log: &str) -> String {
     let mut h = String::new();
     let name = esc(name);
@@ -433,7 +447,7 @@ pub fn render(name: &str, r: &Reasons, log: &str) -> String {
          .muted{{color:#666}}.bad{{color:#b00}}.ok{{color:#070}}form{{display:inline}}\
          button{{font:inherit;padding:.4rem .9rem;margin:.25rem .5rem 0 0}}</style></head><body>\
          <h1>Satellite {name} — recovery mode</h1>\
-         <p>This access point has lost its main router, so it serves no network until it is back. \
+         <p>{lead} \
          Devices near it find their usual network only where the main router or another access point \
          still reaches them.</p>\
          <h2>What it can tell</h2><table>\
@@ -442,6 +456,12 @@ pub fn render(name: &str, r: &Reasons, log: &str) -> String {
          <tr><th>Management tunnel</th><td class=\"{hc}\">{hs}</td></tr>\
          <tr><th>Firmware</th><td class=\"{vc}\">{ver}</td></tr>\
          <tr><th>Last configuration</th><td class=\"{rc}\">{refused}</td></tr></table>",
+        lead = if r.needs_update {
+            "The main router's settings need newer firmware than this access point runs, so it serves \
+             no network until it is updated. Update it from the Access Points page on the main router."
+        } else {
+            "This access point has lost its main router, so it serves no network until it is back."
+        },
         uplink = esc(&r.uplink),
         lc = if r.uplink_link { "ok" } else { "bad" },
         link = if r.uplink_link { "link up" } else { "no link: check the cable to the main router" },
@@ -453,8 +473,8 @@ pub fn render(name: &str, r: &Reasons, log: &str) -> String {
             Some(a) => format!("last handshake {} ago", age(a)),
             None => "never handshaked".to_string(),
         },
-        vc = if r.core_version.is_empty() || r.core_version == r.version { "" } else { "bad" },
-        ver = if r.core_version.is_empty() || r.core_version == r.version {
+        vc = if older(&r.version, &r.core_version) { "bad" } else { "" },
+        ver = if !older(&r.version, &r.core_version) {
             esc(&r.version)
         } else {
             format!("{} (the main router runs {}; update this access point)", esc(&r.version), esc(&r.core_version))
@@ -603,6 +623,7 @@ mod tests {
             version: "1.3.0".into(),
             core_version: "1.3.1".into(),
             refused: Some("generation 4: bad".into()),
+            needs_update: false,
         };
         let h = render("garage", &r, "x<y");
         assert!(h.contains("<h1>Satellite garage — recovery mode</h1>"));
@@ -612,6 +633,19 @@ mod tests {
         assert!(h.contains("refused: generation 4: bad"));
         assert!(h.contains("action=\"/restart\"") && h.contains("action=\"/factory-reset\""));
         assert!(h.contains("x&lt;y"));
+        assert!(h.contains("lost its main router"));
+        let h = render(
+            "garage",
+            &Reasons {
+                needs_update: true,
+                version: "1.3.2".into(),
+                ..r
+            },
+            "",
+        );
+        assert!(h.contains("need newer firmware") && !h.contains("lost its main router"));
+        // Newer than the Core is not flagged.
+        assert!(!h.contains("update this access point"));
     }
 
     const NETWORK: &str = "\
@@ -671,7 +705,9 @@ config wifi-iface 'default_radio0'\n\toption device 'radio0'\n\toption network '
             "{fw}"
         );
 
+        assert!(layout_present(&cfgs));
         remove_layout(&mut cfgs, "eth1").unwrap();
+        assert!(!layout_present(&cfgs));
         let net = dump(&cfgs, "network");
         assert!(
             !net.contains("4093") && !net.contains("192.168.255.1"),

@@ -34,6 +34,9 @@ export class SystemService {
   readonly updateAvailable = signal(false)
   readonly updating = signal(false)
   readonly rebooting = signal(false)
+  /** This Core has access points to offer updating after it. */
+  readonly hasAccessPoints = signal(false)
+  readonly updateAccessPoints = signal(true)
 
   constructor() {
     // Detection floor for idle pages: stale-UI detection rides the
@@ -74,14 +77,16 @@ export class SystemService {
     }
 
     try {
-      const [info, newerVersions] = await Promise.all([
+      const [info, newerVersions, accessPoints] = await Promise.all([
         this.api.systemInfo(),
         this.api.systemNewerVersions(),
+        this.api.satelliteList().catch(() => []),
       ])
 
       this.setInfo(info)
       this.newerVersions.set(newerVersions)
       this.updateAvailable.set(newerVersions.length > 0)
+      this.hasAccessPoints.set(accessPoints.length > 0)
     } catch (e) {
       console.error('Failed to fetch system info:', e)
     }
@@ -107,6 +112,7 @@ export class SystemService {
     try {
       const { progress } = await this.api.systemUpdate({
         targetVersion,
+        updateAccessPoints: this.hasAccessPoints() && this.updateAccessPoints(),
       })
 
       if (progress) {

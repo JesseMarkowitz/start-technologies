@@ -58,10 +58,33 @@ const BAND = { '2g': '2.4 GHz', '5g': '5 GHz', '6g': '6 GHz' } as const
           </td>
           <td tuiTd>
             {{ item.version || '—' }}
-            @if (outdated(item)) {
-              <span tuiBadge size="s" appearance="warning">
-                {{ 'Older than the Core' | i18n }}
+            @if (item.needsUpdate) {
+              <span tuiBadge size="s" appearance="negative">
+                {{ 'Update required' | i18n }}
               </span>
+            } @else if (service.behind(item)) {
+              <span tuiBadge size="s" appearance="warning">
+                {{ 'Update available' | i18n }}
+              </span>
+            } @else if (service.newer(item)) {
+              <span tuiBadge size="s" appearance="neutral">
+                {{ 'Newer than the Core' | i18n }}
+              </span>
+            }
+            @if (item.update; as update) {
+              <div class="g-secondary">
+                @switch (update.state) {
+                  @case ('queued') {
+                    {{ 'Waiting to update' | i18n }}
+                  }
+                  @case ('updating') {
+                    {{ 'Updating to' | i18n }} v{{ update.target }}...
+                  }
+                  @case ('failed') {
+                    {{ 'Update failed' | i18n }}: {{ update.message }}
+                  }
+                }
+              </div>
             }
           </td>
           <td tuiTd>{{ item.port || '—' }}</td>
@@ -116,6 +139,15 @@ const BAND = { '2g': '2.4 GHz', '5g': '5 GHz', '6g': '6 GHz' } as const
                 size="s"
                 (click)="close()"
               >
+                @if (service.updatable(item)) {
+                  <button
+                    tuiOption
+                    iconEnd="@tui.download"
+                    (click)="service.update([item.name])"
+                  >
+                    {{ 'Update' | i18n }}
+                  </button>
+                }
                 <button
                   tuiOption
                   iconEnd="@tui.trash"
@@ -161,11 +193,6 @@ export class AccessPointsTable {
   private readonly i18n = inject(i18nPipe)
 
   readonly accessPoints = input<AccessPoint[]>([])
-
-  outdated(item: AccessPoint): boolean {
-    const core = this.service.coreVersion()
-    return !!item.version && !!core && item.version !== core
-  }
 
   plan(item: AccessPoint): { name: string; text: string }[] {
     return Object.entries(item.plan).map(([name, p]) => ({

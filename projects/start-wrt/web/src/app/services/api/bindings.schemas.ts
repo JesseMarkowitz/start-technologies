@@ -153,6 +153,13 @@ export const ApChannel: z.ZodObject<{
 }).meta({
   id: 'ApChannel',
 })
+export const ApUpdateState: z.ZodEnum<{
+  queued: 'queued'
+  updating: 'updating'
+  failed: 'failed'
+}> = /* @__PURE__ */ z.enum(['queued', 'updating', 'failed']).meta({
+  id: 'ApUpdateState',
+})
 
 /**
  * One automatic port use for the published-ports UI.
@@ -1343,6 +1350,25 @@ export const UnpairParams: z.ZodObject<{ name: z.ZodString }> =
   /* @__PURE__ */ object({ name: z.string() }).meta({
     id: 'UnpairParams',
   })
+export const UpdateParams: z.ZodObject<{
+  /**
+   * Access points to update; none means every one older than the Core.
+   */
+  names: z.ZodCodec<
+    z.ZodOptional<z.ZodArray<z.ZodString>>,
+    z.ZodArray<z.ZodString>
+  >
+}> = /* @__PURE__ */ object({
+  /**
+   * Access points to update; none means every one older than the Core.
+   */
+  names: wire(z.array(z.string()).optional(), z.array(z.string())).meta({
+    description:
+      'Access points to update; none means every one older than the Core.',
+  }),
+}).meta({
+  id: 'UpdateParams',
+})
 export const UpdateSystemParams: z.ZodObject<{
   registry: z.ZodCodec<
     z.ZodOptional<z.ZodNullable<z.ZodString>>,
@@ -1352,9 +1378,20 @@ export const UpdateSystemParams: z.ZodObject<{
     z.ZodOptional<z.ZodNullable<z.ZodString>>,
     z.ZodNullable<z.ZodString>
   >
+  /**
+   * On a Core, update its access points to the same version once it is back.
+   */
+  updateAccessPoints: z.ZodCodec<z.ZodOptional<z.ZodBoolean>, z.ZodBoolean>
 }> = /* @__PURE__ */ object({
   registry: wire(z.string().nullable().optional(), z.string().nullable()),
   targetVersion: wire(z.string().nullable().optional(), z.string().nullable()),
+  /**
+   * On a Core, update its access points to the same version once it is back.
+   */
+  updateAccessPoints: wire(z.boolean().optional(), z.boolean()).meta({
+    description:
+      'On a Core, update its access points to the same version once it is back.',
+  }),
 }).meta({
   id: 'UpdateSystemParams',
 })
@@ -1582,6 +1619,38 @@ export const ActivityListResponse: z.ZodObject<{
   total: z.int(),
 }).meta({
   id: 'ActivityListResponse',
+})
+
+/**
+ * An access point's firmware update (D17).
+ */
+export const ApUpdate: z.ZodObject<{
+  /**
+   * The version it is updating to: the Core's.
+   */
+  target: z.ZodString
+  state: typeof ApUpdateState
+  /**
+   * Why it failed.
+   */
+  message: z.ZodOptional<z.ZodNullable<z.ZodString>>
+}> = /* @__PURE__ */ object({
+  /**
+   * The version it is updating to: the Core's.
+   */
+  target: z.string().meta({
+    description: "The version it is updating to: the Core's.",
+  }),
+  state: ApUpdateState,
+  /**
+   * Why it failed.
+   */
+  message: z.string().nullable().optional().meta({
+    description: 'Why it failed.',
+  }),
+}).meta({
+  id: 'ApUpdate',
+  description: "An access point's firmware update (D17).",
 })
 export const BackupCreateRes: z.ZodObject<{
   guid: typeof Guid
@@ -2809,6 +2878,14 @@ export const PairedSatellite: z.ZodObject<{
    * sticker password to protect it with.
    */
   recoverySsid: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  /**
+   * It cannot read the Core's payload format and is dark until updated (D17).
+   */
+  needsUpdate: z.ZodCodec<z.ZodOptional<z.ZodBoolean>, z.ZodBoolean>
+  /**
+   * Its firmware update, from queued until it is back on the new version.
+   */
+  update: z.ZodOptional<z.ZodNullable<typeof ApUpdate>>
 }> = /* @__PURE__ */ object({
   /**
    * Admin-facing label (unique).
@@ -2908,6 +2985,20 @@ export const PairedSatellite: z.ZodObject<{
   recoverySsid: z.string().nullable().optional().meta({
     description:
       'The recovery network it broadcasts while dark (D22), when it has a\nsticker password to protect it with.',
+  }),
+  /**
+   * It cannot read the Core's payload format and is dark until updated (D17).
+   */
+  needsUpdate: wire(z.boolean().optional(), z.boolean()).meta({
+    description:
+      "It cannot read the Core's payload format and is dark until updated (D17).",
+  }),
+  /**
+   * Its firmware update, from queued until it is back on the new version.
+   */
+  update: ApUpdate.nullable().optional().meta({
+    description:
+      'Its firmware update, from queued until it is back on the new version.',
   }),
 }).meta({
   id: 'PairedSatellite',
@@ -3724,6 +3815,21 @@ export const Api = {
         unpair: {
           _PARAMS: /* @__PURE__ */ UnpairParams,
           _RETURN: /* @__PURE__ */ z.null(),
+        },
+        update: {
+          _PARAMS: /* @__PURE__ */ z.intersection(
+            z.intersection(
+              object({
+                format: wire(
+                  IoFormat.nullable().optional(),
+                  IoFormat.nullable(),
+                ),
+              }),
+              empty,
+            ),
+            UpdateParams,
+          ),
+          _RETURN: /* @__PURE__ */ z.array(z.string()),
         },
       },
     },
