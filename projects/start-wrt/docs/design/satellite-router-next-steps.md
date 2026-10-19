@@ -107,8 +107,8 @@ firmware behaviour are batch two. Removal of the routed code rides in this batch
   per AP on the Core (`sat_<name>`, listening on the backhaul zone, peer endpoint-less), one on
   the AP (`core`, dialling `[fe80::…%br-lan.4094]:<port>` with `nohostroute 1`), inside addresses
   `10.42.<n>.1/.2`. Adoption on the AP side writes the base layout (uplink into the bridge, no
-  WAN, no addresses) and the tunnel in one step. Until the tunnel carries management the AP's
-  backhaul zone also admits SSH, for the bench; batch two removes that rule.
+  WAN, no addresses) and the tunnel in one step. Batch one admitted SSH on the AP's backhaul for
+  the bench; batch two removed that rule.
 
 **Removal.** The routed list above, in the same batch, with the unit tests that covered it.
 Keep `satellite.rs`'s role, registry and `SyncSnapshot` skeleton.
@@ -137,33 +137,76 @@ link-local on the backhaul VLAN (`ssh -J wrt-bench root@fe80::…%br-lan.<tag>`)
 
 ## Batch two — management tunnel and trunk gating
 
-- ☐ **Management tunnel behaviour.** The tunnel batch one provisions gains: the Core initiating
-  the handshake, so an AP rebooting with a stale clock reopens it (design §21); the Core answering
-  NTP on its end (StartWRT runs no NTP server today); the AP's SSH-on-backhaul rule removed, with
-  management reaching the AP through the tunnel alone.
-- ☐ **Trunk gating (D18 shape).** A bridge-family nftables file shipped under `/usr/share/` and
-  loaded by an fw4 include the daemon writes on a Core with a trunk, holding a set of live trunk
-  ports; profile-tagged frames on a trunk port not in the set are dropped, both directions; the
-  backhaul VLAN is never gated. Needs `kmod-nft-bridge` (the probe above). The daemon adds a port
-  when the AP's tunnel handshakes and removes it when D18's liveness threshold lapses; an fw4
-  reload empties the set and the daemon re-affirms. Fallback if the module cannot be carried:
-  toggle the trunk's tagged memberships with `bridge vlan`, re-applied after every network
-  reload.
-- ☐ **AP fail-closed (D18).** An AP whose tunnel is down takes its SSIDs down and cuts its access
-  ports from the bridge; recovery mode (D22) is batch five.
-- ☐ Unpair revokes: tunnel removed both sides, the port leaves the live set, the AP's `coreKey`
-  cleared so it re-enters candidate mode. Same-name re-adoption replaces the registry entry and
-  the old tunnel (today it leaves the old tunnel and key behind).
-- ☐ Firmware reach: the Core forwards an AP's traffic only to the update source it is itself
-  configured with (`startwrt.system.registry`, `DEFAULT_REGISTRY_URL` as fallback) and the hosts
-  that registry's asset URLs name, and resolves those names for it. Everything else from the
-  tunnel is dropped. The Core-pushes-firmware option is deferred.
+Written and bench-tested 2026-10-18 (`liveness.rs`, `bridge_filters.rs`, `control.rs`,
+`update_reach.rs`; API contract §18). Passed on the two-router bench, both on the 1.2.1 image:
+adoption with the new AP layout (tunnel up in seconds, endpoint and port learned, `live`); NTP
+from the Core (2 ms offset), DNS through the Core, HTTPS to the registry allowed and HTTPS to
+anything else refused; the payload applied; fail-closed (`ip link set sat_s1 down` on the Core:
+the AP went dark 37 s later, the Core showed it dark, and 12 s after the link came back the AP
+resumed); `unpair` released the AP, which reappeared as a candidate on its backhaul and was
+adopted again with a new code, with the reach rules going and coming back. A laptop on the AP's
+LAN jack leased from the Core's guest profile and showed in the Core's device list as an
+Ethernet client; the same laptop on the AP's SSID with the Admin password leased from Admin.
+The first build flapped dark every few minutes (the keepalive starvation above); with the
+echoes, nine minutes of steady two-way traffic with no false dark, and the cut-and-restore
+cycle repeated: Core dark after 47 s, AP dark after 50 s, Core up 2 s after the link returned,
+AP resumed 20 s after. Not yet proven: the gate and the guard variant (no module in the 1.2.1
+image), the stale-clock reboot. The bench reached the released AP over link-local SSH through
+a rule added by hand on the AP for the test and removed after; the product path for that is
+recovery mode.
+
+- ☑ **Management tunnel behaviour.** Both ends can initiate: the AP listens on a fixed port
+  (51899, admitted on its backhaul zone) and the Core's liveness loop records the endpoint each
+  handshake comes from (`PairedSatellite.endpoint`) and re-pins it with `wg set` whenever the
+  kernel has none, so an AP rebooting with a stale clock is reached from the Core's side. The
+  Core's sysntpd serves (`system.ntp.enable_server`) and the AP's only time source is the Core's
+  tunnel address; the tunnel addresses share a /24 so the Core's dnsmasq (`localservice`) answers
+  the AP, whose resolver is the Core (`list dns` on the tunnel interface). The AP's default route
+  is the tunnel (`allowed_ips 0.0.0.0/0`). The SSH-on-backhaul rule is gone; the bench reaches
+  the AP as `ssh -J wrt-bench root@10.42.<n>.2`.
+- ☑ **Trunk gating (D18 shape).** `bridge_filters::sync_core` writes
+  `/usr/share/nftables.d/ruleset-pre/20-startwrt-trunk-gate.nft` on a Core with a trunk (at
+  boot and on every `ethernet.set`), a bridge table with an `ifname` set `live` and two
+  chains: `vlan id != 4094 iifname != @live drop` at prerouting and the `oifname` mirror at
+  postrouting. No trunk set is needed: on a Core, tagged frames exist on trunk ports alone.
+  The liveness loop (5 s) sends the AP an echo inside the tunnel every tick and judges it by
+  receive-counter progress or a fresh handshake within 45 s, maps its endpoint to a port through
+  `ip -6 neigh` and `bridge fdb`, and rewrites the set in one `nft -f` transaction every tick,
+  which also re-affirms after an fw4 reload. The echo is what makes the judgement sound: a bench
+  hour of flapping showed that WireGuard re-arms a peer's keepalive timer on every packet it
+  receives, so of two ends with the same interval one sends every keepalive and the other none,
+  and the sender sees silence. Without
+  `kmod-nft-bridge` (the bench K1 today) the gate is not written and a warning says the trunk
+  stays open; the `bridge vlan` fallback was not built, since the module is in the image config.
+- ☑ **AP fail-closed (D18).** The AP's loop watches its `core` tunnel the same way, echoing the
+  Core's tunnel address every tick. Dark: `wifi
+down` and `ip link set <port> down` on every bridge port that is neither the uplink nor a
+  radio. Resumed after the tunnel has held for 10 s: ports up, `wifi up`. The daemon starts in
+  an unknown state and acts on its first reading, so a boot without the Core goes dark within a
+  tick. The reconcile-before-resume half of D18 waits for batch three.
+- ☑ Unpair revokes: `satellite.unpair` sends `Release` over the tunnel to UDP 8720 at the AP's
+  tunnel address (`control.rs`; the AP trusts the Core's tunnel source address, which WireGuard's
+  cryptokey routing binds to the Core's key) and waits 2 s, then removes the Core end. The AP
+  removes its tunnel end, clears `coreKey`/`coreAddress`/`coreEndpoint`, keeps its base layout,
+  stays dark, and restarts the candidate listener on its backhaul VLAN. Same-name re-adoption
+  keeps the tunnel's addresses and port. The port leaves the live set at the next tick.
+- ☑ Firmware reach: fw4 ipsets `sat_reach4`/`sat_reach6` (`match dest_ip`, load files under
+  `/etc/startwrt/`, kept across sysupgrade) and two rules passing TCP 443 from zone
+  `satellites` to `wan` through them, written at adoption and removed at the last unpair. The
+  Core's loop resolves the registry host plus every asset URL host of the versions the registry
+  lists for it, every 10 minutes. Nothing else from the tunnel zone is forwarded. The AP's own
+  update code still reads `startwrt.system.registry` locally; the payload's `updateSource` takes
+  over in batch three.
+- ☐ Not built: the `bridge vlan` gating fallback; the AP's DHCP guard variant is written by
+  `sync_ap` only when the module loads, else the shipped guard is removed on the AP.
 
 **Bench exit.** The design §21 checks: gating with a managed switch and a wired client on it
 (unplug the AP, reboot the AP, reboot the Core, reload the firewall; time the close and the
 reopen); an AP rebooted with its clock set behind gets its tunnel back without help; a client
 behind the AP leases from the Core with the guard variant loaded and a rogue DHCP server behind
-the AP reaches no other client. Needs an image with `kmod-nft-bridge` flashed on both routers.
+the AP reaches no other client; `unpair` releases the AP and it is adopted again from its
+backhaul. Gating and the guard need an image with `kmod-nft-bridge` flashed on both routers;
+the rest runs on the 1.2.1 image.
 
 ## Batch three — config sync (D5)
 

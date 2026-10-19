@@ -383,11 +383,17 @@ pub async fn set<C: CtrlContext>(
                     // just briefly reassociate.  Run sequentially so it
                     // doesn't race the network reload.
                     let dhcp_changed = !affected_macs.is_empty();
+                    let has_trunk = ethernet.ports.values().any(|p| p.trunk);
                     tokio::spawn(async move {
                         let _ = crate::run_quiet_async(
                             tokio::process::Command::new("/etc/init.d/network").arg("reload"),
                         )
                         .await;
+                        // The gate file must be in place before fw4 reads its
+                        // include directory; the liveness loop fills the set.
+                        if let Err(e) = crate::bridge_filters::sync_core(has_trunk).await {
+                            tracing::error!("ethernet: trunk gate not written: {e}");
+                        }
                         let _ = crate::run_quiet_async(
                             tokio::process::Command::new("/etc/init.d/firewall").arg("reload"),
                         )

@@ -77,6 +77,9 @@ pub struct FirewallRule {
     pub enabled: Option<String>,
     #[uci(default)]
     pub set_mark: Option<String>,
+    /// A `config ipset` name the rule matches through.
+    #[uci(default)]
+    pub ipset: Option<String>,
     /// Published-port metadata: links IPv4 redirect + IPv6 rule
     #[uci(default)]
     pub _pp_id: Option<String>,
@@ -90,6 +93,37 @@ pub struct FirewallRule {
     /// the `wan` rule on every hairpin sync.
     #[uci(default)]
     pub _pp_hairpin: Option<String>,
+}
+
+/// fw4 `config ipset`: a named set a rule matches through its `ipset` option.
+#[derive(Debug, Clone, PartialEq, TypedSection, Default)]
+#[uci(ty = "ipset")]
+pub struct FirewallIpset {
+    pub name: String,
+    #[uci(default)]
+    pub family: Option<String>,
+    /// What the set matches, such as `dest_ip`.
+    #[uci(rename = "match", default)]
+    pub matches: Vec<String>,
+    /// One element per line, read at every firewall reload.
+    #[uci(default)]
+    pub loadfile: Option<String>,
+    #[uci(default)]
+    pub enabled: Option<bool>,
+}
+
+/// `system.ntp`: busybox sysntpd as a client and, with `enable_server`, a server.
+#[derive(Debug, Clone, PartialEq, TypedSection, Default)]
+#[uci(ty = "timeserver")]
+pub struct Timeserver {
+    #[uci(default)]
+    pub enabled: Option<bool>,
+    #[uci(default)]
+    pub enable_server: Option<bool>,
+    #[uci(default)]
+    pub server: Vec<String>,
+    #[uci(default)]
+    pub use_dhcp: Option<bool>,
 }
 
 #[derive(Debug, TypedSection, Default)]

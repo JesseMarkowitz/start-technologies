@@ -214,6 +214,10 @@ cat > "${FILES_DIR}/lib/upgrade/keep.d/startwrt" << 'KEEPEOF'
 # Paired satellites. The Core is the only holder of these records; losing them
 # orphans every satellite from the authoritative side.
 /etc/startwrt/satellites.json
+# What access points may reach through the Core. fw4 loads these at boot,
+# before the daemon refreshes them.
+/etc/startwrt/sat-reach4
+/etc/startwrt/sat-reach6
 KEEPEOF
 
 echo "==> Staging complete."

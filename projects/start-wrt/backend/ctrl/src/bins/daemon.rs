@@ -153,6 +153,22 @@ fn root_ca_response(
     }
 }
 
+async fn reload_firewall() {
+    let _ =
+        crate::run_quiet_async(tokio::process::Command::new("/etc/init.d/firewall").arg("reload"))
+            .await;
+}
+
+/// Writes or removes the Core's trunk gate for the trunks on record.
+async fn sync_trunk_gate() -> Result<bool, Error> {
+    let has_trunk = {
+        let arena = uciedit::Arena::new();
+        let cfgs = uciedit::parse_all("/etc/config", &arena, &["network"]).await?;
+        !crate::backhaul::trunk_ports(&cfgs).is_empty()
+    };
+    crate::bridge_filters::sync_core(has_trunk).await
+}
+
 /// Initialize SSL certificates. Returns true if HTTPS is ready.
 async fn init_ssl() -> bool {
     if let Err(e) = ssl::ensure_root_ca().await {
@@ -258,6 +274,13 @@ async fn inner_main() -> Result<(), Error> {
     } else if is_access_point {
         // An access point holds nothing the Core does not push (design D25).
         crate::update::check_pending_update_marker();
+        // The guard variant lives under /usr/share, which an upgrade replaces.
+        let uplink = crate::satellite::load_role().uplink.unwrap_or_default();
+        match crate::bridge_filters::sync_ap(&uplink).await {
+            Ok(true) => reload_firewall().await,
+            Ok(false) => {}
+            Err(e) => tracing::error!("Access point bridge filters not written: {e}"),
+        }
         app_state = AppState {
             flash_in_progress: Arc::new(AtomicBool::new(false)),
         };
@@ -301,6 +324,23 @@ async fn inner_main() -> Result<(), Error> {
         // firewall only when something changed.
         if let Err(e) = crate::published_ports::heal_hairpin("/etc/config").await {
             tracing::error!("Hairpin repair failed: {e}");
+        }
+        // The trunk gate lives under /usr/share, which an upgrade replaces.
+        match sync_trunk_gate().await {
+            Ok(true) => reload_firewall().await,
+            Ok(false) => {}
+            Err(e) => tracing::error!("Trunk gate not written: {e}"),
+        }
+        match crate::mgmt_tunnel::heal_core("/etc/config").await {
+            Ok(true) => {
+                reload_firewall().await;
+                let _ = crate::run_quiet_async(
+                    tokio::process::Command::new("/etc/init.d/sysntpd").arg("restart"),
+                )
+                .await;
+            }
+            Ok(false) => {}
+            Err(e) => tracing::error!("Access point tunnel repair failed: {e}"),
         }
         if let Err(e) = crate::vpn_client::heal_vpn_clients("/etc/config").await {
             tracing::error!("Outbound VPN repair failed: {e}");
@@ -410,6 +450,8 @@ async fn inner_main() -> Result<(), Error> {
     }
     if !setup_mode {
         crate::adoption::start();
+        crate::liveness::start();
+        crate::control::start();
     }
 
     let ctx = ServerContext {

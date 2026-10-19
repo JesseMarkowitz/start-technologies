@@ -44,6 +44,9 @@ pub struct WgInterface {
     /// the interface down over.
     #[uci(default)]
     pub nohostroute: Option<bool>,
+    /// Resolvers netifd hands the system while the interface is up.
+    #[uci(default)]
+    pub dns: Vec<String>,
 }
 
 impl WgInterface {
@@ -1870,6 +1873,7 @@ fn set_wireguard_interface(
             disabled: None,
             mtu: None,
             nohostroute: None,
+            dns: Vec::new(),
         };
         cfgs["network"].append(&new_iface, Some(interface_name))?;
     }
@@ -2036,6 +2040,7 @@ pub(crate) fn ensure_wireguard_firewall_rule_in_zone(
         dest_port: Some(port_str),
         proto: vec!["udp".to_string()],
         icmp_type: Vec::new(),
+        ipset: None,
         target: FirewallTarget::ACCEPT,
         family: None,
         enabled: None,

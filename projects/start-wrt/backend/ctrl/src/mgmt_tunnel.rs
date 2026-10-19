@@ -2,14 +2,21 @@
 //!
 //! One WireGuard interface per access point on the Core, one on the access
 //! point, over IPv6 link-local on the backhaul VLAN. It carries sync, status,
-//! liveness and logs; profile traffic never enters it.
+//! liveness, logs, the access point's time and its path to the update source;
+//! profile traffic never enters it.
+//!
+//! Both ends keep a persistent keepalive and both can initiate: the access
+//! point listens on a fixed port, and the Core re-pins the endpoint it last
+//! learned (`liveness`), so an access point that reboots with a stale clock,
+//! whose own handshakes the Core's replay check drops, is reached from the
+//! Core's side.
 
 use std::net::IpAddr;
 
-use uciedit::openwrt::FirewallTarget;
+use uciedit::openwrt::{FirewallRule, FirewallTarget, Timeserver};
 use uciedit::{Arena, Configs, Line, LineComment, Section, Token};
 
-use crate::backhaul::{ensure_udp_rule, ensure_zone, BACKHAUL_ZONE};
+use crate::backhaul::{ensure_udp_rule, ensure_zone, remove_zone, BACKHAUL_ZONE};
 use crate::prelude::*;
 use crate::vpn_server::WgInterface;
 
@@ -18,7 +25,12 @@ pub const CORE_ZONE: &str = "satellites";
 /// The access point's tunnel interface and zone.
 pub const AP_INTERFACE: &str = "core";
 pub const AP_ZONE: &str = "core";
+/// Below the Core's listen ports, which start at 51900.
+pub const AP_LISTEN_PORT: u16 = 51899;
 pub const KEEPALIVE: &str = "25";
+/// The tunnel's two addresses share a /24, which makes the access point a
+/// local client of the Core's dnsmasq.
+const PREFIX_LEN: u8 = 24;
 
 /// Linux `IFNAMSIZ` is 15 characters, so a registry name is at most 11.
 pub fn core_interface_name(satellite: &str) -> String {
@@ -29,6 +41,13 @@ fn host_cidr(addr: IpAddr) -> String {
     match addr {
         IpAddr::V4(a) => format!("{a}/32"),
         IpAddr::V6(a) => format!("{a}/128"),
+    }
+}
+
+fn tunnel_cidr(addr: IpAddr) -> String {
+    match addr {
+        IpAddr::V4(a) => format!("{a}/{PREFIX_LEN}"),
+        IpAddr::V6(a) => format!("{a}/64"),
     }
 }
 
@@ -46,8 +65,9 @@ fn set_interface(
     listen_port: Option<u16>,
     address: IpAddr,
     nohostroute: Option<bool>,
+    dns: Vec<String>,
 ) -> Result<(), Error> {
-    let addresses = vec![host_cidr(address)];
+    let addresses = vec![tunnel_cidr(address)];
     for section in &mut cfgs["network"].sections {
         if section.name().as_deref() != Some(name) {
             continue;
@@ -62,6 +82,7 @@ fn set_interface(
         wg.listen_port = listen_port;
         wg.addresses = addresses;
         wg.nohostroute = nohostroute;
+        wg.dns = dns;
         section.set(&wg)?;
         return Ok(());
     }
@@ -74,6 +95,7 @@ fn set_interface(
             disabled: None,
             mtu: None,
             nohostroute,
+            dns,
         },
         Some(name),
     )?;
@@ -140,8 +162,8 @@ pub struct CoreEnd<'p> {
     pub core_private_key: &'p str,
 }
 
-/// The Core's end: listens on the backhaul, roams to wherever the access
-/// point's handshake comes from.
+/// The Core's end: listens on the backhaul, learns the access point's
+/// endpoint from its first handshake.
 pub fn provision_core_end<'a>(
     cfgs: &mut Configs<'a>,
     arena: &'a Arena,
@@ -155,6 +177,7 @@ pub fn provision_core_end<'a>(
         Some(end.listen_port),
         end.core_addr,
         None,
+        Vec::new(),
     )?;
     set_peer(
         cfgs,
@@ -210,7 +233,10 @@ pub struct ApEnd<'p> {
     pub private_key: &'p str,
 }
 
-/// The access point's end dials the Core and never listens.
+/// The access point's end dials the Core, listens on [`AP_LISTEN_PORT`] for
+/// the Core's own initiations, and sends everything that is not on-link
+/// through the tunnel: the Core resolves for it and forwards only to the
+/// update source.
 pub fn provision_ap_end<'a>(
     cfgs: &mut Configs<'a>,
     arena: &'a Arena,
@@ -221,9 +247,10 @@ pub fn provision_ap_end<'a>(
         cfgs,
         AP_INTERFACE,
         end.private_key,
-        None,
+        Some(AP_LISTEN_PORT),
         end.satellite_addr,
         nohostroute,
+        vec![end.core_addr.to_string()],
     )?;
     set_peer(
         cfgs,
@@ -233,12 +260,98 @@ pub fn provision_ap_end<'a>(
             public_key: end.core_public_key,
             preshared_key: end.preshared_key,
             description: "core".to_string(),
-            allowed_ip: host_cidr(end.core_addr),
+            allowed_ip: match end.core_addr {
+                IpAddr::V4(_) => "0.0.0.0/0".to_string(),
+                IpAddr::V6(_) => "::/0".to_string(),
+            },
             endpoint: Some((end.core_endpoint_host, end.core_endpoint_port)),
         },
     )?;
     ensure_zone(cfgs, AP_ZONE, FirewallTarget::ACCEPT, AP_INTERFACE)?;
+    let (section, name) = wg_rule_names(AP_INTERFACE);
+    ensure_udp_rule(cfgs, &section, &name, BACKHAUL_ZONE, AP_LISTEN_PORT)?;
+    set_ap_timeserver(cfgs, end.core_addr)?;
     Ok(())
+}
+
+/// Removes the access point's end: the tunnel, its zone and listen rule, and
+/// the Core as its time source. The base layout stays.
+pub fn remove_ap_end(cfgs: &mut Configs) -> Result<(), Error> {
+    let peer_type = format!("wireguard_{AP_INTERFACE}");
+    cfgs["network"].sections.retain(|s| {
+        s.ty() != peer_type && !(s.ty() == "interface" && s.name().as_deref() == Some(AP_INTERFACE))
+    });
+    let (_, rule_name) = wg_rule_names(AP_INTERFACE);
+    cfgs["firewall"]
+        .sections
+        .retain(|s| !s.get::<FirewallRule>().is_ok_and(|r| r.name == rule_name));
+    remove_zone(cfgs, AP_ZONE);
+    set_timeserver(cfgs, |t| {
+        t.server.clear();
+        t.enabled = Some(false);
+    })
+}
+
+fn set_timeserver(cfgs: &mut Configs, edit: impl FnOnce(&mut Timeserver)) -> Result<(), Error> {
+    for section in &mut cfgs["system"].sections {
+        let Ok(mut ts) = section.get::<Timeserver>() else {
+            continue;
+        };
+        edit(&mut ts);
+        section.set(&ts)?;
+        return Ok(());
+    }
+    let mut ts = Timeserver::default();
+    edit(&mut ts);
+    cfgs["system"].append(&ts, Some("ntp"))?;
+    Ok(())
+}
+
+/// The Core answers NTP on every management tunnel.
+pub fn ensure_core_ntp_server(cfgs: &mut Configs) -> Result<(), Error> {
+    set_timeserver(cfgs, |t| {
+        t.enabled = Some(true);
+        t.enable_server = Some(true);
+    })
+}
+
+/// Boot heal on a Core with access points: the NTP server and the update
+/// reach, which a Core adopted under an earlier release lacks. Returns
+/// whether it wrote, which calls for a firewall reload and an NTP restart.
+pub async fn heal_core(uci_root: impl AsRef<std::path::Path>) -> Result<bool, Error> {
+    use uciedit::{dump_all, parse_all};
+
+    if crate::satellite::load_registry().is_empty() {
+        return Ok(false);
+    }
+    let arena = Arena::new();
+    let mut cfgs = parse_all(uci_root.as_ref(), &arena, &["firewall", "system"]).await?;
+    let before = (
+        cfgs["firewall"].sections.len(),
+        cfgs["system"]
+            .sections
+            .iter()
+            .find_map(|s| s.get::<Timeserver>().ok())
+            .and_then(|t| t.enable_server),
+    );
+    crate::update_reach::ensure_rules(&mut cfgs)?;
+    ensure_core_ntp_server(&mut cfgs)?;
+    let after = (cfgs["firewall"].sections.len(), Some(true));
+    if before == after {
+        return Ok(false);
+    }
+    dump_all(uci_root.as_ref(), cfgs).await?;
+    Ok(true)
+}
+
+/// The access point takes its time from the Core alone.
+fn set_ap_timeserver(cfgs: &mut Configs, core_addr: IpAddr) -> Result<(), Error> {
+    set_timeserver(cfgs, |t| {
+        t.enabled = Some(true);
+        t.enable_server = Some(false);
+        t.server = vec![core_addr.to_string()];
+        t.use_dhcp = Some(false);
+    })
 }
 
 #[cfg(test)]
@@ -250,6 +363,23 @@ mod tests {
     async fn fixture(dir: &std::path::Path) {
         tokio::fs::write(dir.join("network"), "").await.unwrap();
         tokio::fs::write(dir.join("firewall"), "").await.unwrap();
+        tokio::fs::write(
+            dir.join("system"),
+            "config timeserver 'ntp'\n\toption enabled '1'\n\toption enable_server '0'\n\
+             \tlist server '0.openwrt.pool.ntp.org'\n",
+        )
+        .await
+        .unwrap();
+    }
+
+    const ALL: &[&str] = &["network", "firewall", "system"];
+
+    fn timeserver(cfgs: &Configs) -> Timeserver {
+        cfgs["system"]
+            .sections
+            .iter()
+            .find_map(|s| s.get::<Timeserver>().ok())
+            .unwrap()
     }
 
     fn core_end() -> CoreEnd<'static> {
@@ -269,11 +399,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path()).await;
         let arena = Arena::new();
-        let mut cfgs = parse_all(dir.path(), &arena, &["network", "firewall"])
-            .await
-            .unwrap();
+        let mut cfgs = parse_all(dir.path(), &arena, ALL).await.unwrap();
         provision_core_end(&mut cfgs, &arena, &core_end()).unwrap();
         provision_core_end(&mut cfgs, &arena, &core_end()).unwrap();
+        ensure_core_ntp_server(&mut cfgs).unwrap();
+        let ts = timeserver(&cfgs);
+        assert_eq!(ts.enable_server, Some(true));
+        assert_eq!(ts.server.len(), 1, "the Core keeps its own sources");
         let ifaces = cfgs["network"]
             .sections
             .iter()
@@ -293,7 +425,7 @@ mod tests {
             .get::<WgInterface>()
             .unwrap();
         assert_eq!(wg.listen_port, Some(51900));
-        assert_eq!(wg.addresses, vec!["10.42.1.1/32"]);
+        assert_eq!(wg.addresses, vec!["10.42.1.1/24"]);
         let zone = cfgs["firewall"]
             .sections
             .iter()
@@ -331,9 +463,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path()).await;
         let arena = Arena::new();
-        let mut cfgs = parse_all(dir.path(), &arena, &["network", "firewall"])
-            .await
-            .unwrap();
+        let mut cfgs = parse_all(dir.path(), &arena, ALL).await.unwrap();
         let end = ApEnd {
             satellite_addr: "10.42.1.2".parse().unwrap(),
             core_addr: "10.42.1.1".parse().unwrap(),
@@ -352,7 +482,8 @@ mod tests {
             .get::<WgInterface>()
             .unwrap();
         assert_eq!(wg.nohostroute, Some(true));
-        assert_eq!(wg.listen_port, None);
+        assert_eq!(wg.listen_port, Some(AP_LISTEN_PORT));
+        assert_eq!(wg.dns, vec!["10.42.1.1"]);
         let peer = cfgs["network"]
             .sections
             .iter()
@@ -369,8 +500,32 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("allowed_ips") && text.contains("10.42.1.1/32"),
+            text.contains("allowed_ips") && text.contains("0.0.0.0/0"),
             "{text}"
         );
+        assert!(cfgs["firewall"].sections.iter().any(|s| {
+            s.get::<FirewallRule>().is_ok_and(|r| {
+                r.name == "Allow-WireGuard-core"
+                    && r.src == BACKHAUL_ZONE
+                    && r.dest_port.as_deref() == Some("51899")
+            })
+        }));
+        let ts = timeserver(&cfgs);
+        assert_eq!(ts.server, vec!["10.42.1.1"]);
+        assert_eq!(ts.use_dhcp, Some(false));
+
+        remove_ap_end(&mut cfgs).unwrap();
+        assert!(cfgs["network"]
+            .sections
+            .iter()
+            .all(|s| s.name().as_deref() != Some(AP_INTERFACE) && s.ty() != "wireguard_core"));
+        assert!(cfgs["firewall"].sections.iter().all(|s| {
+            !s.get::<FirewallRule>()
+                .is_ok_and(|r| r.name == "Allow-WireGuard-core")
+                && !s
+                    .get::<uciedit::openwrt::FirewallZone>()
+                    .is_ok_and(|z| z.name == AP_ZONE)
+        }));
+        assert!(timeserver(&cfgs).server.is_empty());
     }
 }

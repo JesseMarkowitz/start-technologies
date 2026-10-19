@@ -1144,8 +1144,10 @@ and its port closes, so a laptop on that cable reaches nothing, as D19 intends.
 - The shipped guard is staged into `/usr/share/nftables.d/ruleset-pre/`, which fw4 includes on
   every router. The AP variant therefore replaces it rather than sitting beside it: an AP never
   runs the Core's guard, across an fw4 reload included, and a router with no role keeps the
-  shipped behaviour. The AP's file follows D18's rule: shipped under `/usr/share/`, loaded by an
-  fw4 include the daemon writes only on an AP, never under `/etc/nftables.d`.
+  shipped behaviour. The AP's file follows D18's rule: the daemon writes it over the shipped
+  file's path under `/usr/share/nftables.d/`, which fw4 includes and an upgrade replaces, so the
+  daemon rewrites it at every boot; never under `/etc/nftables.d`. The trunk gate is written the
+  same way, beside the guard, only on a Core with a trunk.
 - An uplink exemption matches the ingress port, which is a bridge-family `meta` match. Probed on
   the bench 2026-10-18 on the shipped kernel: a bridge-family table, raw payload matches and
   `vlan id` load without `kmod-nft-bridge`; `iifname`, `ibrname` and `ibrpvid` all fail. The
@@ -1162,7 +1164,11 @@ and its port closes, so a laptop on that cable reaches nothing, as D19 intends.
   That link-local address is not stable either: a Linux bridge takes the lowest MAC among its
   ports, so when adoption moves the uplink into the AP's bridge the backhaul link-local can
   change (bench 2026-10-18: it did). The Core keeps the AP's tunnel public key and address, never
-  its link-local, and the Core end of the tunnel is endpoint-less for that reason.
+  its link-local: its end of the tunnel is configured endpoint-less and learns the AP's endpoint
+  from the AP's first handshake. The daemon records that endpoint and re-pins it into the kernel
+  after a reload or reboot, and the AP listens on a fixed port (51899), so the Core can initiate
+  a handshake itself: an AP that reboots with its clock behind sends initiations the Core's
+  replay check drops, and only the Core's own initiation reopens the tunnel.
 - The tunnel stays encrypted although profile traffic on the trunk is not: the sync payload holds
   every Wi-Fi password, and an unauthenticated configuration path would let anyone at the jack
   reconfigure the AP.
@@ -1239,7 +1245,10 @@ provisions the management tunnel instead of a per-profile one.
 
 Passed on the bench 2026-10-18 (batch one build): the Core's trunk carries every profile tagged
 and the backhaul untagged; the Core announces on the backhaul alone; adoption over the backhaul
-provisions both ends of the management tunnel.
+provisions both ends of the management tunnel. Same day, batch two build: D18 on both ends (the
+AP dark 37 s after the Core's tunnel interface went down, resumed 12 s after it came back; the
+Core's registry showing the same), time and DNS from the Core, the update source reachable and
+nothing else, release on unpair and re-adoption from the backhaul.
 
 **Review of D1–D24 under D25.**
 

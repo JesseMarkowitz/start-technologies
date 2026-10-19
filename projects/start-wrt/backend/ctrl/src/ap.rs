@@ -21,14 +21,9 @@ use crate::ethernet::{
 };
 use crate::prelude::*;
 use crate::satellite::{self, RouterRole, SyncSnapshot};
-use crate::utils::DeserializeStdin;
-use crate::CtrlContext;
 
 pub const ADMIN_VLAN: u16 = 1;
 const ADMIN_INTERFACE: &str = "lan";
-/// Management over the backhaul until the tunnel carries it.
-const SSH_RULE: &str = "Allow-SSH-Backhaul";
-const SSH_RULE_SECTION: &str = "allow_ssh_backhaul";
 
 fn bridge_name(cfgs: &Configs) -> Result<String, Error> {
     Ok(find_lan_bridge(cfgs)?
@@ -89,7 +84,9 @@ fn set_memberless_interface(cfgs: &mut Configs, name: &str, device: String) -> R
 }
 
 /// The uplink in the bridge, the backhaul VLAN untagged on it, the Admin VLAN
-/// tagged, no WAN, no addresses, no DHCP, no LAN or WAN zones.
+/// tagged, no WAN, no addresses, no DHCP, no LAN or WAN zones. The backhaul
+/// admits adoption and the tunnel; management reaches the access point
+/// through the tunnel alone.
 pub fn write_base_layout(cfgs: &mut Configs, uplink: &str) -> Result<(), Error> {
     let bridge = bridge_name(cfgs)?;
     let mut found = false;
@@ -158,36 +155,6 @@ pub fn write_base_layout(cfgs: &mut Configs, uplink: &str) -> Result<(), Error> 
         backhaul::CANDIDATE_RULE,
         BACKHAUL_ZONE,
         crate::adoption::PORT,
-    )?;
-    ensure_tcp_rule(cfgs, SSH_RULE_SECTION, SSH_RULE, BACKHAUL_ZONE, 22)?;
-    Ok(())
-}
-
-fn ensure_tcp_rule(
-    cfgs: &mut Configs,
-    section_name: &str,
-    rule_name: &str,
-    zone: &str,
-    port: u16,
-) -> Result<(), Error> {
-    use uciedit::openwrt::FirewallRule;
-    if cfgs["firewall"]
-        .sections
-        .iter()
-        .any(|s| s.get::<FirewallRule>().is_ok_and(|r| r.name == rule_name))
-    {
-        return Ok(());
-    }
-    cfgs["firewall"].append(
-        &FirewallRule {
-            name: rule_name.to_string(),
-            src: zone.to_string(),
-            dest_port: Some(port.to_string()),
-            proto: vec!["tcp".to_string()],
-            target: FirewallTarget::ACCEPT,
-            ..Default::default()
-        },
-        Some(section_name),
     )?;
     Ok(())
 }
@@ -384,37 +351,50 @@ fn write_wireless(cfgs: &mut Configs, snapshot: &SyncSnapshot) -> Result<(), Err
     Ok(())
 }
 
-/// Applies a payload the Core authored. The bench feeds it by hand until the
-/// Core pushes it over the management tunnel.
+/// Whether a payload may be applied over what was applied last: never an
+/// older one, and the same one has nothing to do.
+pub fn accept_generation(applied: u64, incoming: u64) -> Result<bool, Error> {
+    use std::cmp::Ordering::*;
+    match incoming.cmp(&applied) {
+        Less => Err(Error::new(
+            eyre!("generation {incoming} is older than the applied {applied}"),
+            ErrorKind::InvalidRequest,
+        )),
+        Equal => Ok(false),
+        Greater => Ok(true),
+    }
+}
+
+/// Applies a payload the Core pushed over the tunnel (D5).
 #[instrument(skip_all)]
-pub async fn apply<C: CtrlContext>(
-    ctx: C,
-    DeserializeStdin(snapshot): DeserializeStdin<SyncSnapshot>,
-) -> Result<(), Error> {
+pub async fn apply_snapshot(snapshot: &SyncSnapshot) -> Result<(), Error> {
     let role = satellite::load_role();
-    if role.role != RouterRole::Satellite {
+    if role.role != RouterRole::Satellite || role.core_key.is_none() {
         return Err(Error::new(
-            eyre!("this operation is only available on an access point"),
+            eyre!("this router is not an adopted access point"),
             ErrorKind::Authorization,
         ));
     }
     let Some(uplink) = role.uplink else {
         return Err(Error::new(
-            eyre!("this access point has not been adopted"),
+            eyre!("this access point has no uplink on record"),
             ErrorKind::Uninitialized,
         ));
     };
+    if !accept_generation(role.generation, snapshot.generation)? {
+        return Ok(());
+    }
     let mut retries = 4;
     loop {
         let arena = Arena::new();
         let mut cfgs = parse_all(
-            ctx.uci_root(),
+            "/etc/config",
             &arena,
             &["network", "firewall", "dhcp", "wireless"],
         )
         .await?;
-        write_snapshot(&mut cfgs, &snapshot, &uplink)?;
-        match dump_all(ctx.uci_root(), cfgs).await {
+        write_snapshot(&mut cfgs, snapshot, &uplink)?;
+        match dump_all("/etc/config", cfgs).await {
             Err(uciedit::Error::Conflict { .. }) if retries > 0 => {
                 retries -= 1;
                 continue;
@@ -424,9 +404,7 @@ pub async fn apply<C: CtrlContext>(
         }
     }
     satellite::persist_generation(snapshot.generation).await?;
-    if ctx.effectful() {
-        reload_all().await;
-    }
+    reload_all().await;
     crate::activity::log(
         "satellite",
         "apply",
@@ -560,10 +538,8 @@ config dhcp 'lan'\n\toption interface 'lan'\n\toption start '100'\n\toption limi
             "{fw}"
         );
         assert!(fw.contains("name 'backhaul'"), "{fw}");
-        assert!(
-            fw.contains("dest_port '8719'") && fw.contains("dest_port '22'"),
-            "{fw}"
-        );
+        assert!(fw.contains("dest_port '8719'"), "{fw}");
+        assert!(!fw.contains("dest_port '22'"), "{fw}");
     }
 
     #[tokio::test]
@@ -600,6 +576,13 @@ config dhcp 'lan'\n\toption interface 'lan'\n\toption start '100'\n\toption limi
         assert!(wl.contains("option key 'guestpassword'"), "{wl}");
         assert_eq!(wl.matches("config wifi-vlan").count(), 1, "{wl}");
         assert_eq!(wl.matches("config wifi-station").count(), 2, "{wl}");
+    }
+
+    #[test]
+    fn generations_only_move_forward() {
+        assert!(accept_generation(3, 4).unwrap());
+        assert!(!accept_generation(3, 3).unwrap());
+        assert!(accept_generation(3, 2).is_err());
     }
 
     #[tokio::test]

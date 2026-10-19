@@ -1,15 +1,16 @@
 //! Satellite adoption over the backhaul (design D21, D24).
 //!
-//! A Core announces itself on every LAN bridge with an IPv6 link-local
-//! multicast. A candidate — a router in the `satellite` role that has not yet
-//! pinned a Core — answers on its WAN port with its identity, which puts it on
+//! A Core announces itself on the backhaul VLAN of its trunk ports with an
+//! IPv6 link-local multicast. A candidate — a router in the `satellite` role
+//! that has not yet pinned a Core — answers with its identity on its WAN port,
+//! or on its backhaul VLAN once it has been an access point, which puts it on
 //! the Core's candidate list. The admin then picks it and types its secret at
 //! the Core; the [`proof`] exchange runs over the same link-local segment and,
 //! on success, both sides provision the tunnel the Core dictated with the keys
 //! the exchange pinned and the pre-shared key it derived. Nothing here crosses a
 //! router: link-local traffic is confined to one segment.
 //!
-//! The candidate accepts datagrams from its WAN port only; the Core accepts
+//! The candidate accepts datagrams from that one port; the Core accepts
 //! offers only from a candidate it has sent a hello to.
 
 mod proof;
@@ -336,6 +337,18 @@ fn next_free_listen_port(cfgs: &Configs<'_>, base: u16) -> u16 {
         .unwrap_or(base)
 }
 
+/// The Core's tunnel address and listen port for `satellite`, if provisioned.
+fn existing_core_end(cfgs: &Configs<'_>, satellite: &str) -> Option<(String, u16)> {
+    let interface = crate::mgmt_tunnel::core_interface_name(satellite);
+    let wg = cfgs["network"]
+        .sections
+        .iter()
+        .find(|s| s.name().as_deref() == Some(interface.as_str()))
+        .and_then(|s| s.get::<crate::vpn_server::WgInterface>().ok())?;
+    let addr = wg.addresses.first()?.split('/').next()?.to_string();
+    Some((addr, wg.listen_port?))
+}
+
 fn next_transit_index(registry: &[PairedSatellite]) -> u8 {
     registry
         .iter()
@@ -363,27 +376,32 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
         }
     }
 
-    let (listen_port, registry) = {
+    let registry_guard = satellite::REGISTRY_LOCK.lock().await;
+    let registry = satellite::load_registry();
+    // A same-name re-adoption keeps the tunnel's addresses and port.
+    let existing = registry.iter().find(|s| s.name == p.name);
+    let (listen_port, core_existing) = {
         let arena = Arena::new();
         let cfgs = parse_all("/etc/config", &arena, &["network"]).await?;
+        let current = existing.and_then(|_| existing_core_end(&cfgs, &p.name));
         let port = p
             .listen_port
+            .or_else(|| current.as_ref().map(|c| c.1))
             .unwrap_or_else(|| next_free_listen_port(&cfgs, LISTEN_PORT_BASE));
-        (port, satellite::load_registry())
+        (port, current.map(|c| c.0))
     };
-    let index = next_transit_index(&registry);
-    let (core_default, sat_default) = satellite::transit_addrs(index);
+    let (core_default, sat_default) = match (existing, core_existing) {
+        (Some(e), Some(core)) => (core, e.mgmt_address.clone()),
+        _ => {
+            let (c, s) = satellite::transit_addrs(next_transit_index(&registry));
+            (c.to_string(), s.to_string())
+        }
+    };
     let tunnel = TunnelSpec {
         satellite: p.name.clone(),
         core_listen_port: listen_port,
-        core_tunnel_addr: p
-            .core_tunnel_addr
-            .clone()
-            .unwrap_or_else(|| core_default.to_string()),
-        satellite_tunnel_addr: p
-            .satellite_tunnel_addr
-            .clone()
-            .unwrap_or_else(|| sat_default.to_string()),
+        core_tunnel_addr: p.core_tunnel_addr.clone().unwrap_or(core_default),
+        satellite_tunnel_addr: p.satellite_tunnel_addr.clone().unwrap_or(sat_default),
     };
 
     let core_key = WgKey::generate();
@@ -455,7 +473,7 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
     let satellite_addr = parse_ip(&tunnel.satellite_tunnel_addr)?;
     {
         let arena = Arena::new();
-        let mut cfgs = parse_all("/etc/config", &arena, &["network", "firewall"]).await?;
+        let mut cfgs = parse_all("/etc/config", &arena, &["network", "firewall", "system"]).await?;
         crate::mgmt_tunnel::provision_core_end(
             &mut cfgs,
             &arena,
@@ -469,14 +487,20 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
                 core_private_key: &core_private_key,
             },
         )?;
+        crate::mgmt_tunnel::ensure_core_ntp_server(&mut cfgs)?;
+        crate::update_reach::ensure_rules(&mut cfgs)?;
         dump_all("/etc/config", cfgs).await?;
     }
-    let _ =
-        crate::run_quiet_async(tokio::process::Command::new("/etc/init.d/network").arg("reload"))
-            .await;
-    let _ =
-        crate::run_quiet_async(tokio::process::Command::new("/etc/init.d/firewall").arg("reload"))
-            .await;
+    for (service, action) in [
+        ("network", "reload"),
+        ("firewall", "reload"),
+        ("sysntpd", "restart"),
+    ] {
+        let _ = crate::run_quiet_async(
+            tokio::process::Command::new(format!("/etc/init.d/{service}")).arg(action),
+        )
+        .await;
+    }
     let mut registry = registry;
     satellite::remove_satellite(&mut registry, &p.name);
     satellite::add_satellite(
@@ -485,11 +509,11 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
             name: p.name.clone(),
             public_key: satellite_key.clone(),
             mgmt_address: tunnel.satellite_tunnel_addr.clone(),
-            generation_applied: 0,
-            last_seen: 0,
+            ..Default::default()
         },
     )?;
     satellite::persist_registry(&registry).await?;
+    drop(registry_guard);
     crate::activity::log(
         "satellite",
         "adopt",
@@ -511,7 +535,7 @@ struct CandidateState {
     has_sticker: bool,
 }
 
-static CANDIDATE: OnceLock<CandidateState> = OnceLock::new();
+static CANDIDATE: Mutex<Option<CandidateState>> = Mutex::new(None);
 
 /// What the pre-adoption page shows.
 #[derive(Debug, Serialize, Deserialize, visit_rs::VisitFields)]
@@ -528,7 +552,7 @@ rpc_toolkit::reflect_ts!(CodeResponse);
 #[instrument(skip_all)]
 pub async fn code(_ctx: ServerContext) -> Result<CodeResponse, Error> {
     let adopted = satellite::load_role().core_key.is_some();
-    Ok(match CANDIDATE.get() {
+    Ok(match &*CANDIDATE.lock().unwrap() {
         Some(s) if !adopted => CodeResponse {
             waiting: true,
             has_sticker: s.has_sticker,
@@ -550,6 +574,28 @@ fn wan_device(cfgs: &Configs<'_>) -> Option<String> {
         .and_then(|s| s.get::<NetworkInterface>().ok())
         .map(|i| i.device)
         .filter(|d| !d.is_empty())
+}
+
+/// Where a candidate listens: its WAN port on a fresh router, the backhaul
+/// VLAN on one that has been an access point and was released. The second
+/// is `false`: the backhaul zone already admits adoption.
+fn candidate_device(cfgs: &Configs<'_>) -> Option<(String, bool)> {
+    if let Some(wan) = wan_device(cfgs) {
+        return Some((wan, true));
+    }
+    let has_backhaul = cfgs["network"]
+        .sections
+        .iter()
+        .any(|s| s.name().as_deref() == Some(crate::backhaul::BACKHAUL_INTERFACE));
+    if !has_backhaul {
+        return None;
+    }
+    let bridge = crate::ethernet::find_lan_bridge(cfgs)
+        .ok()
+        .flatten()
+        .map(|d| d.name)
+        .unwrap_or_else(|| crate::ethernet::DEFAULT_LAN_BRIDGE.to_string());
+    Some((backhaul_device(&bridge), false))
 }
 
 fn ensure_candidate_firewall_rule(cfgs: &mut Configs<'_>) -> Result<bool, Error> {
@@ -586,16 +632,20 @@ async fn run_candidate() -> Result<(), Error> {
     let wan = {
         let arena = Arena::new();
         let mut cfgs = parse_all("/etc/config", &arena, &["network", "firewall"]).await?;
-        let wan = wan_device(&cfgs)
-            .ok_or_else(|| Error::new(eyre!("no WAN device configured"), ErrorKind::Network))?;
-        if ensure_candidate_firewall_rule(&mut cfgs)? {
+        let (device, on_wan) = candidate_device(&cfgs).ok_or_else(|| {
+            Error::new(
+                eyre!("neither a WAN device nor a backhaul is configured"),
+                ErrorKind::Network,
+            )
+        })?;
+        if on_wan && ensure_candidate_firewall_rule(&mut cfgs)? {
             dump_all("/etc/config", cfgs).await?;
             let _ = crate::run_quiet_async(
                 tokio::process::Command::new("/etc/init.d/firewall").arg("reload"),
             )
             .await;
         }
-        wan
+        device
     };
     let socket = bind().await?;
     let key = WgKey::generate();
@@ -606,7 +656,7 @@ async fn run_candidate() -> Result<(), Error> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         has_sticker,
     };
-    let _ = CANDIDATE.set(CandidateState { code, has_sticker });
+    *CANDIDATE.lock().unwrap() = Some(CandidateState { code, has_sticker });
     tracing::info!("adoption: waiting for a Core on {wan}, port {PORT}");
 
     let mut buf = vec![0u8; MAX_DATAGRAM];
@@ -692,11 +742,13 @@ async fn adopt_self(key: &WgKey, by: &proof::AdoptedBy, core_ip: &Ipv6Addr) -> R
         let mut cfgs = parse_all(
             "/etc/config",
             &arena,
-            &["network", "firewall", "dhcp", "wireless"],
+            &["network", "firewall", "dhcp", "wireless", "system"],
         )
         .await?;
+        // A released access point has no WAN; its uplink is on record.
         uplink = crate::ap::uplink_from_wan(&cfgs)
-            .ok_or_else(|| Error::new(eyre!("no WAN device configured"), ErrorKind::Network))?;
+            .or_else(|| satellite::load_role().uplink)
+            .ok_or_else(|| Error::new(eyre!("no uplink port known"), ErrorKind::Network))?;
         crate::ap::write_base_layout(&mut cfgs, &uplink)?;
         let bridge = crate::ethernet::find_lan_bridge(&cfgs)?
             .map(|d| d.name)
@@ -720,9 +772,19 @@ async fn adopt_self(key: &WgKey, by: &proof::AdoptedBy, core_ip: &Ipv6Addr) -> R
     let mut role = satellite::load_role();
     role.core_endpoint = Some(endpoint);
     role.core_key = Some(b64(by.core_key.as_bytes()));
-    role.uplink = Some(uplink);
+    role.core_address = Some(t.core_tunnel_addr.clone());
+    role.uplink = Some(uplink.clone());
+    role.generation = 0;
     satellite::persist_role(&role).await?;
+    if let Err(e) = crate::bridge_filters::sync_ap(&uplink).await {
+        tracing::error!("adoption: bridge filters not written: {e}");
+    }
     crate::ap::reload_all().await;
+    let _ =
+        crate::run_quiet_async(tokio::process::Command::new("/etc/init.d/sysntpd").arg("restart"))
+            .await;
+    crate::liveness::start();
+    crate::control::start();
     Ok(())
 }
 
@@ -735,8 +797,7 @@ mod tests {
             name: "s".into(),
             public_key: "k".into(),
             mgmt_address: addr.into(),
-            generation_applied: 0,
-            last_seen: 0,
+            ..Default::default()
         }
     }
 

@@ -927,6 +927,19 @@ export const PairedSatellite: z.ZodObject<{
    * Unix seconds of last successful contact (0 = never).
    */
   lastSeen: z.ZodCodec<z.ZodOptional<z.ZodInt>, z.ZodInt>
+  /**
+   * Where its tunnel last handshaked from, as `wg` prints it; the Core
+   * re-pins it after a reload so it can initiate.
+   */
+  endpoint: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  /**
+   * The Core's trunk port its tunnel comes through, while it is live.
+   */
+  port: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  /**
+   * Its tunnel is receiving traffic (D18).
+   */
+  live: z.ZodCodec<z.ZodOptional<z.ZodBoolean>, z.ZodBoolean>
 }> = /* @__PURE__ */ object({
   /**
    * Admin-facing label (unique).
@@ -959,6 +972,27 @@ export const PairedSatellite: z.ZodObject<{
    */
   lastSeen: wire(z.int().optional(), z.int()).meta({
     description: 'Unix seconds of last successful contact (0 = never).',
+  }),
+  /**
+   * Where its tunnel last handshaked from, as `wg` prints it; the Core
+   * re-pins it after a reload so it can initiate.
+   */
+  endpoint: z.string().nullable().optional().meta({
+    description:
+      'Where its tunnel last handshaked from, as `wg` prints it; the Core\nre-pins it after a reload so it can initiate.',
+  }),
+  /**
+   * The Core's trunk port its tunnel comes through, while it is live.
+   */
+  port: z.string().nullable().optional().meta({
+    description:
+      "The Core's trunk port its tunnel comes through, while it is live.",
+  }),
+  /**
+   * Its tunnel is receiving traffic (D18).
+   */
+  live: wire(z.boolean().optional(), z.boolean()).meta({
+    description: 'Its tunnel is receiving traffic (D18).',
   }),
 }).meta({
   id: 'PairedSatellite',
@@ -2082,6 +2116,10 @@ export const RoleMarker: z.ZodObject<{
    */
   coreKey: z.ZodOptional<z.ZodNullable<z.ZodString>>
   /**
+   * On a satellite, the Core's address inside the management tunnel.
+   */
+  coreAddress: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  /**
    * On a satellite, the port that carries the trunk to the Core.
    */
   uplink: z.ZodOptional<z.ZodNullable<z.ZodString>>
@@ -2105,6 +2143,13 @@ export const RoleMarker: z.ZodObject<{
   coreKey: z.string().nullable().optional().meta({
     description:
       "On a satellite, the Core's WireGuard public key (base64) pinned at\nadoption. A satellite with none waits to be adopted.",
+  }),
+  /**
+   * On a satellite, the Core's address inside the management tunnel.
+   */
+  coreAddress: z.string().nullable().optional().meta({
+    description:
+      "On a satellite, the Core's address inside the management tunnel.",
   }),
   /**
    * On a satellite, the port that carries the trunk to the Core.
@@ -2173,6 +2218,21 @@ export const StatusResponse: z.ZodObject<{
     z.ZodNullable<z.ZodString>
   >
   generation: z.ZodInt
+  /**
+   * On an access point: its management tunnel is receiving traffic.
+   */
+  tunnelLive: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodBoolean>>,
+    z.ZodNullable<z.ZodBoolean>
+  >
+  /**
+   * On an access point: SSIDs down and access ports cut (D18); unset
+   * before the first reading.
+   */
+  dark: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodBoolean>>,
+    z.ZodNullable<z.ZodBoolean>
+  >
   satelliteCount: z.ZodInt
   satellites: z.ZodArray<typeof PairedSatellite>
 }> = /* @__PURE__ */ object({
@@ -2180,6 +2240,24 @@ export const StatusResponse: z.ZodObject<{
   coreEndpoint: wire(z.string().nullable().optional(), z.string().nullable()),
   uplink: wire(z.string().nullable().optional(), z.string().nullable()),
   generation: z.int(),
+  /**
+   * On an access point: its management tunnel is receiving traffic.
+   */
+  tunnelLive: wire(
+    z.boolean().nullable().optional(),
+    z.boolean().nullable(),
+  ).meta({
+    description:
+      'On an access point: its management tunnel is receiving traffic.',
+  }),
+  /**
+   * On an access point: SSIDs down and access ports cut (D18); unset
+   * before the first reading.
+   */
+  dark: wire(z.boolean().nullable().optional(), z.boolean().nullable()).meta({
+    description:
+      'On an access point: SSIDs down and access ports cut (D18); unset\nbefore the first reading.',
+  }),
   satelliteCount: z.int(),
   satellites: z.array(PairedSatellite),
 }).meta({

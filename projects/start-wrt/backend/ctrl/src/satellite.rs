@@ -7,6 +7,7 @@ use std::path::Path;
 
 use clap::Parser;
 use rpc_toolkit::{from_fn_async, from_fn_async_local, HandlerExt, ParentHandler};
+
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
@@ -43,6 +44,9 @@ pub struct RoleMarker {
     /// adoption. A satellite with none waits to be adopted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_key: Option<String>,
+    /// On a satellite, the Core's address inside the management tunnel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_address: Option<String>,
     /// On a satellite, the port that carries the trunk to the Core.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uplink: Option<String>,
@@ -53,7 +57,7 @@ pub struct RoleMarker {
 rpc_toolkit::reflect_ts!(RoleMarker);
 
 /// One access point the Core has adopted (`/etc/startwrt/satellites.json`).
-#[derive(Clone, Debug, Serialize, Deserialize, visit_rs::VisitFields)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 pub struct PairedSatellite {
     /// Admin-facing label (unique).
@@ -68,8 +72,70 @@ pub struct PairedSatellite {
     /// Unix seconds of last successful contact (0 = never).
     #[serde(default)]
     pub last_seen: i64,
+    /// Where its tunnel last handshaked from, as `wg` prints it; the Core
+    /// re-pins it after a reload so it can initiate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// The Core's trunk port its tunnel comes through, while it is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
+    /// Its tunnel is receiving traffic (D18).
+    #[serde(default)]
+    pub live: bool,
+    /// Access ports by name: the profile VLAN each carries untagged, or none.
+    /// Set by the admin (`set-ports`); carried in every payload.
+    #[serde(default)]
+    pub ports: BTreeMap<String, Option<u16>>,
+    /// What it reported last: its ports and radios.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<Inventory>,
 }
 rpc_toolkit::reflect_ts!(PairedSatellite);
+
+/// An access point's hardware as it reports it (design §21: no assumed port
+/// count; radios from the kernel, not from its wireless config).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+pub struct Inventory {
+    pub ports: Vec<PortInfo>,
+    pub radios: Vec<RadioInfo>,
+}
+rpc_toolkit::reflect_ts!(Inventory);
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+pub struct PortInfo {
+    pub name: String,
+    pub uplink: bool,
+    pub link: bool,
+}
+rpc_toolkit::reflect_ts!(PortInfo);
+
+/// A radio by its wireless-config name, with the bands its phy serves.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+pub struct RadioInfo {
+    pub name: String,
+    pub phy: String,
+    /// `2g`, `5g`, `6g`.
+    pub bands: Vec<String>,
+}
+rpc_toolkit::reflect_ts!(RadioInfo);
+
+/// What an access point answers over the tunnel.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelStatus {
+    /// The generation it applied last.
+    pub generation: u64,
+    pub tunnel_live: bool,
+    pub dark: Option<bool>,
+    pub inventory: Inventory,
+}
+rpc_toolkit::reflect_ts!(TunnelStatus);
+
+/// Serializes every read-modify-write of the registry across the daemon.
+pub(crate) static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// What an access point needs from its Core (D5). `generation` is monotonic;
 /// an access point rejects a snapshot older than the one it applied.
@@ -172,8 +238,10 @@ pub fn satellite<C: CtrlContext>() -> ParentHandler<C> {
                 .with_call_remote::<CliContext>(),
         )
         .subcommand(
-            "apply",
-            from_fn_async_local(crate::ap::apply::<C>).no_display(),
+            "set-ports",
+            from_fn_async(set_ports)
+                .no_display()
+                .with_call_remote::<CliContext>(),
         )
         .subcommand("adoption", crate::adoption::adoption::<C>())
 }
@@ -231,27 +299,43 @@ pub struct UnpairParams {
 }
 rpc_toolkit::reflect_ts!(UnpairParams);
 
-/// Forgets an access point and takes down the Core's end of its tunnel.
+/// Forgets an access point: tells it so over the tunnel, then takes down
+/// the Core's end. The access point goes back to waiting for a Core; the
+/// trunk port closes when its tunnel stops.
 #[instrument(skip_all)]
 pub async fn unpair<C: CtrlContext>(
     ctx: C,
     UnpairParams { name }: UnpairParams,
 ) -> Result<(), Error> {
     ensure_core()?;
+    let _guard = REGISTRY_LOCK.lock().await;
     let mut registry = load_registry();
-    if !remove_satellite(&mut registry, &name) {
+    let Some(sat) = registry.iter().find(|s| s.name == name).cloned() else {
         return Err(Error::new(
             eyre!("no adopted satellite named '{name}'"),
             ErrorKind::NotFound,
         ));
-    }
+    };
+    remove_satellite(&mut registry, &name);
+    let released = if ctx.effectful() {
+        match sat.mgmt_address.parse() {
+            Ok(addr) => crate::control::release(addr).await.unwrap_or(false),
+            Err(_) => false,
+        }
+    } else {
+        false
+    };
     {
         let arena = uciedit::Arena::new();
         let mut cfgs = uciedit::parse_all(ctx.uci_root(), &arena, &["network", "firewall"]).await?;
         crate::mgmt_tunnel::remove_core_end(&mut cfgs, &name)?;
+        if registry.is_empty() {
+            crate::update_reach::remove_rules(&mut cfgs);
+        }
         uciedit::dump_all(ctx.uci_root(), cfgs).await?;
     }
     persist_json(REGISTRY_PATH, &registry).await?;
+    drop(_guard);
     if ctx.effectful() {
         let _ = crate::run_quiet_async(
             tokio::process::Command::new("/etc/init.d/network").arg("reload"),
@@ -266,7 +350,103 @@ pub async fn unpair<C: CtrlContext>(
         "satellite",
         "unpaired",
         true,
-        &format!("Removed satellite '{name}'"),
+        &format!(
+            "Removed satellite '{name}'{}",
+            if released {
+                ""
+            } else {
+                " (it did not answer; it learns from its tunnel staying down)"
+            }
+        ),
+        None,
+    );
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize, Parser, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+#[command(rename_all = "kebab-case")]
+pub struct SetPortsParams {
+    name: String,
+    /// Access port assignments as `<port>=<vlan>` or `<port>=off`.
+    #[clap(value_parser = parse_port_assignment)]
+    ports: Vec<(String, Option<u16>)>,
+}
+rpc_toolkit::reflect_ts!(SetPortsParams);
+
+fn parse_port_assignment(s: &str) -> Result<(String, Option<u16>), String> {
+    let (port, vlan) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected <port>=<vlan|off>, got '{s}'"))?;
+    let vlan = match vlan {
+        "off" | "none" | "" => None,
+        v => Some(v.parse().map_err(|_| format!("not a VLAN: '{v}'"))?),
+    };
+    Ok((port.to_string(), vlan))
+}
+
+/// Assigns an access point's ports to profiles. The next sync carries it.
+#[instrument(skip_all)]
+pub async fn set_ports(
+    ctx: ServerContext,
+    SetPortsParams { name, ports }: SetPortsParams,
+) -> Result<(), Error> {
+    ensure_core()?;
+    let tags: std::collections::BTreeSet<u16> = {
+        let arena = uciedit::Arena::new();
+        let cfgs = uciedit::parse_all(ctx.uci_root(), &arena, &["startwrt"]).await?;
+        crate::profiles::list_config(ctx.clone(), &cfgs)?
+            .into_iter()
+            .map(|p| p.vlan_tag)
+            .collect()
+    };
+    for (port, vlan) in &ports {
+        if let Some(v) = vlan {
+            if !tags.contains(v) {
+                return Err(Error::new(
+                    eyre!("port {port}: no profile has VLAN {v}"),
+                    ErrorKind::InvalidRequest,
+                ));
+            }
+        }
+    }
+    let _guard = REGISTRY_LOCK.lock().await;
+    let mut registry = load_registry();
+    let sat = registry
+        .iter_mut()
+        .find(|s| s.name == name)
+        .ok_or_else(|| {
+            Error::new(
+                eyre!("no adopted satellite named '{name}'"),
+                ErrorKind::NotFound,
+            )
+        })?;
+    if let Some(inv) = &sat.inventory {
+        for (port, _) in &ports {
+            match inv.ports.iter().find(|p| p.name == *port) {
+                None => {
+                    return Err(Error::new(
+                        eyre!("'{name}' has no port named {port}"),
+                        ErrorKind::InvalidRequest,
+                    ))
+                }
+                Some(p) if p.uplink => {
+                    return Err(Error::new(
+                        eyre!("{port} is the uplink of '{name}'"),
+                        ErrorKind::InvalidRequest,
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    sat.ports = ports.into_iter().collect();
+    persist_registry(&registry).await?;
+    crate::activity::log(
+        "satellite",
+        "set-ports",
+        true,
+        &format!("Updated the port assignments of satellite '{name}'"),
         None,
     );
     Ok(())
@@ -279,6 +459,11 @@ pub struct StatusResponse {
     pub core_endpoint: Option<String>,
     pub uplink: Option<String>,
     pub generation: u64,
+    /// On an access point: its management tunnel is receiving traffic.
+    pub tunnel_live: Option<bool>,
+    /// On an access point: SSIDs down and access ports cut (D18); unset
+    /// before the first reading.
+    pub dark: Option<bool>,
     pub satellite_count: usize,
     pub satellites: Vec<PairedSatellite>,
 }
@@ -292,11 +477,19 @@ pub async fn status(_ctx: ServerContext) -> Result<StatusResponse, Error> {
     } else {
         Vec::new()
     };
+    let (tunnel_live, dark) = if marker.role == RouterRole::Satellite && marker.core_key.is_some() {
+        let (live, dark) = crate::liveness::ap_status();
+        (Some(live), dark)
+    } else {
+        (None, None)
+    };
     Ok(StatusResponse {
         role: marker.role,
         core_endpoint: marker.core_endpoint,
         uplink: marker.uplink,
         generation: marker.generation,
+        tunnel_live,
+        dark,
         satellite_count: satellites.len(),
         satellites,
     })
@@ -411,8 +604,7 @@ mod tests {
             name: name.to_string(),
             public_key: key.to_string(),
             mgmt_address: "10.42.1.2".to_string(),
-            generation_applied: 0,
-            last_seen: 0,
+            ..Default::default()
         }
     }
 
@@ -454,6 +646,7 @@ mod tests {
             role: RouterRole::Satellite,
             core_endpoint: Some("fe80::1%eth1".into()),
             core_key: Some("KEY=".into()),
+            core_address: Some("10.42.1.1".into()),
             uplink: Some("eth1".into()),
             generation: 4,
         };
@@ -465,6 +658,20 @@ mod tests {
         let old: RoleMarker = serde_json::from_str(r#"{"role":"satellite"}"#).unwrap();
         assert_eq!(old.generation, 0);
         assert!(old.uplink.is_none());
+    }
+
+    #[test]
+    fn port_assignments_parse() {
+        assert_eq!(
+            parse_port_assignment("eth0=101").unwrap(),
+            ("eth0".to_string(), Some(101))
+        );
+        assert_eq!(
+            parse_port_assignment("eth2=off").unwrap(),
+            ("eth2".to_string(), None)
+        );
+        assert!(parse_port_assignment("eth0").is_err());
+        assert!(parse_port_assignment("eth0=guest").is_err());
     }
 
     #[test]

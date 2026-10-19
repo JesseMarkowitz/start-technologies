@@ -2024,6 +2024,16 @@ access point applies. See `docs/design/satellite-router.md` (D25): a satellite i
 access point on a tagged trunk from the Core, with one WireGuard management tunnel. A trunk
 port is set on the Ethernet page (`ethernet.set` with `trunk: true`, §6).
 
+The daemon keeps both ends honest (D18): the Core passes profile VLANs on a trunk port only
+while an adopted access point's tunnel is receiving traffic through it (a bridge-family
+nftables gate under `/usr/share/nftables.d`, filled from a 5 s liveness loop; it needs
+`kmod-nft-bridge` and is not written without it), and an access point whose tunnel has gone
+quiet for 45 s takes its Wi-Fi down and cuts its access ports until the tunnel has held for
+10 s. Each end echoes the other's tunnel address every 5 s, so "quiet" means the peer is gone,
+not that WireGuard's keepalive scheduling fell silent on one side. The Core answers NTP and DNS on its end of every tunnel and forwards an access point
+only to the update source it is itself configured with (HTTPS to the registry host and the
+hosts its asset URLs name, resolved every 10 minutes into fw4 sets `sat_reach4`/`sat_reach6`).
+
 ### `satellite.get-role`
 
 ```rust
@@ -2035,6 +2045,7 @@ struct RoleMarker {
     role: RouterRole,              // "core" | "satellite"
     coreEndpoint: Option<String>, // satellite: the Core's link-local endpoint, "<addr>%<iface>"
     coreKey: Option<String>,      // satellite: the Core's WireGuard public key pinned at adoption
+    coreAddress: Option<String>,  // satellite: the Core's address inside the management tunnel
     uplink: Option<String>,       // satellite: the port that carries the trunk
     generation: u64,              // satellite: the sync generation applied last (0 = none)
 }
@@ -2063,9 +2074,14 @@ struct PairedSatellite {
     mgmtAddress: String,        // its address inside the management tunnel
     generationApplied: u64,     // config generation last acked (0 = never)
     lastSeen: i64,              // unix seconds of last contact (0 = never)
+    endpoint: Option<String>,   // where its tunnel last handshaked from, as `wg` prints it
+    port: Option<String>,       // the Core's trunk port its tunnel comes through, while live
+    live: bool,                 // its tunnel is receiving traffic (D18)
 }
 // Response: Vec<PairedSatellite>
-// Core-only (Authorization error on a satellite).
+// Core-only (Authorization error on a satellite). `endpoint`, `port`, `live` and
+// `lastSeen` are written by the daemon's liveness loop, at most once a minute while
+// nothing changes.
 ```
 
 ### `satellite.unpair`
@@ -2074,8 +2090,13 @@ struct PairedSatellite {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UnpairRequest { name: String }
-// Response: null. Core-only (NotFound if the name is not adopted). Removes the registry
-// entry and the Core's end of the management tunnel (interface, peer, accept rule).
+// Response: null. Core-only (NotFound if the name is not adopted). Tells the access point
+// over the tunnel that it is released (UDP 8720 at its tunnel address, 2 s wait; an access
+// point that does not answer learns the same from its tunnel never coming back), then
+// removes the registry entry and the Core's end of the management tunnel (interface, peer,
+// accept rule). The last unpair also removes the update-reach sets and rules. The released
+// access point drops its tunnel, keeps its base layout, stays dark (D18) and answers the
+// next Core on its backhaul VLAN as a candidate.
 ```
 
 ### `satellite.status`
@@ -2088,6 +2109,9 @@ struct SatelliteStatus {
     coreEndpoint: Option<String>,
     uplink: Option<String>,
     generation: u64,
+    tunnelLive: Option<bool>,   // access point: its tunnel is receiving traffic
+    dark: Option<bool>,         // access point: Wi-Fi down and access ports cut (D18);
+                                // null before the first reading
     satelliteCount: usize,
     satellites: Vec<PairedSatellite>,
 }
@@ -2158,11 +2182,14 @@ struct AdoptResponse { name: String, satelliteKey: String, interface: String } /
 // hello -> offer -> confirm, each proof a keyed hash under the secret over both
 // challenges and both WireGuard keys (the Core's also over the tunnel it dictates).
 // On success the Core provisions its end of the management tunnel (listening on the
-// backhaul zone) and records the access point; the access point puts its uplink into
-// its bridge, drops its WAN and LAN addressing, and dials the Core through the backhaul
-// VLAN. Errors: IncorrectPassword (wrong secret; the message says how many attempts
-// remain), RateLimited (5 failures -> 60 s cooldown, on either side), Timeout (no
-// answer in 5 s).
+// backhaul zone, answering NTP, with the update-reach sets and rules) and records the
+// access point; the access point puts its uplink into its bridge, drops its WAN and LAN
+// addressing, and dials the Core through the backhaul VLAN while listening on UDP 51899
+// for the Core's own handshakes, with its default route, resolver and time source inside
+// the tunnel. Re-adopting a name already in the registry keeps that tunnel's addresses
+// and port. A released access point is adopted again the same way, on its backhaul.
+// Errors: IncorrectPassword (wrong secret; the message says how many attempts remain),
+// RateLimited (5 failures -> 60 s cooldown, on either side), Timeout (no answer in 5 s).
 ```
 
 ### `satellite.adoption.code`
