@@ -109,6 +109,11 @@ export type Candidate = z.output<typeof schemas.Candidate>
 export type CheckInitializedRes = z.output<typeof schemas.CheckInitializedRes>
 
 /**
+ * A device on an access point: which port or radio it is on, and its VLAN.
+ */
+export type ClientInfo = z.output<typeof schemas.ClientInfo>
+
+/**
  * What the pre-adoption page shows.
  */
 export type CodeResponse = z.output<typeof schemas.CodeResponse>
@@ -195,6 +200,11 @@ export type PublishedPortStatus = z.output<typeof schemas.PublishedPortStatus>
  * A radio by its wireless-config name, with the bands its phy serves.
  */
 export type RadioInfo = z.output<typeof schemas.RadioInfo>
+
+/**
+ * One radio's assignment in the Core's channel plan.
+ */
+export type RadioPlan = z.output<typeof schemas.RadioPlan>
 export type ResetPasswordParamsInput = z.input<
   typeof schemas.ResetPasswordParams
 >

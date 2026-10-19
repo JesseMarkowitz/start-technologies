@@ -449,7 +449,8 @@ fn parse_nlbw_json(output: &str) -> Vec<(String, u64, u64)> {
 /// Discover hostapd interfaces and their connected client MACs,
 /// along with radio band info.
 /// Returns (MAC→band_label, set of WiFi bridge-port names).
-async fn get_wifi_clients() -> (HashMap<String, String>, std::collections::HashSet<String>) {
+pub(crate) async fn get_wifi_clients(
+) -> (HashMap<String, String>, std::collections::HashSet<String>) {
     // Maps MAC → connection type ("Wi-Fi 2.4GHz" or "Wi-Fi 5GHz")
     let mut wifi_macs: HashMap<String, String> = HashMap::new();
     let mut wifi_ports = std::collections::HashSet::new();
@@ -1229,6 +1230,21 @@ pub async fn list(_ctx: ServerContext) -> Result<Vec<Device>, Error> {
     );
 
     let (wifi_clients, wifi_ports) = wifi_result;
+    // Devices behind an access point reach the bridge through its trunk
+    // port; the access point reports where they really are (D13, D25).
+    let satellite_clients: HashMap<String, String> = crate::satellite::load_registry()
+        .into_iter()
+        .flat_map(|s| {
+            s.clients.into_iter().map(move |c| {
+                let via = if c.via.starts_with("Wi-Fi") {
+                    c.via
+                } else {
+                    "Ethernet".to_string()
+                };
+                (c.mac, format!("{via} ({})", s.name))
+            })
+        })
+        .collect();
     let fdb_by_mac = fdb_result;
     let initial_arp = parse_arp_output(&arp_output);
 
@@ -1561,13 +1577,17 @@ pub async fn list(_ctx: ServerContext) -> Result<Vec<Device>, Error> {
         // does NOT place the MAC on a WiFi port. This prevents recently
         // disconnected WiFi clients from being mislabelled.
         let connection = if matches!(status, DeviceStatus::Online) {
-            wifi_clients.get(mac).cloned().or_else(|| {
-                if !on_wifi_port && (!arp_list.is_empty() || fdb_by_mac.contains_key(mac)) {
-                    Some("Ethernet".to_string())
-                } else {
-                    None
-                }
-            })
+            wifi_clients
+                .get(mac)
+                .or_else(|| satellite_clients.get(mac))
+                .cloned()
+                .or_else(|| {
+                    if !on_wifi_port && (!arp_list.is_empty() || fdb_by_mac.contains_key(mac)) {
+                        Some("Ethernet".to_string())
+                    } else {
+                        None
+                    }
+                })
         } else {
             None
         };

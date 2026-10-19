@@ -76,6 +76,11 @@ import {
   BackupCreateRes,
   BackupRestoreRes,
   DiagnosticsCreateRes,
+  AccessPoint,
+  AccessPointAdopt,
+  AccessPointAdopted,
+  AccessPointCandidate,
+  AccessPointSetPorts,
 } from './api.service'
 import { RpcService } from '../rpc.service'
 import type { Api, RpcParamType, RpcReturnType } from './bindings'
@@ -398,6 +403,29 @@ export class LiveApiService extends ApiService {
 
   async ethernetGet(): Promise<EthernetConfig> {
     return this.rpc.request({ method: 'ethernet.get', params: {} })
+  }
+
+  async satelliteList(): Promise<AccessPoint[]> {
+    return this.rpc.request({ method: 'satellite.list', params: {} })
+  }
+
+  async satelliteUnpair(params: { name: string }): Promise<null> {
+    return this.rpc.request({ method: 'satellite.unpair', params })
+  }
+
+  async satelliteSetPorts(params: AccessPointSetPorts): Promise<null> {
+    return this.rpc.request({ method: 'satellite.set-ports', params })
+  }
+
+  async satelliteCandidates(): Promise<AccessPointCandidate[]> {
+    return this.rpc.request({
+      method: 'satellite.adoption.candidates',
+      params: {},
+    })
+  }
+
+  async satelliteAdopt(params: AccessPointAdopt): Promise<AccessPointAdopted> {
+    return this.rpc.request({ method: 'satellite.adoption.adopt', params })
   }
 
   async ethernetSet(params: EthernetSetConfig): Promise<EthernetSetResult> {

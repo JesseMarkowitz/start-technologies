@@ -25,7 +25,7 @@ use uciedit::{dump_all, parse_all, Arena};
 
 use crate::prelude::*;
 use crate::satellite::{
-    self, Inventory, PortInfo, RadioInfo, RouterRole, SyncSnapshot, TunnelStatus,
+    self, ClientInfo, Inventory, PortInfo, RadioInfo, RouterRole, SyncSnapshot, TunnelStatus,
 };
 use crate::utils::DeserializeStdin;
 use crate::ServerContext;
@@ -37,10 +37,17 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 static RUNNING: Mutex<bool> = Mutex::new(false);
 /// The Core's current generation, as its last status call said it.
 static CORE_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// The Core's firmware version, as its last status call said it.
+static CORE_VERSION: Mutex<String> = Mutex::new(String::new());
 
 /// The generation the Core last announced; 0 before any contact.
 pub fn core_generation() -> u64 {
     CORE_GENERATION.load(Ordering::Relaxed)
+}
+
+/// The Core's firmware version; empty before any contact.
+pub fn core_version() -> String {
+    CORE_VERSION.lock().unwrap().clone()
 }
 
 fn core_address() -> Option<IpAddr> {
@@ -76,6 +83,15 @@ pub struct StatusParams {
     #[serde(default)]
     #[clap(long, default_value_t = 0)]
     pub core_generation: u64,
+    /// The Core's firmware version, which the access point shows against its own.
+    #[serde(default)]
+    #[clap(long, default_value = "")]
+    pub core_version: String,
+    /// The name the Core knows this access point by; an access point adopted
+    /// before names were recorded takes it from here.
+    #[serde(default)]
+    #[clap(long, default_value = "")]
+    pub name: String,
 }
 rpc_toolkit::reflect_ts!(StatusParams);
 
@@ -84,13 +100,23 @@ async fn status_handler(_ctx: ServerContext, p: StatusParams) -> Result<TunnelSt
     if p.core_generation > 0 {
         CORE_GENERATION.store(p.core_generation, Ordering::Relaxed);
     }
-    let role = satellite::load_role();
+    if !p.core_version.is_empty() {
+        *CORE_VERSION.lock().unwrap() = p.core_version;
+    }
+    let mut role = satellite::load_role();
+    if role.name.is_none() && !p.name.is_empty() {
+        role.name = Some(p.name);
+        let _ = satellite::persist_role(&role).await;
+    }
     let (tunnel_live, dark) = crate::liveness::ap_status();
+    let uplink = role.uplink.unwrap_or_default();
     Ok(TunnelStatus {
         generation: role.generation,
         tunnel_live,
         dark,
-        inventory: inventory(role.uplink.as_deref().unwrap_or("")),
+        inventory: inventory(&uplink),
+        clients: clients(&uplink).await,
+        version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
 
@@ -316,11 +342,135 @@ fn ports(uplink: &str) -> Vec<PortInfo> {
     ports
 }
 
-fn inventory(uplink: &str) -> Inventory {
+pub fn inventory(uplink: &str) -> Inventory {
     Inventory {
         ports: ports(uplink),
         radios: radios(),
     }
+}
+
+/// `bridge fdb show br <bridge>`: learned entries as (MAC, port, VLAN).
+pub fn fdb_entries(output: &str) -> Vec<(String, String, Option<u16>)> {
+    output
+        .lines()
+        .filter(|l| l.contains("master") && !l.contains("permanent"))
+        .filter_map(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            let mac = w.first()?.to_uppercase();
+            let port = w
+                .iter()
+                .position(|t| *t == "dev")
+                .and_then(|i| w.get(i + 1))?;
+            let vlan = w
+                .iter()
+                .position(|t| *t == "vlan")
+                .and_then(|i| w.get(i + 1))
+                .and_then(|v| v.parse().ok());
+            Some((mac, port.to_string(), vlan))
+        })
+        .collect()
+}
+
+async fn command(program: &str, args: &[&str]) -> String {
+    tokio::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// Wi-Fi band label per `uci show wireless` section: radios by their band,
+/// interfaces by their radio's.
+pub fn wifi_band_labels(uci: &str) -> std::collections::HashMap<String, String> {
+    let mut radio_band: std::collections::HashMap<&str, &str> = Default::default();
+    let mut iface_radio: Vec<(&str, &str)> = Vec::new();
+    for line in uci.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim_matches('\'');
+        let mut parts = key.splitn(3, '.');
+        let (Some(_), Some(section), Some(option)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        match option {
+            "band" => {
+                radio_band.insert(section, value);
+            }
+            "device" => iface_radio.push((section, value)),
+            _ => {}
+        }
+    }
+    let label = |band: &str| match band {
+        "2g" => "Wi-Fi 2.4GHz",
+        "5g" => "Wi-Fi 5GHz",
+        "6g" => "Wi-Fi 6GHz",
+        _ => "Wi-Fi",
+    };
+    iface_radio
+        .into_iter()
+        .map(|(iface, radio)| {
+            (
+                iface.to_string(),
+                label(radio_band.get(radio).copied().unwrap_or("")).to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Wi-Fi clients by MAC with their band label, from hostapd.
+async fn wifi_clients() -> std::collections::HashMap<String, String> {
+    let labels = wifi_band_labels(&command("uci", &["-q", "show", "wireless"]).await);
+    let mut out = std::collections::HashMap::new();
+    for hostapd in command("ubus", &["list"]).await.lines() {
+        let Some(iface) = hostapd.strip_prefix("hostapd.") else {
+            continue;
+        };
+        let band = labels
+            .get(iface)
+            .cloned()
+            .unwrap_or_else(|| "Wi-Fi".to_string());
+        let json = command("ubus", &["call", hostapd, "get_clients"]).await;
+        if let Some(clients) = serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|v| v.get("clients").and_then(|c| c.as_object()).cloned())
+        {
+            for mac in clients.keys() {
+                out.insert(mac.to_uppercase(), band.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The devices behind this access point: every MAC the bridge learned on a
+/// port other than the uplink, by Wi-Fi band when hostapd knows it, else by
+/// port.
+pub async fn clients(uplink: &str) -> Vec<ClientInfo> {
+    let wifi = wifi_clients().await;
+    let fdb = tokio::process::Command::new("bridge")
+        .args(["fdb", "show", "br", crate::ethernet::DEFAULT_LAN_BRIDGE])
+        .output()
+        .await
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let mut seen = std::collections::BTreeSet::new();
+    fdb_entries(&fdb)
+        .into_iter()
+        .filter(|(_, port, _)| port != uplink && !port.starts_with("br-"))
+        .filter(|(mac, _, _)| seen.insert(mac.clone()))
+        .map(|(mac, port, vlan)| ClientInfo {
+            via: wifi.get(&mac).cloned().unwrap_or(port),
+            mac,
+            vlan,
+        })
+        .collect()
 }
 
 // ── Core: client ────────────────────────────────────────────────────────────
@@ -384,11 +534,15 @@ pub async fn push(addr: IpAddr, snapshot: &SyncSnapshot) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn status(addr: IpAddr, core_generation: u64) -> Result<TunnelStatus, Error> {
+pub async fn status(addr: IpAddr, name: &str, core_generation: u64) -> Result<TunnelStatus, Error> {
     call(
         addr,
         "status",
-        serde_json::json!({ "coreGeneration": core_generation }),
+        serde_json::json!({
+            "coreGeneration": core_generation,
+            "coreVersion": env!("CARGO_PKG_VERSION"),
+            "name": name,
+        }),
     )
     .await
 }
@@ -439,6 +593,35 @@ mod tests {
         );
         assert_eq!(phy_for_path("soc/pcie/0002:01:00.0+2", &phys), None);
         assert_eq!(phy_for_path("soc/other", &phys), None);
+    }
+
+    #[test]
+    fn band_labels_follow_the_interface_to_its_radio() {
+        let uci = "wireless.radio0=wifi-device\nwireless.radio0.band='2g'\n\
+                   wireless.default_radio0=wifi-iface\nwireless.default_radio0.device='radio0'\n\
+                   wireless.radio1.band='5g'\nwireless.default_radio1.device='radio1'\n";
+        let l = wifi_band_labels(uci);
+        assert_eq!(l["default_radio0"], "Wi-Fi 2.4GHz");
+        assert_eq!(l["default_radio1"], "Wi-Fi 5GHz");
+    }
+
+    #[test]
+    fn fdb_entries_carry_port_and_vlan() {
+        let out = "6e:38:73:d3:40:a0 dev phy0-ap0-yyiph vlan 101 master br-lan \n\
+                   6c:1f:f7:1d:f6:10 dev eth0 vlan 101 master br-lan \n\
+                   18:66:96:a2:62:8c dev br-lan vlan 4094 master br-lan permanent\n\
+                   aa:bb:cc:dd:ee:ff dev eth1 self\n";
+        let e = fdb_entries(out);
+        assert_eq!(e.len(), 2);
+        assert_eq!(
+            e[0],
+            (
+                "6E:38:73:D3:40:A0".into(),
+                "phy0-ap0-yyiph".into(),
+                Some(101)
+            )
+        );
+        assert_eq!(e[1].1, "eth0");
     }
 
     #[tokio::test]

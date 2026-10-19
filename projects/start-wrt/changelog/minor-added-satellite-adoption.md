@@ -17,3 +17,8 @@
   and port assignment the Core holds reaches its access points within seconds of a change,
   with the Core choosing each access point's Wi-Fi channels. An access point that has been
   out of contact serves no one until it has caught up.
+- **Access points are managed from the Core.** The new Access Points page adopts a waiting
+  router, assigns its ports to profiles and removes it; the Ethernet page makes a port a
+  trunk after a confirmation. Devices behind an access point show where they really are in
+  the device list. An access point's own address offers only a status page pointing to the
+  Core, and its settings cannot be changed there.

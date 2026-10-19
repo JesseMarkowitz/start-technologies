@@ -256,7 +256,7 @@ pub async fn tick(
         let Ok(addr) = sat.mgmt_address.parse::<IpAddr>() else {
             continue;
         };
-        match crate::control::status(addr, generation).await {
+        match crate::control::status(addr, &sat.name, generation).await {
             Ok(status) => {
                 if sat.generation_applied != status.generation {
                     sat.generation_applied = status.generation;
@@ -264,6 +264,14 @@ pub async fn tick(
                 }
                 if sat.inventory.as_ref() != Some(&status.inventory) {
                     sat.inventory = Some(status.inventory);
+                    changed = true;
+                }
+                if sat.clients != status.clients {
+                    sat.clients = status.clients;
+                    changed = true;
+                }
+                if sat.plan != snapshot.radios {
+                    sat.plan = snapshot.radios.clone();
                     changed = true;
                 }
             }

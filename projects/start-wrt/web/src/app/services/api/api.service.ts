@@ -111,7 +111,25 @@ export abstract class ApiService {
   abstract backupCreate(): Promise<BackupCreateRes>
   abstract backupRestore(): Promise<BackupRestoreRes>
   abstract diagnosticsCreate(): Promise<DiagnosticsCreateRes>
+  abstract satelliteList(): Promise<AccessPoint[]>
+  abstract satelliteUnpair(params: { name: string }): Promise<null>
+  abstract satelliteSetPorts(params: AccessPointSetPorts): Promise<null>
+  abstract satelliteCandidates(): Promise<AccessPointCandidate[]>
+  abstract satelliteAdopt(params: AccessPointAdopt): Promise<AccessPointAdopted>
 }
+
+export type AccessPoint = RpcReturnType<Api, 'satellite.list'>[number]
+
+export type AccessPointSetPorts = RpcParamType<Api, 'satellite.set-ports'>
+
+export type AccessPointCandidate = RpcReturnType<
+  Api,
+  'satellite.adoption.candidates'
+>[number]
+
+export type AccessPointAdopt = RpcParamType<Api, 'satellite.adoption.adopt'>
+
+export type AccessPointAdopted = RpcReturnType<Api, 'satellite.adoption.adopt'>
 
 export type BackupCreateRes = RpcReturnType<Api, 'backup.create'>
 

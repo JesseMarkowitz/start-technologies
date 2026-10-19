@@ -23,9 +23,8 @@ use tracing::instrument;
 use visit_rs::Visit;
 
 use crate::continuations::{self, RpcContinuations};
-use crate::embedded_web::serve_embedded;
 use crate::luci_proxy::{self, ProxyClient};
-use crate::middleware::SessionAuth;
+use crate::middleware::{RoleGate, SessionAuth};
 use crate::prelude::*;
 use crate::setup::{self, FlashMode, SetupEvent};
 use crate::{init_logging, main_api, ssl, ServerContext};
@@ -458,8 +457,11 @@ async fn inner_main() -> Result<(), Error> {
         continuations: continuations.clone(),
         open_authed_continuations: open_authed,
     };
-    let handler =
-        Server::new(move || ready(Ok(ctx.clone())), main_api()).middleware(SessionAuth::new());
+    // The role gate runs first: on an access point a refused method never
+    // reaches session validation.
+    let handler = Server::new(move || ready(Ok(ctx.clone())), main_api())
+        .middleware(SessionAuth::new())
+        .middleware(RoleGate);
 
     let proxy_client = ProxyClient(
         reqwest::Client::builder()
@@ -544,8 +546,9 @@ async fn inner_main() -> Result<(), Error> {
             "/luci",
             get(|| async { axum::response::Redirect::temporary("/cgi-bin/luci") }),
         )
-        // Everything else serves the embedded web UI
-        .fallback(axum::routing::any(serve_embedded))
+        // Everything else serves the embedded web UI, or on an access point
+        // its own page (design D23).
+        .fallback(axum::routing::any(crate::ap_page::serve_or_embedded))
         .layer(cors)
         .layer(Extension(continuations))
         .layer(Extension(proxy_client))

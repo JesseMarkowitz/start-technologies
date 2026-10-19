@@ -36,6 +36,10 @@ export const routes: Routes = [
             loadComponent: () => import('./routes/ethernet'),
           },
           {
+            path: 'access-points',
+            loadComponent: () => import('./routes/access-points'),
+          },
+          {
             path: 'wifi',
             loadChildren: () => import('./routes/wifi'),
           },

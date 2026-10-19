@@ -5,6 +5,7 @@ pub mod prelude;
 pub mod activity;
 pub mod adoption;
 pub mod ap;
+pub mod ap_page;
 pub mod auth;
 pub mod backhaul;
 pub mod backup;

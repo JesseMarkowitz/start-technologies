@@ -9,7 +9,13 @@ import {
   TuiDropdown,
   TuiLink,
 } from '@taiga-ui/core'
-import { TuiBadge, TuiButtonSelect, TuiChevron } from '@taiga-ui/kit'
+import {
+  TUI_CONFIRM,
+  TuiBadge,
+  TuiButtonSelect,
+  TuiChevron,
+} from '@taiga-ui/kit'
+import { firstValueFrom } from 'rxjs'
 
 import { Placeholder } from 'src/app/components/placeholder'
 import { i18nPipe } from 'src/app/i18n/i18n.pipe'
@@ -41,7 +47,7 @@ import { EthernetPortView, EthernetService } from './service'
             }
           </td>
           <td tuiTd>
-            @if (item.wan || item.trunk) {
+            @if (item.wan) {
               -
             } @else {
               <button
@@ -49,8 +55,14 @@ import { EthernetPortView, EthernetService } from './service'
                 tuiChevron
                 tuiButtonSelect
                 tuiDropdownAlign="start"
-                [textContent]="item.profile?.fullname || 'Admin'"
-                [ngModel]="item.profile?.fullname || 'Admin'"
+                [textContent]="
+                  item.trunk
+                    ? ('Trunk to access points' | i18n)
+                    : item.profile?.fullname || 'Admin'
+                "
+                [ngModel]="
+                  item.trunk ? TRUNK : item.profile?.fullname || 'Admin'
+                "
                 (ngModelChange)="onProfileChange(item, $event)"
               >
                 <tui-data-list *tuiDropdown>
@@ -59,6 +71,9 @@ import { EthernetPortView, EthernetService } from './service'
                       {{ profile.fullname }}
                     </button>
                   }
+                  <button tuiOption iconEnd="@tui.radio" [value]="TRUNK">
+                    {{ 'Trunk to access points' | i18n }}
+                  </button>
                   <hr />
                   <a
                     tuiOption
@@ -119,11 +134,41 @@ export class EthernetTable {
   private readonly i18n = inject(i18nPipe)
 
   readonly ethernetTable = input<EthernetPortView[]>([])
+  protected readonly TRUNK = '__trunk__'
 
   async onProfileChange(item: EthernetPortView, fullname: string) {
-    const previousName = item.profile?.fullname ?? 'Admin'
+    const previousName = item.trunk
+      ? this.TRUNK
+      : (item.profile?.fullname ?? 'Admin')
     if (fullname === previousName) return
 
+    // A trunk carries every profile to access points; devices plugged into
+    // it directly reach nothing until one is adopted there (D19).
+    if (fullname === this.TRUNK) {
+      const ok = await firstValueFrom(
+        this.dialogs.open<boolean>(TUI_CONFIRM, {
+          label: this.i18n.transform('Make Trunk Port'),
+          data: {
+            content: this.i18n.transform(
+              'Devices plugged into this port lose access until an access point is adopted on it.',
+            ),
+            yes: this.i18n.transform('Make Trunk Port'),
+            no: this.i18n.transform('Cancel'),
+          },
+        }),
+        { defaultValue: false },
+      )
+      if (!ok) {
+        this.service.refresh()
+        return
+      }
+      item.trunk = true
+      item.profile = null
+      this.service.save([...this.ethernetTable()])
+      return
+    }
+
+    item.trunk = false
     const profile =
       this.service.profiles().find(p => p.fullname === fullname) ?? null
     item.profile = profile

@@ -322,6 +322,42 @@ export const CheckInitializedRes: z.ZodObject<{ initialized: z.ZodBoolean }> =
   })
 
 /**
+ * A device on an access point: which port or radio it is on, and its VLAN.
+ */
+export const ClientInfo: z.ZodObject<{
+  /**
+   * Upper-case.
+   */
+  mac: z.ZodString
+  /**
+   * A port name, or a Wi-Fi band label such as `Wi-Fi 2.4GHz`.
+   */
+  via: z.ZodString
+  vlan: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodInt>>,
+    z.ZodNullable<z.ZodInt>
+  >
+}> = /* @__PURE__ */ object({
+  /**
+   * Upper-case.
+   */
+  mac: z.string().meta({
+    description: 'Upper-case.',
+  }),
+  /**
+   * A port name, or a Wi-Fi band label such as `Wi-Fi 2.4GHz`.
+   */
+  via: z.string().meta({
+    description: 'A port name, or a Wi-Fi band label such as `Wi-Fi 2.4GHz`.',
+  }),
+  vlan: wire(z.int().nullable().optional(), z.int().nullable()),
+}).meta({
+  id: 'ClientInfo',
+  description:
+    'A device on an access point: which port or radio it is on, and its VLAN.',
+})
+
+/**
  * What the pre-adoption page shows.
  */
 export const CodeResponse: z.ZodObject<{
@@ -1053,6 +1089,30 @@ export const RadioInfo: z.ZodObject<{
   id: 'RadioInfo',
   description:
     'A radio by its wireless-config name, with the bands its phy serves.',
+})
+
+/**
+ * One radio's assignment in the Core's channel plan.
+ */
+export const RadioPlan: z.ZodObject<{
+  band: z.ZodString
+  channel: z.ZodInt
+  /**
+   * OpenWrt `htmode`, such as `HE80`.
+   */
+  htmode: z.ZodString
+}> = /* @__PURE__ */ object({
+  band: z.string(),
+  channel: z.int(),
+  /**
+   * OpenWrt `htmode`, such as `HE80`.
+   */
+  htmode: z.string().meta({
+    description: 'OpenWrt `htmode`, such as `HE80`.',
+  }),
+}).meta({
+  id: 'RadioPlan',
+  description: "One radio's assignment in the Core's channel plan.",
 })
 export const ResetPasswordParams: z.ZodObject<{
   oldPassword: z.ZodString
@@ -2036,6 +2096,10 @@ export const RoleMarker: z.ZodObject<{
    */
   coreAddress: z.ZodOptional<z.ZodNullable<z.ZodString>>
   /**
+   * On a satellite, the name the Core adopted it under.
+   */
+  name: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  /**
    * On a satellite, the port that carries the trunk to the Core.
    */
   uplink: z.ZodOptional<z.ZodNullable<z.ZodString>>
@@ -2066,6 +2130,12 @@ export const RoleMarker: z.ZodObject<{
   coreAddress: z.string().nullable().optional().meta({
     description:
       "On a satellite, the Core's address inside the management tunnel.",
+  }),
+  /**
+   * On a satellite, the name the Core adopted it under.
+   */
+  name: z.string().nullable().optional().meta({
+    description: 'On a satellite, the name the Core adopted it under.',
   }),
   /**
    * On a satellite, the port that carries the trunk to the Core.
@@ -2716,6 +2786,20 @@ export const PairedSatellite: z.ZodObject<{
    * What it reported last: its ports and radios.
    */
   inventory: z.ZodOptional<z.ZodNullable<typeof Inventory>>
+  /**
+   * The devices on it, as it reported them last.
+   */
+  clients: z.ZodCodec<
+    z.ZodOptional<z.ZodArray<typeof ClientInfo>>,
+    z.ZodArray<typeof ClientInfo>
+  >
+  /**
+   * The Core's channel plan for its radios (D20).
+   */
+  plan: z.ZodCodec<
+    z.ZodOptional<z.ZodRecord<z.ZodString, typeof RadioPlan>>,
+    z.ZodRecord<z.ZodString, typeof RadioPlan>
+  >
 }> = /* @__PURE__ */ object({
   /**
    * Admin-facing label (unique).
@@ -2786,6 +2870,21 @@ export const PairedSatellite: z.ZodObject<{
    */
   inventory: Inventory.nullable().optional().meta({
     description: 'What it reported last: its ports and radios.',
+  }),
+  /**
+   * The devices on it, as it reported them last.
+   */
+  clients: wire(z.array(ClientInfo).optional(), z.array(ClientInfo)).meta({
+    description: 'The devices on it, as it reported them last.',
+  }),
+  /**
+   * The Core's channel plan for its radios (D20).
+   */
+  plan: wire(
+    z.record(z.string(), RadioPlan).optional(),
+    z.record(z.string(), RadioPlan),
+  ).meta({
+    description: "The Core's channel plan for its radios (D20).",
   }),
 }).meta({
   id: 'PairedSatellite',

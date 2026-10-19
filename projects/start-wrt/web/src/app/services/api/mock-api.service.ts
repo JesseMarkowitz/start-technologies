@@ -82,6 +82,11 @@ import {
   BackupCreateRes,
   BackupRestoreRes,
   DiagnosticsCreateRes,
+  AccessPoint,
+  AccessPointAdopt,
+  AccessPointAdopted,
+  AccessPointCandidate,
+  AccessPointSetPorts,
 } from './api.service'
 import { UciFile, UciSection } from './types'
 import { dhcpLanSlaacDhcpv6 } from 'src/app/routes/lan/routes/ipv6/uci/mocks'
@@ -1778,6 +1783,101 @@ export class MockApiService extends ApiService {
   }
 
   // --- Ethernet smart endpoint mocks ---
+
+  private mockAccessPoints: AccessPoint[] = [
+    {
+      name: 'garage',
+      publicKey: 'mock-key-garage=',
+      mgmtAddress: '10.42.1.2',
+      generationApplied: 4,
+      lastSeen: Math.floor(Date.now() / 1000) - 3,
+      endpoint: '[fe80::1%br-lan.4094]:51899',
+      port: 'eth2',
+      live: true,
+      ports: { eth0: 100 },
+      inventory: {
+        ports: [
+          { name: 'eth0', uplink: false, link: true },
+          { name: 'eth1', uplink: true, link: true },
+        ],
+        radios: [{ name: 'radio0', phy: 'phy0', bands: ['2g', '5g'] }],
+      },
+      clients: [
+        { mac: '6E:38:73:D3:40:A0', via: 'Wi-Fi 2.4GHz', vlan: 100 },
+        { mac: '6C:1F:F7:1D:F6:10', via: 'eth0', vlan: 100 },
+      ],
+      plan: { radio0: { band: '2g', channel: 6, htmode: 'HE20' } },
+    },
+  ]
+
+  private mockCandidates: AccessPointCandidate[] = [
+    {
+      address: 'fe80::fcfe:feff:fe82:5d08%br-lan.4094',
+      interface: 'br-lan.4094',
+      satelliteKey: 'mock-candidate-key=',
+      version: '1.3.0',
+      hasSticker: false,
+      lastSeenSecs: 2,
+    },
+  ]
+
+  async satelliteList(): Promise<AccessPoint[]> {
+    await pauseFor(250)
+    return structuredClone(this.mockAccessPoints)
+  }
+
+  async satelliteUnpair(params: { name: string }): Promise<null> {
+    await pauseFor(250)
+    this.mockAccessPoints = this.mockAccessPoints.filter(
+      s => s.name !== params.name,
+    )
+    return null
+  }
+
+  async satelliteSetPorts(params: AccessPointSetPorts): Promise<null> {
+    await pauseFor(250)
+    const ap = this.mockAccessPoints.find(s => s.name === params.name)
+    if (!ap) throw new Error(`no adopted satellite named '${params.name}'`)
+    ap.ports = Object.fromEntries(
+      params.ports.map(p => {
+        const [port, vlan] = p.split('=')
+        return [port, vlan === 'off' ? null : Number(vlan)]
+      }),
+    )
+    return null
+  }
+
+  async satelliteCandidates(): Promise<AccessPointCandidate[]> {
+    await pauseFor(250)
+    return structuredClone(this.mockCandidates)
+  }
+
+  async satelliteAdopt(params: AccessPointAdopt): Promise<AccessPointAdopted> {
+    await pauseFor(1500)
+    const candidate = this.mockCandidates.find(
+      c => c.address === params.address,
+    )
+    if (!candidate) throw new Error('no answer from that address within 5 s')
+    this.mockCandidates = this.mockCandidates.filter(c => c !== candidate)
+    this.mockAccessPoints = this.mockAccessPoints
+      .filter(s => s.name !== params.name)
+      .concat({
+        name: params.name,
+        publicKey: candidate.satelliteKey,
+        mgmtAddress: `10.42.${this.mockAccessPoints.length + 2}.2`,
+        generationApplied: 0,
+        lastSeen: 0,
+        live: false,
+        ports: {},
+        clients: [],
+        plan: {},
+      })
+    return {
+      name: params.name,
+      satelliteKey: candidate.satelliteKey,
+      interface: `sat_${params.name}`,
+    }
+  }
 
   private mockEthernet: EthernetConfig = {
     wan_ipv6: true,

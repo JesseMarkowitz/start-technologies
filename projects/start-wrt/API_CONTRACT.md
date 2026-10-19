@@ -2046,8 +2046,22 @@ Core's current generation (D18).
 **Tunnel API.** An adopted access point serves JSON-RPC at `http://<its tunnel address>:8720/rpc`
 and answers only the Core's tunnel address. Methods: `apply` (params: a `SyncSnapshot`; refuses a
 generation older than the applied one, treats the same as done), `status` (params
-`{ coreGeneration }`; returns `TunnelStatus { generation, tunnelLive, dark, inventory }`), `release`
-(the Core has forgotten this access point). The access point reads its inventory from the
+`{ coreGeneration, coreVersion, name }`, the name being what the Core adopted it under, which an
+access point without one on record keeps; returns
+`TunnelStatus { generation, tunnelLive, dark, inventory, clients, version }`, where `clients` lists
+every device the access point's bridge learned on a port other than its uplink as
+`{ mac, via, vlan }`, `via` being a Wi-Fi band label when hostapd knows the device or else the port
+name), `release` (the Core has forgotten this access point). The Core keeps the clients in the
+registry and the device list shows such a device as, for example, `Wi-Fi 2.4GHz (garage)` or
+`Ethernet (garage)` instead of Ethernet on the Core's trunk port (D13).
+
+**Role gate (D7).** On an adopted access point the RPC server answers only `satellite.get-role`,
+`satellite.status`, `satellite.adoption.code`, `system.info`, `system.restart` and `auth.logout`;
+every other method returns an Authorization error ("not available on an access point; use its
+Core") before session validation. The access point serves its own page (D23) in place of the web
+UI at every path: "Satellite _name_", a link to `router.lan`, the tunnel state, the generation
+applied against the Core's, firmware against the Core's, its ports and radios, its devices with
+their profile, and the last log lines. The page holds nothing the Core controls. The access point reads its inventory from the
 kernel: ports from `/sys/class/net` with link state, radios from its wireless config's `path`
 resolved to a phy and the bands `iw phy` lists, so a stale `wifi-device` with no phy is absent. The Core answers NTP and DNS on its end of every tunnel and forwards an access point
 only to the update source it is itself configured with (HTTPS to the registry host and the
@@ -2065,6 +2079,7 @@ struct RoleMarker {
     coreEndpoint: Option<String>, // satellite: the Core's link-local endpoint, "<addr>%<iface>"
     coreKey: Option<String>,      // satellite: the Core's WireGuard public key pinned at adoption
     coreAddress: Option<String>,  // satellite: the Core's address inside the management tunnel
+    name: Option<String>,         // satellite: the name the Core adopted it under
     uplink: Option<String>,       // satellite: the port that carries the trunk
     generation: u64,              // satellite: the sync generation applied last (0 = none)
 }
@@ -2098,7 +2113,10 @@ struct PairedSatellite {
     live: bool,                 // its tunnel is receiving traffic (D18)
     ports: BTreeMap<String, Option<u16>>, // access port -> profile VLAN untagged, or null for off
     inventory: Option<Inventory>,          // what it reported last
+    clients: Vec<ClientInfo>,              // its devices, as it reported them last
+    plan: BTreeMap<String, RadioPlan>,     // the Core's channel plan for its radios (D20)
 }
+struct ClientInfo { mac: String, via: String, vlan: Option<u16> }
 struct Inventory { ports: Vec<PortInfo>, radios: Vec<RadioInfo> }
 struct PortInfo { name: String, uplink: bool, link: bool }
 struct RadioInfo { name: String, phy: String, bands: Vec<String> } // "2g" | "5g" | "6g"

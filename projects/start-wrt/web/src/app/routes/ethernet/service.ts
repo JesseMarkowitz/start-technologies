@@ -88,7 +88,9 @@ export class EthernetService extends FormService<EthernetPortView[]> {
       .map(([name, port]) => ({
         name,
         profile: port.profile,
-        profileName: port.trunk ? 'Trunk' : (port.profile?.fullname ?? 'Admin'),
+        profileName: port.trunk
+          ? this.i18n.transform('Trunk to access points')
+          : (port.profile?.fullname ?? 'Admin'),
         wan: name === ethernet.wan_port,
         trunk: port.trunk,
       }))

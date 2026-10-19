@@ -55,6 +55,11 @@ const MENU = {
       link: 'wifi',
     },
     {
+      name: 'Access Points',
+      icon: '@tui.radio',
+      link: 'access-points',
+    },
+    {
       name: 'Inbound VPNs',
       icon: '@tui.hard-drive-download',
       link: 'inbound',

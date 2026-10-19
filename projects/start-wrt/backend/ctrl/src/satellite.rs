@@ -46,6 +46,9 @@ pub struct RoleMarker {
     /// On a satellite, the Core's address inside the management tunnel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_address: Option<String>,
+    /// On a satellite, the name the Core adopted it under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// On a satellite, the port that carries the trunk to the Core.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uplink: Option<String>,
@@ -88,8 +91,26 @@ pub struct PairedSatellite {
     /// What it reported last: its ports and radios.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inventory: Option<Inventory>,
+    /// The devices on it, as it reported them last.
+    #[serde(default)]
+    pub clients: Vec<ClientInfo>,
+    /// The Core's channel plan for its radios (D20).
+    #[serde(default)]
+    pub plan: BTreeMap<String, RadioPlan>,
 }
 rpc_toolkit::reflect_ts!(PairedSatellite);
+
+/// A device on an access point: which port or radio it is on, and its VLAN.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, visit_rs::VisitFields)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientInfo {
+    /// Upper-case.
+    pub mac: String,
+    /// A port name, or a Wi-Fi band label such as `Wi-Fi 2.4GHz`.
+    pub via: String,
+    pub vlan: Option<u16>,
+}
+rpc_toolkit::reflect_ts!(ClientInfo);
 
 /// An access point's hardware as it reports it (design §21: no assumed port
 /// count; radios from the kernel, not from its wireless config).
@@ -130,6 +151,11 @@ pub struct TunnelStatus {
     pub tunnel_live: bool,
     pub dark: Option<bool>,
     pub inventory: Inventory,
+    #[serde(default)]
+    pub clients: Vec<ClientInfo>,
+    /// Its firmware version.
+    #[serde(default)]
+    pub version: String,
 }
 rpc_toolkit::reflect_ts!(TunnelStatus);
 
@@ -650,6 +676,7 @@ mod tests {
             core_endpoint: Some("fe80::1%eth1".into()),
             core_key: Some("KEY=".into()),
             core_address: Some("10.42.1.1".into()),
+            name: Some("garage".into()),
             uplink: Some("eth1".into()),
             generation: 4,
         };

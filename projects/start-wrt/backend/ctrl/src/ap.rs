@@ -24,6 +24,14 @@ use crate::satellite::{self, RouterRole, SyncSnapshot};
 
 pub const ADMIN_VLAN: u16 = 1;
 const ADMIN_INTERFACE: &str = "lan";
+/// The payload applied last, for the access point's own page.
+const APPLIED_PATH: &str = "/etc/startwrt/applied.json";
+
+pub fn load_applied() -> Option<SyncSnapshot> {
+    std::fs::read_to_string(APPLIED_PATH)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+}
 
 fn bridge_name(cfgs: &Configs) -> Result<String, Error> {
     Ok(find_lan_bridge(cfgs)?
@@ -405,6 +413,11 @@ pub async fn apply_snapshot(snapshot: &SyncSnapshot) -> Result<(), Error> {
         }
     }
     satellite::persist_generation(snapshot.generation).await?;
+    if let Ok(json) = serde_json::to_vec(snapshot) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::write(APPLIED_PATH, json).await;
+        let _ = std::fs::set_permissions(APPLIED_PATH, std::fs::Permissions::from_mode(0o600));
+    }
     crate::activity::log(
         "satellite",
         "apply",

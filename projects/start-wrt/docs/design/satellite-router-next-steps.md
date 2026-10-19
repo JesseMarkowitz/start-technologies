@@ -259,19 +259,40 @@ never cut on this build), re-adoption with the country check.
 
 ## Batch four — role gate and the AP's page (D7, D23)
 
-- ☐ Role-aware middleware: an AP serves an allowlist — its link and tunnel state, last generation,
-  its clients per port and radio with their profile, firmware, logs, restart, factory reset — and
-  refuses everything else, absent not read-only.
-- ☐ The AP's local page (D23): a separate minimal app sharing the recovery page's shell; "Satellite
-  _name_" heading, link to the Core, tunnel state, clients, firmware against the Core's, logs.
-  Open: whether it carries restart and factory reset itself or the Core issues them over the
-  tunnel.
-- ☐ Core UI: Satellites page (adopt with the D24 code or sticker password, candidates list,
-  status, unpair, saved configurations), the trunk approval dialog listing devices that lose
-  access (D19), the channel plan view with pins and re-plan preview (D20).
-- ☐ Device list: an AP's Wi-Fi clients show as Wi-Fi on the AP, not "Ethernet" on the Core (D13
-  revised: the AP reports which radio or port each client is on; the Core already has the
-  leases).
+Written 2026-10-18 (`middleware/role.rs`, `ap_page.rs`, `web/src/app/routes/access-points/`).
+
+- ☑ Role gate: `RoleGate` runs ahead of session auth on the daemon's RPC server; on an adopted
+  AP every method outside `satellite.get-role`, `satellite.status`, `satellite.adoption.code`,
+  `system.info`, `system.restart`, `auth.logout` is refused. Not built: factory reset (batch five).
+- ☑ The AP's page: server-rendered by the daemon at every path on an adopted AP, in place of the
+  embedded UI (no second Angular app: the page is a few kilobytes and recovery mode reuses it).
+  Heading "Satellite _name_" (the name is now in the role marker), link to `router.lan`, tunnel
+  state, generation applied against the Core's, firmware against the Core's (both come with the
+  Core's status calls), ports, radios, devices with their profile (from the applied payload kept
+  in `/etc/startwrt/applied.json`), the last 40 daemon log lines. No actions: still open whether
+  restart and factory reset live here or come from the Core over the tunnel.
+- ☑ Core UI: an **Access Points** page under Points of entry — adopted APs with contact state,
+  trunk port, generation, radio plan, per-port profile selector (`satellite.set-ports`), device
+  count and a Remove action with confirmation; candidates with an Adopt dialog taking the name and
+  the code or sticker password. The Ethernet page's profile selector gained "Trunk to access
+  points" behind a confirmation (D19), and a trunk can be turned back into a profile port. Not
+  built: the list of devices that lose access in that confirmation, saved configurations (batch
+  five), channel pins and the re-plan preview (no pins in the backend yet).
+- ☑ Device list: the AP reports its clients per port and radio in every status answer (`clients`
+  in `TunnelStatus`, kept in the registry); the Core's device list shows such a device as
+  "Wi-Fi 2.4GHz (garage)" or "Ethernet (garage)" instead of Ethernet on the trunk port.
+
+**Bench record, 2026-10-18.** On the BPI, `wifi.get` over HTTP answers "not available on an
+access point; use its Core" while `satellite.status` still asks for a session; the CLI on the
+box is not gated, since it runs handlers in-process as root. The BPI's address serves the page
+with its state, generation, firmware, ports, radios and the wired laptop with its VLAN; the
+first build showed "Satellite satellite" because the BPI had been adopted before names were
+recorded, so the Core's status call now carries the name; with that, and a generation applied
+on the new build, the page read "Satellite s1" with the laptop in guest. The Core's device list shows the
+laptop behind the BPI as "Ethernet (s1)"; `satellite.list` and the candidates list answer
+through the UI's login path with inventory, clients and the plan. The Access Points page and
+the trunk confirmation were type-checked and built, not clicked through: the bench has no
+browser.
 
 ## Batch five — recovery and the rest of adoption (D22)
 

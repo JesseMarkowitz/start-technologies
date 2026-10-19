@@ -784,6 +784,7 @@ async fn adopt_self(key: &WgKey, by: &proof::AdoptedBy, core_ip: &Ipv6Addr) -> R
     role.core_endpoint = Some(endpoint);
     role.core_key = Some(b64(by.core_key.as_bytes()));
     role.core_address = Some(t.core_tunnel_addr.clone());
+    role.name = Some(t.satellite.clone());
     role.uplink = Some(uplink.clone());
     role.generation = 0;
     satellite::persist_role(&role).await?;
