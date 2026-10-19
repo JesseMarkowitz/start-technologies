@@ -210,26 +210,52 @@ the rest runs on the 1.2.1 image.
 
 ## Batch three — config sync (D5)
 
-- ☐ Payload (`SyncSnapshot`): SSID, broadcast flags, passwords with their profile tags, access
-  ports keyed by the names the AP reported, country and the per-radio plan (D20), the update
-  source, `generation`. No addresses, no DNS, no subnets.
-- ☐ Core builder from `wifi`, `profiles` and `ethernet`; push over the management tunnel with the
-  Core as RPC client (`CliContext::call_remote` / `registry::call_registry_rpc` pattern) to a
-  `satellite.apply` endpoint the AP serves only from the tunnel (D4, D7).
-- ☐ AP apply: rewrite wireless, the profile `bridge-vlan`s and access ports from the payload;
-  reject an older generation; full reconcile on reconnect; version heartbeat. A payload whose
-  profile set changes restarts the AP's network (accepted for v1).
-- ☐ AP reports at adoption: port inventory (name, uplink, link), radios; on request a scan per
-  radio taken while dark (D20 input). Radios come from the kernel (`iw phy`, board.json), never
-  from UCI `wireless`: a stale `wifi-device` from an earlier detection survives there (the
-  bench BPI carries one for a phy that does not exist), and a single-phy MT7915 serves one band
-  at a time where the K1's MT7916 serves both.
-- ☐ Wi-Fi apply per D20: country and each radio's planned channel and width, never `auto`;
-  an unknown country refuses the snapshot; a refused channel takes the plan's next choice.
-- ☐ Core channel planner (D20): pure, unit-testable; runs at adoption, on a country change and on
-  request; preview before apply; pins honoured. Once a Core has an AP its own radios take the
-  plan too.
-- ☐ Adoption asks for the country when the Core has none (D20).
+Written 2026-10-18 (`sync.rs`, the tunnel API in `control.rs`; API contract §18).
+
+- ☑ Payload (`SyncSnapshot`): SSID, broadcast flag, country, every password with its profile's
+  VLAN (a password with no profile is Admin), every profile, the AP's access ports (only ports
+  it reported), its radio plan, the Core's update source, `generation`.
+- ☑ Core builder (`sync::build`) from `wifi::get`, the profile list and the registry's port
+  assignments (`satellite.set-ports`). Push is derived, not hooked: every liveness tick rebuilds
+  every AP's payload, hashes them, bumps the generation (`/etc/startwrt/sync.json`) when the
+  digest moves, reads each live AP's status over the tunnel and pushes to any AP behind, with a
+  30 s back-off after a failure. That covers the event push, the reconnect reconcile and the
+  heartbeat with one mechanism. The Core is an HTTP JSON-RPC client of the AP's tunnel API
+  (`http://<tunnel addr>:8720/rpc`, methods `apply`, `status`, `release`), which answers the
+  Core's tunnel address alone; the UDP control channel of batch two is gone and the public
+  `satellite.apply` RPC with it.
+- ☑ AP apply: rejects an older generation, treats the applied one as done, rewrites and reloads
+  as before. A payload whose profile set changes still restarts the AP's network (accepted).
+- ☑ AP inventory in every status answer: ports from `/sys/class/net` with link and uplink
+  flags; radios from UCI `wireless` `path` resolved to a phy (`+n` = the n-th phy on the device,
+  so the bench BPI's stale `radio1` is absent) with the bands `iw phy` lists. The scan per radio
+  while dark (D20 input) is not built.
+- ☑ Wi-Fi apply per D20: country and each planned radio's channel and width. Not built: refusing
+  an unknown country, falling back to the plan's next channel on a refusal.
+- ☑ Core channel planner (`sync::plan`, pure, tested): per AP radio, a band (a dual-band phy
+  takes 2.4 GHz first, a second radio the other band) and the least-used channel among 1/6/11
+  at HE20 or 36/40/44/48 at HE80, counting the Core's own radios and every other AP's plan. It
+  runs every tick as part of the build, so a country or channel change on the Core replans. Not
+  built: scans, pins, preview, the Core's own radios taking the plan.
+- ☑ D18's second half: an AP resumes only after the tunnel has held 10 s **and** it has applied
+  the generation the Core's last status call named.
+- ☑ Adoption refuses while the Core has no Wi-Fi country (D20). The bench K1 was given one.
+
+**Bench record, 2026-10-18.** On the two-router bench the first tick after deploy read the
+BPI's inventory (two ports, one dual-band radio; the stale `radio1` absent) and pushed
+generation 2; `set-ports s1 eth0=101` pushed generation 3 fourteen seconds later. The BPI then
+carried the Core's SSID and country, all six of the Core's passwords on their VLANs (the
+hand-written batch-one payload had carried one of the guest profile's three), every profile
+VLAN tagged on its uplink, the LAN jack on guest. The planned channel did not land at first:
+`write_wireless` looked the plan up by wifi-iface name instead of radio name, a batch-one slip
+the hand payload never reached; fixed with a test, and the next generation moved the BPI from
+channel 1 to the planned 6, clear of the Core. A push that succeeded no longer holds the next
+one back 30 s (seen as generation 5 waiting on generation 4's back-off), and the AP answers a
+push before its reload restarts the tunnel interface, which had read as a failed push at the
+Core. A phone then joined the AP with the third of the guest profile's passwords, the one the
+hand payload had lacked: hostapd assigned it VLAN 101 from that password and the Core leased
+it in guest through the trunk. Not yet proven: resume gated on the generation (the tunnel was
+never cut on this build), re-adoption with the country check.
 
 ## Batch four — role gate and the AP's page (D7, D23)
 

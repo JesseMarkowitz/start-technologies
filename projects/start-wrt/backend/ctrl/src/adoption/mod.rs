@@ -376,6 +376,17 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
         }
     }
 
+    // D20: the country is the Core's and travels in the payload.
+    if crate::wifi::get(ServerContext::default())
+        .await
+        .map(|w| w.country.is_none())
+        .unwrap_or(false)
+    {
+        return Err(Error::new(
+            eyre!("set the Core's Wi-Fi country before adopting an access point"),
+            ErrorKind::InvalidRequest,
+        ));
+    }
     let registry_guard = satellite::REGISTRY_LOCK.lock().await;
     let registry = satellite::load_registry();
     // A same-name re-adoption keeps the tunnel's addresses and port.

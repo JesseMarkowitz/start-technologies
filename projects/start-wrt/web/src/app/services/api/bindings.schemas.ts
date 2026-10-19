@@ -904,119 +904,6 @@ export const OutboundVpnUpdateRequest: z.ZodObject<{
 })
 
 /**
- * One access point the Core has adopted (`/etc/startwrt/satellites.json`).
- */
-export const PairedSatellite: z.ZodObject<{
-  /**
-   * Admin-facing label (unique).
-   */
-  name: z.ZodString
-  /**
-   * The satellite's WireGuard public key (base64), pinned at adoption.
-   */
-  publicKey: z.ZodString
-  /**
-   * The satellite's address inside its management tunnel.
-   */
-  mgmtAddress: z.ZodString
-  /**
-   * The config generation this satellite last acknowledged (0 = never).
-   */
-  generationApplied: z.ZodCodec<z.ZodOptional<z.ZodInt>, z.ZodInt>
-  /**
-   * Unix seconds of last successful contact (0 = never).
-   */
-  lastSeen: z.ZodCodec<z.ZodOptional<z.ZodInt>, z.ZodInt>
-  /**
-   * Where its tunnel last handshaked from, as `wg` prints it; the Core
-   * re-pins it after a reload so it can initiate.
-   */
-  endpoint: z.ZodOptional<z.ZodNullable<z.ZodString>>
-  /**
-   * The Core's trunk port its tunnel comes through, while it is live.
-   */
-  port: z.ZodOptional<z.ZodNullable<z.ZodString>>
-  /**
-   * Its tunnel is receiving traffic (D18).
-   */
-  live: z.ZodCodec<z.ZodOptional<z.ZodBoolean>, z.ZodBoolean>
-}> = /* @__PURE__ */ object({
-  /**
-   * Admin-facing label (unique).
-   */
-  name: z.string().meta({
-    description: 'Admin-facing label (unique).',
-  }),
-  /**
-   * The satellite's WireGuard public key (base64), pinned at adoption.
-   */
-  publicKey: z.string().meta({
-    description:
-      "The satellite's WireGuard public key (base64), pinned at adoption.",
-  }),
-  /**
-   * The satellite's address inside its management tunnel.
-   */
-  mgmtAddress: z.string().meta({
-    description: "The satellite's address inside its management tunnel.",
-  }),
-  /**
-   * The config generation this satellite last acknowledged (0 = never).
-   */
-  generationApplied: wire(z.int().optional(), z.int()).meta({
-    description:
-      'The config generation this satellite last acknowledged (0 = never).',
-  }),
-  /**
-   * Unix seconds of last successful contact (0 = never).
-   */
-  lastSeen: wire(z.int().optional(), z.int()).meta({
-    description: 'Unix seconds of last successful contact (0 = never).',
-  }),
-  /**
-   * Where its tunnel last handshaked from, as `wg` prints it; the Core
-   * re-pins it after a reload so it can initiate.
-   */
-  endpoint: z.string().nullable().optional().meta({
-    description:
-      'Where its tunnel last handshaked from, as `wg` prints it; the Core\nre-pins it after a reload so it can initiate.',
-  }),
-  /**
-   * The Core's trunk port its tunnel comes through, while it is live.
-   */
-  port: z.string().nullable().optional().meta({
-    description:
-      "The Core's trunk port its tunnel comes through, while it is live.",
-  }),
-  /**
-   * Its tunnel is receiving traffic (D18).
-   */
-  live: wire(z.boolean().optional(), z.boolean()).meta({
-    description: 'Its tunnel is receiving traffic (D18).',
-  }),
-}).meta({
-  id: 'PairedSatellite',
-  description:
-    'One access point the Core has adopted (`/etc/startwrt/satellites.json`).',
-})
-
-/**
- * One Wi-Fi password and the profile VLAN it lands on.
- */
-export const PasswordSpec: z.ZodObject<{
-  label: z.ZodString
-  key: z.ZodString
-  vlanTag: z.ZodInt
-}> = /* @__PURE__ */ object({
-  label: z.string(),
-  key: z.string(),
-  vlanTag: z.int(),
-}).meta({
-  id: 'PasswordSpec',
-  description: 'One Wi-Fi password and the profile VLAN it lands on.',
-})
-
-/**
  * Response from adding a peer, contains client config if keys were generated
  */
 export const PeerAddResponse: z.ZodObject<{
@@ -1082,6 +969,17 @@ export const PeerDeleteArgs: z.ZodObject<{
 }).meta({
   id: 'PeerDeleteArgs',
 })
+export const PortInfo: z.ZodObject<{
+  name: z.ZodString
+  uplink: z.ZodBoolean
+  link: z.ZodBoolean
+}> = /* @__PURE__ */ object({
+  name: z.string(),
+  uplink: z.boolean(),
+  link: z.boolean(),
+}).meta({
+  id: 'PortInfo',
+})
 export const ProfileId: z.ZodObject<{
   fullname: z.ZodString
   interface: z.ZodString
@@ -1113,22 +1011,6 @@ export const ProfileIdOpt: z.ZodObject<{
 }).meta({
   id: 'ProfileIdOpt',
 })
-
-/**
- * A profile as its VLAN crosses the trunk.
- */
-export const ProfileSpec: z.ZodObject<{
-  fullname: z.ZodString
-  interface: z.ZodString
-  vlanTag: z.ZodInt
-}> = /* @__PURE__ */ object({
-  fullname: z.string(),
-  interface: z.string(),
-  vlanTag: z.int(),
-}).meta({
-  id: 'ProfileSpec',
-  description: 'A profile as its VLAN crosses the trunk.',
-})
 export const Protocol: z.ZodEnum<{
   tcp: 'tcp'
   udp: 'udp'
@@ -1149,27 +1031,28 @@ export const PublishedPortStatus: z.ZodEnum<{
   })
 
 /**
- * One radio's assignment in the Core's channel plan.
+ * A radio by its wireless-config name, with the bands its phy serves.
  */
-export const RadioPlan: z.ZodObject<{
-  band: z.ZodString
-  channel: z.ZodInt
+export const RadioInfo: z.ZodObject<{
+  name: z.ZodString
+  phy: z.ZodString
   /**
-   * OpenWrt `htmode`, such as `HE80`.
+   * `2g`, `5g`, `6g`.
    */
-  htmode: z.ZodString
+  bands: z.ZodArray<z.ZodString>
 }> = /* @__PURE__ */ object({
-  band: z.string(),
-  channel: z.int(),
+  name: z.string(),
+  phy: z.string(),
   /**
-   * OpenWrt `htmode`, such as `HE80`.
+   * `2g`, `5g`, `6g`.
    */
-  htmode: z.string().meta({
-    description: 'OpenWrt `htmode`, such as `HE80`.',
+  bands: z.array(z.string()).meta({
+    description: '`2g`, `5g`, `6g`.',
   }),
 }).meta({
-  id: 'RadioPlan',
-  description: "One radio's assignment in the Core's channel plan.",
+  id: 'RadioInfo',
+  description:
+    'A radio by its wireless-config name, with the bands its phy serves.',
 })
 export const ResetPasswordParams: z.ZodObject<{
   oldPassword: z.ZodString
@@ -1271,6 +1154,23 @@ export const SetInitialPasswordParams: z.ZodObject<{ password: z.ZodString }> =
   /* @__PURE__ */ object({ password: z.string() }).meta({
     id: 'SetInitialPasswordParams',
   })
+export const SetPortsParams: z.ZodObject<{
+  name: z.ZodString
+  /**
+   * Access port assignments as `<port>=<vlan>` or `<port>=off`.
+   */
+  ports: z.ZodArray<z.ZodString>
+}> = /* @__PURE__ */ object({
+  name: z.string(),
+  /**
+   * Access port assignments as `<port>=<vlan>` or `<port>=off`.
+   */
+  ports: z.array(z.string()).meta({
+    description: 'Access port assignments as `<port>=<vlan>` or `<port>=off`.',
+  }),
+}).meta({
+  id: 'SetPortsParams',
+})
 export const SetPreferencesReq: z.ZodObject<{
   language: z.ZodCodec<
     z.ZodOptional<z.ZodNullable<z.ZodString>>,
@@ -1918,6 +1818,22 @@ export const EthernetSetResult: z.ZodObject<{
 }).meta({
   id: 'EthernetSetResult',
 })
+
+/**
+ * An access point's hardware as it reports it (design §21: no assumed port
+ * count; radios from the kernel, not from its wireless config).
+ */
+export const Inventory: z.ZodObject<{
+  ports: z.ZodArray<typeof PortInfo>
+  radios: z.ZodArray<typeof RadioInfo>
+}> = /* @__PURE__ */ object({
+  ports: z.array(PortInfo),
+  radios: z.array(RadioInfo),
+}).meta({
+  id: 'Inventory',
+  description:
+    "An access point's hardware as it reports it (design §21: no assumed port\ncount; radios from the kernel, not from its wireless config).",
+})
 export const LogsResponse: z.ZodObject<{
   entries: z.ZodArray<typeof LogEntry>
 }> = /* @__PURE__ */ object({ entries: z.array(LogEntry) }).meta({
@@ -2206,136 +2122,6 @@ export const SetupStatusRes: z.ZodObject<{
   disk: typeof DiskState
 }> = /* @__PURE__ */ object({ setupMode: z.boolean(), disk: DiskState }).meta({
   id: 'SetupStatusRes',
-})
-export const StatusResponse: z.ZodObject<{
-  role: typeof RouterRole
-  coreEndpoint: z.ZodCodec<
-    z.ZodOptional<z.ZodNullable<z.ZodString>>,
-    z.ZodNullable<z.ZodString>
-  >
-  uplink: z.ZodCodec<
-    z.ZodOptional<z.ZodNullable<z.ZodString>>,
-    z.ZodNullable<z.ZodString>
-  >
-  generation: z.ZodInt
-  /**
-   * On an access point: its management tunnel is receiving traffic.
-   */
-  tunnelLive: z.ZodCodec<
-    z.ZodOptional<z.ZodNullable<z.ZodBoolean>>,
-    z.ZodNullable<z.ZodBoolean>
-  >
-  /**
-   * On an access point: SSIDs down and access ports cut (D18); unset
-   * before the first reading.
-   */
-  dark: z.ZodCodec<
-    z.ZodOptional<z.ZodNullable<z.ZodBoolean>>,
-    z.ZodNullable<z.ZodBoolean>
-  >
-  satelliteCount: z.ZodInt
-  satellites: z.ZodArray<typeof PairedSatellite>
-}> = /* @__PURE__ */ object({
-  role: RouterRole,
-  coreEndpoint: wire(z.string().nullable().optional(), z.string().nullable()),
-  uplink: wire(z.string().nullable().optional(), z.string().nullable()),
-  generation: z.int(),
-  /**
-   * On an access point: its management tunnel is receiving traffic.
-   */
-  tunnelLive: wire(
-    z.boolean().nullable().optional(),
-    z.boolean().nullable(),
-  ).meta({
-    description:
-      'On an access point: its management tunnel is receiving traffic.',
-  }),
-  /**
-   * On an access point: SSIDs down and access ports cut (D18); unset
-   * before the first reading.
-   */
-  dark: wire(z.boolean().nullable().optional(), z.boolean().nullable()).meta({
-    description:
-      'On an access point: SSIDs down and access ports cut (D18); unset\nbefore the first reading.',
-  }),
-  satelliteCount: z.int(),
-  satellites: z.array(PairedSatellite),
-}).meta({
-  id: 'StatusResponse',
-})
-
-/**
- * What an access point needs from its Core (D5). `generation` is monotonic;
- * an access point rejects a snapshot older than the one it applied.
- */
-export const SyncSnapshot: z.ZodObject<{
-  generation: z.ZodInt
-  ssid: z.ZodString
-  broadcastSeparately: z.ZodCodec<z.ZodOptional<z.ZodBoolean>, z.ZodBoolean>
-  /**
-   * Unset runs the world regulatory domain.
-   */
-  country: z.ZodCodec<
-    z.ZodOptional<z.ZodNullable<z.ZodString>>,
-    z.ZodNullable<z.ZodString>
-  >
-  /**
-   * The Core's channel plan for this access point, keyed by its radio name.
-   */
-  radios: z.ZodRecord<z.ZodString, typeof RadioPlan>
-  profiles: z.ZodArray<typeof ProfileSpec>
-  passwords: z.ZodArray<typeof PasswordSpec>
-  /**
-   * Access ports by name: the profile VLAN each carries untagged, or none.
-   */
-  ports: z.ZodRecord<z.ZodString, z.ZodNullable<z.ZodInt>>
-  /**
-   * The registry the Core itself updates from. The access point reaches no other.
-   */
-  updateSource: z.ZodCodec<
-    z.ZodOptional<z.ZodNullable<z.ZodString>>,
-    z.ZodNullable<z.ZodString>
-  >
-}> = /* @__PURE__ */ object({
-  generation: z.int(),
-  ssid: z.string(),
-  broadcastSeparately: wire(z.boolean().optional(), z.boolean()),
-  /**
-   * Unset runs the world regulatory domain.
-   */
-  country: wire(z.string().nullable().optional(), z.string().nullable()).meta({
-    description: 'Unset runs the world regulatory domain.',
-  }),
-  /**
-   * The Core's channel plan for this access point, keyed by its radio name.
-   */
-  radios: z.record(z.string(), RadioPlan).meta({
-    description:
-      "The Core's channel plan for this access point, keyed by its radio name.",
-  }),
-  profiles: z.array(ProfileSpec),
-  passwords: z.array(PasswordSpec),
-  /**
-   * Access ports by name: the profile VLAN each carries untagged, or none.
-   */
-  ports: z.record(z.string(), z.int().nullable()).meta({
-    description:
-      'Access ports by name: the profile VLAN each carries untagged, or none.',
-  }),
-  /**
-   * The registry the Core itself updates from. The access point reaches no other.
-   */
-  updateSource: wire(
-    z.string().nullable().optional(),
-    z.string().nullable(),
-  ).meta({
-    description:
-      'The registry the Core itself updates from. The access point reaches no other.',
-  }),
-}).meta({
-  id: 'SyncSnapshot',
-  description:
-    'What an access point needs from its Core (D5). `generation` is monotonic;\nan access point rejects a snapshot older than the one it applied.',
 })
 export const UciFile: z.ZodObject<{
   sections: z.ZodArray<typeof Section>
@@ -2880,6 +2666,132 @@ export const WifiSetResult: z.ZodObject<{
 }).meta({
   id: 'WifiSetResult',
 })
+
+/**
+ * One access point the Core has adopted (`/etc/startwrt/satellites.json`).
+ */
+export const PairedSatellite: z.ZodObject<{
+  /**
+   * Admin-facing label (unique).
+   */
+  name: z.ZodString
+  /**
+   * The satellite's WireGuard public key (base64), pinned at adoption.
+   */
+  publicKey: z.ZodString
+  /**
+   * The satellite's address inside its management tunnel.
+   */
+  mgmtAddress: z.ZodString
+  /**
+   * The config generation this satellite last acknowledged (0 = never).
+   */
+  generationApplied: z.ZodCodec<z.ZodOptional<z.ZodInt>, z.ZodInt>
+  /**
+   * Unix seconds of last successful contact (0 = never).
+   */
+  lastSeen: z.ZodCodec<z.ZodOptional<z.ZodInt>, z.ZodInt>
+  /**
+   * Where its tunnel last handshaked from, as `wg` prints it; the Core
+   * re-pins it after a reload so it can initiate.
+   */
+  endpoint: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  /**
+   * The Core's trunk port its tunnel comes through, while it is live.
+   */
+  port: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  /**
+   * Its tunnel is receiving traffic (D18).
+   */
+  live: z.ZodCodec<z.ZodOptional<z.ZodBoolean>, z.ZodBoolean>
+  /**
+   * Access ports by name: the profile VLAN each carries untagged, or none.
+   * Set by the admin (`set-ports`); carried in every payload.
+   */
+  ports: z.ZodCodec<
+    z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodNullable<z.ZodInt>>>,
+    z.ZodRecord<z.ZodString, z.ZodNullable<z.ZodInt>>
+  >
+  /**
+   * What it reported last: its ports and radios.
+   */
+  inventory: z.ZodOptional<z.ZodNullable<typeof Inventory>>
+}> = /* @__PURE__ */ object({
+  /**
+   * Admin-facing label (unique).
+   */
+  name: z.string().meta({
+    description: 'Admin-facing label (unique).',
+  }),
+  /**
+   * The satellite's WireGuard public key (base64), pinned at adoption.
+   */
+  publicKey: z.string().meta({
+    description:
+      "The satellite's WireGuard public key (base64), pinned at adoption.",
+  }),
+  /**
+   * The satellite's address inside its management tunnel.
+   */
+  mgmtAddress: z.string().meta({
+    description: "The satellite's address inside its management tunnel.",
+  }),
+  /**
+   * The config generation this satellite last acknowledged (0 = never).
+   */
+  generationApplied: wire(z.int().optional(), z.int()).meta({
+    description:
+      'The config generation this satellite last acknowledged (0 = never).',
+  }),
+  /**
+   * Unix seconds of last successful contact (0 = never).
+   */
+  lastSeen: wire(z.int().optional(), z.int()).meta({
+    description: 'Unix seconds of last successful contact (0 = never).',
+  }),
+  /**
+   * Where its tunnel last handshaked from, as `wg` prints it; the Core
+   * re-pins it after a reload so it can initiate.
+   */
+  endpoint: z.string().nullable().optional().meta({
+    description:
+      'Where its tunnel last handshaked from, as `wg` prints it; the Core\nre-pins it after a reload so it can initiate.',
+  }),
+  /**
+   * The Core's trunk port its tunnel comes through, while it is live.
+   */
+  port: z.string().nullable().optional().meta({
+    description:
+      "The Core's trunk port its tunnel comes through, while it is live.",
+  }),
+  /**
+   * Its tunnel is receiving traffic (D18).
+   */
+  live: wire(z.boolean().optional(), z.boolean()).meta({
+    description: 'Its tunnel is receiving traffic (D18).',
+  }),
+  /**
+   * Access ports by name: the profile VLAN each carries untagged, or none.
+   * Set by the admin (`set-ports`); carried in every payload.
+   */
+  ports: wire(
+    z.record(z.string(), z.int().nullable()).optional(),
+    z.record(z.string(), z.int().nullable()),
+  ).meta({
+    description:
+      'Access ports by name: the profile VLAN each carries untagged, or none.\nSet by the admin (`set-ports`); carried in every payload.',
+  }),
+  /**
+   * What it reported last: its ports and radios.
+   */
+  inventory: Inventory.nullable().optional().meta({
+    description: 'What it reported last: its ports and radios.',
+  }),
+}).meta({
+  id: 'PairedSatellite',
+  description:
+    'One access point the Core has adopted (`/etc/startwrt/satellites.json`).',
+})
 export const PublishedPortsSetRequest: z.ZodObject<{
   ports: z.ZodArray<typeof PublishedPortInput>
 }> = /* @__PURE__ */ object({ ports: z.array(PublishedPortInput) }).meta({
@@ -2934,6 +2846,62 @@ export const WifiRegulatory: z.ZodObject<{
   }),
 }).meta({
   id: 'WifiRegulatory',
+})
+export const StatusResponse: z.ZodObject<{
+  role: typeof RouterRole
+  coreEndpoint: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodString>>,
+    z.ZodNullable<z.ZodString>
+  >
+  uplink: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodString>>,
+    z.ZodNullable<z.ZodString>
+  >
+  generation: z.ZodInt
+  /**
+   * On an access point: its management tunnel is receiving traffic.
+   */
+  tunnelLive: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodBoolean>>,
+    z.ZodNullable<z.ZodBoolean>
+  >
+  /**
+   * On an access point: SSIDs down and access ports cut (D18); unset
+   * before the first reading.
+   */
+  dark: z.ZodCodec<
+    z.ZodOptional<z.ZodNullable<z.ZodBoolean>>,
+    z.ZodNullable<z.ZodBoolean>
+  >
+  satelliteCount: z.ZodInt
+  satellites: z.ZodArray<typeof PairedSatellite>
+}> = /* @__PURE__ */ object({
+  role: RouterRole,
+  coreEndpoint: wire(z.string().nullable().optional(), z.string().nullable()),
+  uplink: wire(z.string().nullable().optional(), z.string().nullable()),
+  generation: z.int(),
+  /**
+   * On an access point: its management tunnel is receiving traffic.
+   */
+  tunnelLive: wire(
+    z.boolean().nullable().optional(),
+    z.boolean().nullable(),
+  ).meta({
+    description:
+      'On an access point: its management tunnel is receiving traffic.',
+  }),
+  /**
+   * On an access point: SSIDs down and access ports cut (D18); unset
+   * before the first reading.
+   */
+  dark: wire(z.boolean().nullable().optional(), z.boolean().nullable()).meta({
+    description:
+      'On an access point: SSIDs down and access ports cut (D18); unset\nbefore the first reading.',
+  }),
+  satelliteCount: z.int(),
+  satellites: z.array(PairedSatellite),
+}).meta({
+  id: 'StatusResponse',
 })
 export const Api = {
   _PARAMS: /* @__PURE__ */ empty,
@@ -3578,13 +3546,6 @@ export const Api = {
             },
           },
         },
-        apply: {
-          _PARAMS: /* @__PURE__ */ SyncSnapshot.meta({
-            description:
-              'A clap-compatible wrapper that reads the inner value as JSON from stdin\ninstead of from CLI args. Used for commands that take complex structured\ninput (entire profile objects, etc.).\n\nThis is a thin wrapper around `startos::util::serde::StdinDeserializable`\nthat adds a `CommandFactory` impl so it can be used directly as a handler\n`Params` type (rather than flattened inside a `#[derive(Parser)]` struct,\nwhich is how startos uses its version).',
-          }),
-          _RETURN: /* @__PURE__ */ z.null(),
-        },
         'get-role': {
           _PARAMS: /* @__PURE__ */ z.intersection(
             z.intersection(
@@ -3614,6 +3575,10 @@ export const Api = {
             empty,
           ),
           _RETURN: /* @__PURE__ */ z.array(PairedSatellite),
+        },
+        'set-ports': {
+          _PARAMS: /* @__PURE__ */ SetPortsParams,
+          _RETURN: /* @__PURE__ */ z.null(),
         },
         'set-role': {
           _PARAMS: /* @__PURE__ */ SetRoleParams,

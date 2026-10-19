@@ -180,35 +180,21 @@ export type OutboundVpnUpdateRequestInput = z.input<
 >
 
 /**
- * One access point the Core has adopted (`/etc/startwrt/satellites.json`).
- */
-export type PairedSatellite = z.output<typeof schemas.PairedSatellite>
-
-/**
- * One Wi-Fi password and the profile VLAN it lands on.
- */
-export type PasswordSpecInput = z.input<typeof schemas.PasswordSpec>
-
-/**
  * Response from adding a peer, contains client config if keys were generated
  */
 export type PeerAddResponse = z.output<typeof schemas.PeerAddResponse>
 export type PeerDeleteArgsInput = z.input<typeof schemas.PeerDeleteArgs>
+export type PortInfo = z.output<typeof schemas.PortInfo>
 export type ProfileId = z.output<typeof schemas.ProfileId>
 export type ProfileIdOptInput = z.input<typeof schemas.ProfileIdOpt>
-
-/**
- * A profile as its VLAN crosses the trunk.
- */
-export type ProfileSpecInput = z.input<typeof schemas.ProfileSpec>
 export type Protocol = z.output<typeof schemas.Protocol>
 export type ProtocolInput = z.input<typeof schemas.Protocol>
 export type PublishedPortStatus = z.output<typeof schemas.PublishedPortStatus>
 
 /**
- * One radio's assignment in the Core's channel plan.
+ * A radio by its wireless-config name, with the bands its phy serves.
  */
-export type RadioPlanInput = z.input<typeof schemas.RadioPlan>
+export type RadioInfo = z.output<typeof schemas.RadioInfo>
 export type ResetPasswordParamsInput = z.input<
   typeof schemas.ResetPasswordParams
 >
@@ -231,6 +217,7 @@ export type SetFileArgsInput = z.input<typeof schemas.SetFileArgs>
 export type SetInitialPasswordParamsInput = z.input<
   typeof schemas.SetInitialPasswordParams
 >
+export type SetPortsParamsInput = z.input<typeof schemas.SetPortsParams>
 export type SetPreferencesReqInput = z.input<typeof schemas.SetPreferencesReq>
 export type SetRoleParamsInput = z.input<typeof schemas.SetRoleParams>
 export type SetTimezoneParamsInput = z.input<typeof schemas.SetTimezoneParams>
@@ -291,6 +278,12 @@ export type EditArgsInput = z.input<typeof schemas.EditArgs>
  */
 export type EthernetSetRequestInput = z.input<typeof schemas.EthernetSetRequest>
 export type EthernetSetResult = z.output<typeof schemas.EthernetSetResult>
+
+/**
+ * An access point's hardware as it reports it (design §21: no assumed port
+ * count; radios from the kernel, not from its wireless config).
+ */
+export type Inventory = z.output<typeof schemas.Inventory>
 export type LogsResponse = z.output<typeof schemas.LogsResponse>
 export type PeerAddArgsInput = z.input<typeof schemas.PeerAddArgs>
 export type ProfileSetRequestInput = z.input<typeof schemas.ProfileSetRequest>
@@ -304,13 +297,6 @@ export type RoleMarker = z.output<typeof schemas.RoleMarker>
 export type ScheduleWindowsInput = z.input<typeof schemas.ScheduleWindows>
 export type SetArgsInput = z.input<typeof schemas.SetArgs>
 export type SetupStatusRes = z.output<typeof schemas.SetupStatusRes>
-export type StatusResponse = z.output<typeof schemas.StatusResponse>
-
-/**
- * What an access point needs from its Core (D5). `generation` is monotonic;
- * an access point rejects a snapshot older than the one it applied.
- */
-export type SyncSnapshotInput = z.input<typeof schemas.SyncSnapshot>
 export type UciFile = z.output<typeof schemas.UciFile>
 export type UciFileInput = z.input<typeof schemas.UciFile>
 
@@ -345,6 +331,11 @@ export type WanPortCollision = z.output<typeof schemas.WanPortCollision>
  */
 export type WifiSetRequestInput = z.input<typeof schemas.WifiSetRequest>
 export type WifiSetResult = z.output<typeof schemas.WifiSetResult>
+
+/**
+ * One access point the Core has adopted (`/etc/startwrt/satellites.json`).
+ */
+export type PairedSatellite = z.output<typeof schemas.PairedSatellite>
 export type PublishedPortsSetRequestInput = z.input<
   typeof schemas.PublishedPortsSetRequest
 >
@@ -362,4 +353,5 @@ export type PublishedPortsSetResult = z.output<
  */
 export type VpnServers = z.output<typeof schemas.VpnServers>
 export type WifiRegulatory = z.output<typeof schemas.WifiRegulatory>
+export type StatusResponse = z.output<typeof schemas.StatusResponse>
 export type Api = RpcSchemaTree<typeof schemas.Api>

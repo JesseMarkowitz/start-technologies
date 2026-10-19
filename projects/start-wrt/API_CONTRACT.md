@@ -2030,7 +2030,26 @@ nftables gate under `/usr/share/nftables.d`, filled from a 5 s liveness loop; it
 `kmod-nft-bridge` and is not written without it), and an access point whose tunnel has gone
 quiet for 45 s takes its Wi-Fi down and cuts its access ports until the tunnel has held for
 10 s. Each end echoes the other's tunnel address every 5 s, so "quiet" means the peer is gone,
-not that WireGuard's keepalive scheduling fell silent on one side. The Core answers NTP and DNS on its end of every tunnel and forwards an access point
+not that WireGuard's keepalive scheduling fell silent on one side.
+
+**Config sync (D5, D20).** Every 5 s the Core rebuilds each access point's payload from its own
+Wi-Fi settings (SSID, country, every password with the VLAN of its profile), its profiles, the
+port assignments set with `satellite.set-ports`, a channel plan for the access point's reported
+radios (2.4 GHz channels 1/6/11 at HE20, 5 GHz 36–48 at HE80, the least used across the Core
+and every access point; a dual-band phy takes 2.4 GHz first) and its own update source. A
+digest of all payloads decides whether the generation advances (`/etc/startwrt/sync.json`), so a
+change anywhere reaches every live access point within seconds with no hook in the code that
+made it. An access point behind the current generation is pushed to over the tunnel; one that
+fails is retried after 30 s. An access point that is dark reopens only once it has applied the
+Core's current generation (D18).
+
+**Tunnel API.** An adopted access point serves JSON-RPC at `http://<its tunnel address>:8720/rpc`
+and answers only the Core's tunnel address. Methods: `apply` (params: a `SyncSnapshot`; refuses a
+generation older than the applied one, treats the same as done), `status` (params
+`{ coreGeneration }`; returns `TunnelStatus { generation, tunnelLive, dark, inventory }`), `release`
+(the Core has forgotten this access point). The access point reads its inventory from the
+kernel: ports from `/sys/class/net` with link state, radios from its wireless config's `path`
+resolved to a phy and the bands `iw phy` lists, so a stale `wifi-device` with no phy is absent. The Core answers NTP and DNS on its end of every tunnel and forwards an access point
 only to the update source it is itself configured with (HTTPS to the registry host and the
 hosts its asset URLs name, resolved every 10 minutes into fw4 sets `sat_reach4`/`sat_reach6`).
 
@@ -2077,7 +2096,12 @@ struct PairedSatellite {
     endpoint: Option<String>,   // where its tunnel last handshaked from, as `wg` prints it
     port: Option<String>,       // the Core's trunk port its tunnel comes through, while live
     live: bool,                 // its tunnel is receiving traffic (D18)
+    ports: BTreeMap<String, Option<u16>>, // access port -> profile VLAN untagged, or null for off
+    inventory: Option<Inventory>,          // what it reported last
 }
+struct Inventory { ports: Vec<PortInfo>, radios: Vec<RadioInfo> }
+struct PortInfo { name: String, uplink: bool, link: bool }
+struct RadioInfo { name: String, phy: String, bands: Vec<String> } // "2g" | "5g" | "6g"
 // Response: Vec<PairedSatellite>
 // Core-only (Authorization error on a satellite). `endpoint`, `port`, `live` and
 // `lastSeen` are written by the daemon's liveness loop, at most once a minute while
@@ -2118,7 +2142,21 @@ struct SatelliteStatus {
 // Response: SatelliteStatus
 ```
 
-### `satellite.apply`
+### `satellite.set-ports`
+
+```rust
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetPortsRequest {
+    name: String,
+    ports: Vec<String>,  // "<port>=<vlan>" or "<port>=off"
+}
+// Response: null. Core-only. NotFound for an unknown name; InvalidRequest for a VLAN no
+// profile carries, a port the access point has not reported, or its uplink. Replaces the
+// access point's assignments; the next sync tick carries them.
+```
+
+### The sync payload
 
 ```rust
 #[derive(Deserialize)]
@@ -2135,12 +2173,11 @@ struct SyncSnapshot {
     updateSource: Option<String>,          // the registry the Core updates from
 }
 struct RadioPlan { band: String, channel: u32, htmode: String }
-// Response: null. Satellite-only; Uninitialized before adoption.
-// Backend: rewrites network (the uplink tagged on every profile VLAN and untagged on the
+// Built by the Core and pushed through the tunnel API's `apply`; not a public RPC. The
+// access point rewrites network (the uplink tagged on every profile VLAN and untagged on the
 // backhaul VLAN, an address-less interface per profile, access ports), wireless (SSID,
 // per-password dynamic VLAN, wifi-vlan per profile, radios enabled with the plan) and
 // firewall (no LAN or WAN zone), then reloads network, firewall, dnsmasq and wifi.
-// Fed by hand until the Core pushes it over the management tunnel.
 ```
 
 ### `satellite.adoption.candidates`
@@ -2181,8 +2218,9 @@ struct AdoptResponse { name: String, satelliteKey: String, interface: String } /
 // Core-only. Runs the D24 proof exchange with the candidate over link-local UDP 8719:
 // hello -> offer -> confirm, each proof a keyed hash under the secret over both
 // challenges and both WireGuard keys (the Core's also over the tunnel it dictates).
-// On success the Core provisions its end of the management tunnel (listening on the
-// backhaul zone, answering NTP, with the update-reach sets and rules) and records the
+// Refused (InvalidRequest) while the Core has no Wi-Fi country: the country travels in the
+// payload (D20). On success the Core provisions its end of the management tunnel (listening
+// on the backhaul zone, answering NTP, with the update-reach sets and rules) and records the
 // access point; the access point puts its uplink into its bridge, drops its WAN and LAN
 // addressing, and dials the Core through the backhaul VLAN while listening on UDP 51899
 // for the Core's own handshakes, with its default route, resolver and time source inside

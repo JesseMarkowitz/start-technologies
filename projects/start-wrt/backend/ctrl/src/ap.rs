@@ -302,12 +302,12 @@ fn write_wireless(cfgs: &mut Configs, snapshot: &SyncSnapshot) -> Result<(), Err
         let Some(name) = section.name().map(|n| n.to_string()) else {
             continue;
         };
-        let Some((radio, _)) = ap_ifaces.iter().find(|(_, dev)| *dev == name) else {
+        if !ap_ifaces.iter().any(|(_, dev)| *dev == name) {
             continue;
-        };
+        }
         device.disabled = false;
         device.country = snapshot.country.clone();
-        if let Some(plan) = snapshot.radios.get(radio) {
+        if let Some(plan) = snapshot.radios.get(&name) {
             device.band = plan.band.clone();
             device.channel = uciedit::openwrt::WifiChannel::Int(plan.channel);
             device.htmode = Some(plan.htmode.clone());
@@ -365,7 +365,8 @@ pub fn accept_generation(applied: u64, incoming: u64) -> Result<bool, Error> {
     }
 }
 
-/// Applies a payload the Core pushed over the tunnel (D5).
+/// Applies a payload the Core pushed over the tunnel (D5). The reload that
+/// follows restarts the tunnel interface, so it runs after the reply is sent.
 #[instrument(skip_all)]
 pub async fn apply_snapshot(snapshot: &SyncSnapshot) -> Result<(), Error> {
     let role = satellite::load_role();
@@ -404,7 +405,6 @@ pub async fn apply_snapshot(snapshot: &SyncSnapshot) -> Result<(), Error> {
         }
     }
     satellite::persist_generation(snapshot.generation).await?;
-    reload_all().await;
     crate::activity::log(
         "satellite",
         "apply",
@@ -412,6 +412,16 @@ pub async fn apply_snapshot(snapshot: &SyncSnapshot) -> Result<(), Error> {
         &format!("Applied configuration generation {}", snapshot.generation),
         None,
     );
+    std::thread::spawn(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("reload runtime")
+            .block_on(async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                reload_all().await;
+            });
+    });
     Ok(())
 }
 
@@ -469,7 +479,14 @@ config dhcp 'lan'\n\toption interface 'lan'\n\toption start '100'\n\toption limi
             ssid: "Home".into(),
             broadcast_separately: false,
             country: Some("US".into()),
-            radios: BTreeMap::new(),
+            radios: BTreeMap::from([(
+                "radio0".to_string(),
+                crate::satellite::RadioPlan {
+                    band: "2g".into(),
+                    channel: 6,
+                    htmode: "HE20".into(),
+                },
+            )]),
             profiles: vec![
                 ProfileSpec {
                     fullname: "Admin".into(),
@@ -572,6 +589,7 @@ config dhcp 'lan'\n\toption interface 'lan'\n\toption start '100'\n\toption limi
         assert!(wl.contains("option dynamic_vlan '1'"), "{wl}");
         assert!(wl.contains("option disabled '0'"), "{wl}");
         assert!(wl.contains("option country 'US'"), "{wl}");
+        assert!(wl.contains("option channel '6'"), "{wl}");
         assert!(wl.contains("option vid '101'"), "{wl}");
         assert!(wl.contains("option key 'guestpassword'"), "{wl}");
         assert_eq!(wl.matches("config wifi-vlan").count(), 1, "{wl}");

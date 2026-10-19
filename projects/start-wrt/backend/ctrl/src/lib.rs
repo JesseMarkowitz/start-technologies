@@ -45,6 +45,7 @@ pub mod setup;
 pub mod sign;
 pub mod ssh_keys;
 pub mod ssl;
+pub mod sync;
 pub mod system;
 pub mod uci;
 pub mod update;

@@ -3,8 +3,8 @@
 //!
 //! The Core opens a trunk port only while an adopted access point's tunnel
 //! is alive through it, re-pins the endpoint it last learned so it can
-//! initiate a handshake itself, and keeps the access point's path to the
-//! update source resolved. An access point whose tunnel is not alive takes
+//! initiate a handshake itself, keeps the access point's path to the update
+//! source resolved, and runs config sync over the live tunnels (`sync`). An access point whose tunnel is not alive takes
 //! its SSIDs down and cuts its access ports, and brings them back once the
 //! tunnel has held for a moment.
 //!
@@ -26,7 +26,8 @@ use crate::satellite::{self, RouterRole};
 pub const TICK: Duration = Duration::from_secs(5);
 /// One keepalive may be lost; two in a row is dark.
 pub const THRESHOLD: Duration = Duration::from_secs(45);
-/// A resumed tunnel must hold this long before the access point reopens.
+/// A resumed tunnel must hold this long before the access point reopens, and
+/// the access point must have applied the Core's current generation (D18).
 pub const RESUME_AFTER: Duration = Duration::from_secs(10);
 /// A session is renewed at least this often while traffic flows; an older
 /// handshake on first sight says nothing about the present.
@@ -227,6 +228,7 @@ async fn repin_endpoint(interface: &str, public_key: &str, endpoint: &str) {
 
 async fn run_core() {
     let mut monitors: BTreeMap<String, Monitor> = BTreeMap::new();
+    let mut pusher = crate::sync::Pusher::default();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_persist = Instant::now();
@@ -300,6 +302,15 @@ async fn run_core() {
                 sat.last_seen = now_unix as i64;
             }
         }
+        let live_names: BTreeSet<String> = registry
+            .iter()
+            .filter(|s| s.live)
+            .map(|s| s.name.clone())
+            .collect();
+        match crate::sync::tick(&mut registry, &live_names, &mut pusher).await {
+            Ok(c) => changed |= c,
+            Err(e) => tracing::warn!("sync: tick failed: {e}"),
+        }
         if changed || (registry.iter().any(|s| s.live) && last_persist.elapsed() > PERSIST_EVERY) {
             if let Err(e) = satellite::persist_registry(&registry).await {
                 tracing::error!("liveness: registry not saved: {e}");
@@ -341,6 +352,14 @@ pub fn ap_status() -> (bool, Option<bool>) {
         _ => None,
     };
     (TUNNEL_LIVE.load(Ordering::Relaxed) == 1, dark)
+}
+
+/// The Core has said which generation is current and this access point has
+/// applied it. Before the first status call nothing is known, and the access
+/// point stays dark (D18: a tunnel alone is not enough).
+fn reconciled() -> bool {
+    let core = crate::control::core_generation();
+    core > 0 && satellite::load_role().generation >= core
 }
 
 /// Bridge ports that are neither the uplink nor a radio.
@@ -416,7 +435,7 @@ async fn run_ap() {
             STATE_UP => {}
             STATE_DARK if live => {
                 let since = *live_since.get_or_insert(now);
-                if now.duration_since(since) >= RESUME_AFTER {
+                if now.duration_since(since) >= RESUME_AFTER && reconciled() {
                     resume(&uplink).await;
                     AP_STATE.store(STATE_UP, Ordering::Relaxed);
                     live_since = None;

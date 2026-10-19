@@ -13,3 +13,7 @@
   cuts its other ports until the Core is back. An access point takes its time from the
   Core and reaches nothing beyond it except the Core's own update source. Removing an
   access point on the Core releases it to wait for a new Core.
+- **Access points follow the Core's settings by themselves.** Every Wi-Fi password, profile
+  and port assignment the Core holds reaches its access points within seconds of a change,
+  with the Core choosing each access point's Wi-Fi channels. An access point that has been
+  out of contact serves no one until it has caught up.

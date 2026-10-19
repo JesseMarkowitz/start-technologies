@@ -7,7 +7,6 @@ use std::path::Path;
 
 use clap::Parser;
 use rpc_toolkit::{from_fn_async, from_fn_async_local, HandlerExt, ParentHandler};
-
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
@@ -239,7 +238,7 @@ pub fn satellite<C: CtrlContext>() -> ParentHandler<C> {
         )
         .subcommand(
             "set-ports",
-            from_fn_async(set_ports)
+            from_fn_async_local(set_ports)
                 .no_display()
                 .with_call_remote::<CliContext>(),
         )
@@ -369,8 +368,7 @@ pub async fn unpair<C: CtrlContext>(
 pub struct SetPortsParams {
     name: String,
     /// Access port assignments as `<port>=<vlan>` or `<port>=off`.
-    #[clap(value_parser = parse_port_assignment)]
-    ports: Vec<(String, Option<u16>)>,
+    ports: Vec<String>,
 }
 rpc_toolkit::reflect_ts!(SetPortsParams);
 
@@ -392,6 +390,11 @@ pub async fn set_ports(
     SetPortsParams { name, ports }: SetPortsParams,
 ) -> Result<(), Error> {
     ensure_core()?;
+    let ports = ports
+        .iter()
+        .map(|p| parse_port_assignment(p))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|m| Error::new(eyre!("{m}"), ErrorKind::InvalidRequest))?;
     let tags: std::collections::BTreeSet<u16> = {
         let arena = uciedit::Arena::new();
         let cfgs = uciedit::parse_all(ctx.uci_root(), &arena, &["startwrt"]).await?;
