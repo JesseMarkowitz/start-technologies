@@ -208,6 +208,22 @@ the AP reaches no other client; `unpair` releases the AP and it is adopted again
 backhaul. Gating and the guard need an image with `kmod-nft-bridge` flashed on both routers;
 the rest runs on the 1.2.1 image.
 
+**Bench record, 2026-10-19, on the image.** Both routers were upgraded in place (`sysupgrade`,
+settings kept) to the image carrying `kmod-nft-bridge`. The Core wrote the gate at boot, closed
+with an empty set, and held the trunk port in the set within a tick of the first handshake.
+Flushing the set by hand dropped every ping to a wired client behind the AP on the egress rule;
+the next tick restored the port. With the AP's tunnel interface taken down for 70 s the Core
+logged the AP dark 60 s after the last receive, dropped nine profile frames while closed, and
+reopened two seconds after the first handshake back; the AP, whose missing interface counts as
+dead at once, opened recovery 70 s in and resumed 12 s after the Core returned. The AP's guard
+is the variant with its uplink exempted. Two lessons. The pre-release images' keep lists did
+not carry the role, registry, generation, reach and applied files, so an upgrade off them loses
+them once; the new keep.d carries them, and the Core floors its generation at the highest one an
+AP reports in case its own is lost. And a gate file removed on a router that stopped being a
+Core left its table in the kernel, closed, because fw4 reloads only its own table; `remove_gate`
+now deletes the table. Still not driven: a managed switch on the trunk, the stale-clock reboot,
+a rogue DHCP server behind the AP.
+
 ## Batch three — config sync (D5)
 
 Written 2026-10-18 (`sync.rs`, the tunnel API in `control.rs`; API contract §18).
@@ -354,10 +370,11 @@ router with no password cabled to the trunk).
 
 ## Packaging, docs, upstream
 
-- ☐ `build/openwrt.diffconfig`: `kmod-nft-bridge` (batch one). `kmod-wireguard` is already
-  there. Start9's AP board needs its own image target when the board exists.
-- ☐ `build/stage-files.sh`: the AP guard variant and the gating file under `/usr/share/`; keep
-  set unchanged.
+- ☑ `build/openwrt.diffconfig`: `kmod-nft-bridge` (batch one); the image was built and flashed on
+  both bench routers 2026-10-19. `kmod-wireguard` is already there.
+- ☐ Start9's AP board needs its own image target when the board exists.
+- ☑ `build/stage-files.sh`: the daemon writes the AP guard variant and the gating file under
+  `/usr/share/` itself; the keep set gained the role, registry, generation, reach and applied files.
 - ☐ Loop protection (design §6 risk 12, a v1 requirement): every bridge with a trunk port runs
   STP or an equivalent that recovers without a reboot; bench check with a deliberately cabled
   second path. Wi-Fi backhaul stays out until §11's rules hold.
@@ -377,6 +394,6 @@ router with no password cabled to the trunk).
   `opt-level 0`; see the workspace notes), `make start-wrt-format-check`, `npm run check:wrt`,
   `make start-wrt-rpc-bindings-check` after any RPC change.
 - On the bench: the exit checks of each batch above, driven from the client's side and with
-  evidence from both routers. Batch two and the guard variant need an image build
-  (`make start-wrt-image`, hours) flashed on both routers; everything in batch one runs on the
-  1.2.1 image with the branch binary deployed over SSH.
+  evidence from both routers. The gate and the guard variant need the image with
+  `kmod-nft-bridge` (`make start-wrt-image`, hours) on both routers, which the bench has run since
+  2026-10-19; the rest runs with the branch binary deployed over SSH.

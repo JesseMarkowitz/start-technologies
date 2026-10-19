@@ -102,6 +102,20 @@ async fn write_if_changed(path: &str, content: &str) -> Result<bool, Error> {
     Ok(true)
 }
 
+/// fw4 reloads only its own table, so a removed include leaves the gate in
+/// the kernel, closed.
+async fn remove_gate() -> Result<bool, Error> {
+    let removed = remove_if_present(GATE_PATH).await?;
+    let _ = tokio::process::Command::new("nft")
+        .args(["delete", "table", "bridge", GATE_TABLE])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    Ok(removed)
+}
+
 async fn remove_if_present(path: &str) -> Result<bool, Error> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(true),
@@ -128,14 +142,14 @@ pub async fn sync_core(has_trunk: bool) -> Result<bool, Error> {
                 "trunk gating unavailable: {BRIDGE_META_MODULE} is not in this image; the trunk stays open"
             );
         }
-        changed |= remove_if_present(GATE_PATH).await?;
+        changed |= remove_gate().await?;
     }
     Ok(changed)
 }
 
 /// An access point's files: no gate, and the guard variant or no guard.
 pub async fn sync_ap(uplink: &str) -> Result<bool, Error> {
-    let mut changed = remove_if_present(GATE_PATH).await?;
+    let mut changed = remove_gate().await?;
     if meta_available() {
         changed |= write_if_changed(GUARD_PATH, &ap_guard(uplink)?).await?;
     } else {

@@ -218,6 +218,11 @@ cat > "${FILES_DIR}/lib/upgrade/keep.d/startwrt" << 'KEEPEOF'
 # before the daemon refreshes them.
 /etc/startwrt/sat-reach4
 /etc/startwrt/sat-reach6
+# The Core's sync generation. Lost, it restarts at one and every access point
+# refuses the payload as older than what it applied.
+/etc/startwrt/sync.json
+# The payload an access point applied last: its page and recovery mode read it.
+/etc/startwrt/applied.json
 KEEPEOF
 
 echo "==> Staging complete."

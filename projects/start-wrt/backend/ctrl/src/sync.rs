@@ -213,6 +213,15 @@ fn build_all(inputs: &Inputs, registry: &[PairedSatellite]) -> (Vec<SyncSnapshot
     (snapshots, hasher.finalize().to_hex().to_string())
 }
 
+/// A generation never below what any access point has applied, so a Core
+/// whose state file was lost does not push payloads they refuse as old.
+pub fn floor_generation(generation: u64, registry: &[PairedSatellite]) -> u64 {
+    registry
+        .iter()
+        .map(|s| s.generation_applied)
+        .fold(generation, u64::max)
+}
+
 /// Per-access-point push bookkeeping across ticks.
 #[derive(Default)]
 pub struct Pusher {
@@ -238,6 +247,7 @@ pub async fn tick(
     let inputs = gather().await?;
     let (snapshots, digest) = build_all(&inputs, registry);
     let mut state = load_state();
+    state.generation = floor_generation(state.generation, registry);
     if state.digest != digest {
         state.generation += 1;
         state.digest = digest;
@@ -347,6 +357,14 @@ mod tests {
             phy: "phy0".into(),
             bands: bands.iter().map(|b| b.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn generation_never_falls_below_an_applied_one() {
+        let mut s = sat();
+        s.generation_applied = 11;
+        assert_eq!(floor_generation(0, &[s.clone()]), 11);
+        assert_eq!(floor_generation(12, &[s]), 12);
     }
 
     #[test]
