@@ -221,8 +221,17 @@ not carry the role, registry, generation, reach and applied files, so an upgrade
 them once; the new keep.d carries them, and the Core floors its generation at the highest one an
 AP reports in case its own is lost. And a gate file removed on a router that stopped being a
 Core left its table in the kernel, closed, because fw4 reloads only its own table; `remove_gate`
-now deletes the table. Still not driven: a managed switch on the trunk, the stale-clock reboot,
-a rogue DHCP server behind the AP.
+now deletes the table. Later the same morning, the stale-clock reboot: the AP's clock was set a day
+back, saved to its RTC, and its boot-time clock fix disabled so the stale time survived the reboot.
+It booted a day behind, the tunnel was back 43 s after the reboot command with no help (the Core's
+initiation, since the AP's own carried a timestamp older than the Core's last), the AP resumed 20 s
+later, and its NTP corrected the clock 35 s after that; the Core never marked it dark and the trunk
+gate never closed, the outage being shorter than the threshold. And the rogue DHCP server: a dnsmasq
+in a network namespace on a veth port of the AP's bridge, on the same profile VLAN as a client in a
+second namespace. The client leased from the Core every time; the rogue's offers and its NAKs of the
+Core's lease all landed on the guard's drop counter and none reached the client. With the guard
+table deleted the client still took the Core's offer, which arrived first, so the control shows the
+race and not a poisoning. Still not driven: a managed switch on the trunk.
 
 ## Batch three — config sync (D5)
 
