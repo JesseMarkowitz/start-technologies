@@ -63,7 +63,9 @@ export type RpcReturnType<
     : never
 
 export type RpcSchemaTree<Schema> = {
-  [Key in keyof Schema]: Key extends '_PARAMS'
+  [Key in keyof Schema as Key extends '_OPAQUE'
+    ? never
+    : Key]: Key extends '_PARAMS'
     ? Schema[Key] extends z.ZodType
       ? z.input<Schema[Key]>
       : never
@@ -100,6 +102,7 @@ export type ApUpdateState = z.output<typeof schemas.ApUpdateState>
  * One automatic port use for the published-ports UI.
  */
 export type AutomaticPortUse = z.output<typeof schemas.AutomaticPortUse>
+export type BlackoutSetResult = z.output<typeof schemas.BlackoutSetResult>
 export type BlackoutWindow = z.output<typeof schemas.BlackoutWindow>
 export type BlackoutWindowInput = z.input<typeof schemas.BlackoutWindow>
 
@@ -186,10 +189,14 @@ export type OutboundVpnUpdateRequestInput = z.input<
 >
 
 /**
- * Response from adding a peer, contains client config if keys were generated
+ * Response from adding a peer
  */
 export type PeerAddResponse = z.output<typeof schemas.PeerAddResponse>
 export type PeerDeleteArgsInput = z.input<typeof schemas.PeerDeleteArgs>
+export type PeerRenameArgsInput = z.input<typeof schemas.PeerRenameArgs>
+export type PeerSetDnsInjectionArgsInput = z.input<
+  typeof schemas.PeerSetDnsInjectionArgs
+>
 export type PortInfo = z.output<typeof schemas.PortInfo>
 export type ProfileId = z.output<typeof schemas.ProfileId>
 export type ProfileIdOptInput = z.input<typeof schemas.ProfileIdOpt>
@@ -354,6 +361,15 @@ export type WifiSetResult = z.output<typeof schemas.WifiSetResult>
  * (`/etc/startwrt/access-points.json`).
  */
 export type AccessPoint = z.output<typeof schemas.AccessPoint>
+
+/**
+ * `wifi.blackout-set` request: the blackout windows plus a confirmation flag.
+ * A window covering the router's current time turns Wi-Fi off as soon as it is
+ * saved, for every device on it. When the flag is false, `blackout-set` applies
+ * nothing and reports that in `BlackoutSetResult` for a confirmation dialog;
+ * with the flag true it saves the windows and applies them at once.
+ */
+export type BlackoutSetRequestInput = z.input<typeof schemas.BlackoutSetRequest>
 export type PublishedPortsSetRequestInput = z.input<
   typeof schemas.PublishedPortsSetRequest
 >

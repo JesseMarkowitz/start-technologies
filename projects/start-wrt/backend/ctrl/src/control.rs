@@ -623,6 +623,15 @@ pub async fn clients(uplink: &str) -> Vec<ClientInfo> {
 
 // ── Main router: client ─────────────────────────────────────────────────────
 
+/// The peer's error with its own kind, prefixed with the call it answered.
+fn remote_error(method: &str, addr: IpAddr, err: &serde_json::Value) -> Error {
+    let err = match serde_json::from_value::<rpc_toolkit::yajrc::RpcError>(err.clone()) {
+        Ok(rpc) => Error::from(rpc),
+        Err(e) => Error::new(eyre!("unreadable error {err}: {e}"), ErrorKind::Network),
+    };
+    Error::new(eyre!("{method} at {addr}: {:#}", err.source), err.kind)
+}
+
 async fn call<T: serde::de::DeserializeOwned>(
     addr: IpAddr,
     method: &str,
@@ -650,18 +659,7 @@ async fn call<T: serde::de::DeserializeOwned>(
         )
     })?;
     if let Some(err) = value.get("error") {
-        let message = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("unknown error");
-        let data = err
-            .get("data")
-            .map(|d| format!(": {d}"))
-            .unwrap_or_default();
-        return Err(Error::new(
-            eyre!("{method} at {addr}: {message}{data}"),
-            ErrorKind::Network,
-        ));
+        return Err(remote_error(method, addr, err));
     }
     serde_json::from_value(
         value
@@ -769,6 +767,22 @@ pub async fn release(addr: IpAddr) -> Result<bool, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_error_keeps_the_peer_kind_and_details() {
+        let addr: IpAddr = "10.42.1.2".parse().unwrap();
+        let wire = serde_json::to_value(rpc_toolkit::yajrc::RpcError::from(Error::new(
+            eyre!("no such profile"),
+            ErrorKind::NotFound,
+        )))
+        .unwrap();
+        let e = remote_error("apply", addr, &wire);
+        assert_eq!(e.kind, ErrorKind::NotFound);
+        assert_eq!(
+            format!("{:#}", e.source),
+            "apply at 10.42.1.2: no such profile"
+        );
+    }
 
     #[test]
     fn bands_come_from_iw_headers() {
