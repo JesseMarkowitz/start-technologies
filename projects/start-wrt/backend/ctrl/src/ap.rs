@@ -1,8 +1,9 @@
 //! What an access point writes to its own configs (design D25).
 //!
 //! An access point bridges its uplink, its Wi-Fi passwords and its access ports
-//! onto the Core's profile VLANs and routes nothing. The base layout is written
-//! at adoption; the sync payload adds profiles, passwords and port assignments.
+//! onto the main router's profile VLANs and routes nothing. The base layout is
+//! written at adoption; the sync payload adds profiles, passwords and port
+//! assignments.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,6 +13,7 @@ use uciedit::openwrt::{
 };
 use uciedit::{dump_all, parse_all, Arena, Configs};
 
+use crate::access_points::{self, RouterRole, SyncSnapshot};
 use crate::backhaul::{
     self, ensure_backhaul_interface, ensure_udp_rule, ensure_zone, primary, remove_zone, tagged,
     BACKHAUL_INTERFACE, BACKHAUL_VLAN, BACKHAUL_ZONE,
@@ -20,7 +22,6 @@ use crate::ethernet::{
     find_lan_bridge, DEFAULT_LAN_BRIDGE, DEFAULT_WAN6_INTERFACE, DEFAULT_WAN_INTERFACE,
 };
 use crate::prelude::*;
-use crate::satellite::{self, RouterRole, SyncSnapshot};
 
 pub const ADMIN_VLAN: u16 = 1;
 const ADMIN_INTERFACE: &str = "lan";
@@ -33,30 +34,31 @@ pub fn load_applied() -> Option<SyncSnapshot> {
         .and_then(|c| serde_json::from_str(&c).ok())
 }
 
-/// Present while the Core's payload format is newer than this firmware reads.
-/// Outside the sysupgrade keep list: new firmware starts without it.
+/// Present while the main router's payload format is newer than this firmware
+/// reads. Outside the sysupgrade keep list: new firmware starts without it.
 const NEEDS_UPDATE_PATH: &str = "/etc/startwrt/needs-update";
 
-/// The Core's payload needs newer firmware than this (D17).
+/// The main router's payload needs newer firmware than this (D17).
 pub fn needs_update() -> bool {
     std::path::Path::new(NEEDS_UPDATE_PATH).exists()
 }
 
-/// Records whether the Core's payload format is readable here; true when it is.
-pub fn check_format(core_format: u32) -> bool {
-    let readable = core_format <= satellite::SYNC_FORMAT;
+/// Records whether the main router's payload format is readable here; true when
+/// it is.
+pub fn check_format(main_format: u32) -> bool {
+    let readable = main_format <= access_points::SYNC_FORMAT;
     if readable {
         let _ = std::fs::remove_file(NEEDS_UPDATE_PATH);
     } else if !needs_update() {
-        let _ = std::fs::write(NEEDS_UPDATE_PATH, core_format.to_string());
+        let _ = std::fs::write(NEEDS_UPDATE_PATH, main_format.to_string());
         crate::activity::log(
-            "satellite",
+            "access-point",
             "needs-update",
             false,
             &format!(
-                "The Core sends configuration format {core_format}; this firmware reads up to {}. \
-                 Update this access point from the Core.",
-                satellite::SYNC_FORMAT
+                "The main router sends configuration format {main_format}; this firmware reads up to {}. \
+                 Update this access point from the main router.",
+                access_points::SYNC_FORMAT
             ),
             None,
         );
@@ -109,7 +111,7 @@ fn set_bridge_vlan(cfgs: &mut Configs, vlan: NetworkBridgeVlan) -> Result<(), Er
 }
 
 /// A bridge member with no address: hostapd and access ports join it, the
-/// Core serves it.
+/// main router serves it.
 fn set_memberless_interface(cfgs: &mut Configs, name: &str, device: String) -> Result<(), Error> {
     for section in &mut cfgs["network"].sections {
         if section.name().as_deref() != Some(name) {
@@ -287,7 +289,7 @@ pub fn write_snapshot(
         .map(|p| p.interface.as_str())
         .chain([
             BACKHAUL_INTERFACE,
-            crate::mgmt_tunnel::AP_INTERFACE,
+            crate::mgmt_tunnel::MAIN_INTERFACE,
             "loopback",
         ])
         .collect();
@@ -418,8 +420,9 @@ pub fn accept_generation(applied: u64, incoming: u64) -> Result<bool, Error> {
     }
 }
 
-/// Applies a payload the Core pushed over the tunnel (D5). The reload that
-/// follows restarts the tunnel interface, so it runs after the reply is sent.
+/// Applies a payload the main router pushed over the tunnel (D5). The reload
+/// that follows restarts the tunnel interface, so it runs after the reply is
+/// sent.
 #[instrument(skip_all)]
 pub async fn apply_snapshot(snapshot: &SyncSnapshot) -> Result<(), Error> {
     let result = apply_snapshot_inner(snapshot).await;
@@ -428,8 +431,8 @@ pub async fn apply_snapshot(snapshot: &SyncSnapshot) -> Result<(), Error> {
 }
 
 async fn apply_snapshot_inner(snapshot: &SyncSnapshot) -> Result<(), Error> {
-    let role = satellite::load_role();
-    if role.role != RouterRole::Satellite || role.core_key.is_none() {
+    let role = access_points::load_role();
+    if role.role != RouterRole::AccessPoint || role.main_key.is_none() {
         return Err(Error::new(
             eyre!("this router is not an adopted access point"),
             ErrorKind::Authorization,
@@ -446,7 +449,7 @@ async fn apply_snapshot_inner(snapshot: &SyncSnapshot) -> Result<(), Error> {
             eyre!(
                 "configuration format {} needs newer firmware (this one reads up to {})",
                 snapshot.format,
-                satellite::SYNC_FORMAT
+                access_points::SYNC_FORMAT
             ),
             ErrorKind::InvalidRequest,
         ));
@@ -473,14 +476,14 @@ async fn apply_snapshot_inner(snapshot: &SyncSnapshot) -> Result<(), Error> {
             Ok(()) => break,
         }
     }
-    satellite::persist_generation(snapshot.generation).await?;
+    access_points::persist_generation(snapshot.generation).await?;
     if let Ok(json) = serde_json::to_vec(snapshot) {
         use std::os::unix::fs::PermissionsExt;
         let _ = tokio::fs::write(APPLIED_PATH, json).await;
         let _ = std::fs::set_permissions(APPLIED_PATH, std::fs::Permissions::from_mode(0o600));
     }
     crate::activity::log(
-        "satellite",
+        "access-point",
         "apply",
         true,
         &format!("Applied configuration generation {}", snapshot.generation),
@@ -517,7 +520,7 @@ pub async fn reload_all() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::satellite::{PasswordSpec, ProfileSpec};
+    use crate::access_points::{PasswordSpec, ProfileSpec};
 
     const NETWORK: &str = "\
 config device\n\toption name 'br-lan'\n\toption type 'bridge'\n\tlist ports 'eth0'\n\n\
@@ -550,13 +553,13 @@ config dhcp 'lan'\n\toption interface 'lan'\n\toption start '100'\n\toption limi
     fn snapshot() -> SyncSnapshot {
         SyncSnapshot {
             generation: 3,
-            format: crate::satellite::SYNC_FORMAT,
+            format: crate::access_points::SYNC_FORMAT,
             ssid: "Home".into(),
             broadcast_separately: false,
             country: Some("US".into()),
             radios: BTreeMap::from([(
                 "radio0".to_string(),
-                crate::satellite::RadioPlan {
+                crate::access_points::RadioPlan {
                     band: "2g".into(),
                     channel: 6,
                     htmode: "HE20".into(),
@@ -587,7 +590,6 @@ config dhcp 'lan'\n\toption interface 'lan'\n\toption start '100'\n\toption limi
                 },
             ],
             ports: BTreeMap::from([("eth0".to_string(), Some(101))]),
-            update_source: None,
         }
     }
 

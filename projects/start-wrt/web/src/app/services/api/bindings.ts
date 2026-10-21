@@ -104,7 +104,7 @@ export type BlackoutWindow = z.output<typeof schemas.BlackoutWindow>
 export type BlackoutWindowInput = z.input<typeof schemas.BlackoutWindow>
 
 /**
- * A router waiting to be adopted, as the Core sees it.
+ * A router waiting to be adopted, as the main router sees it.
  */
 export type Candidate = z.output<typeof schemas.Candidate>
 export type CheckInitializedRes = z.output<typeof schemas.CheckInitializedRes>
@@ -203,7 +203,7 @@ export type PublishedPortStatus = z.output<typeof schemas.PublishedPortStatus>
 export type RadioInfo = z.output<typeof schemas.RadioInfo>
 
 /**
- * One radio's assignment in the Core's channel plan.
+ * One radio's assignment in the main router's channel plan.
  */
 export type RadioPlan = z.output<typeof schemas.RadioPlan>
 export type ResetPasswordParamsInput = z.input<
@@ -211,8 +211,8 @@ export type ResetPasswordParamsInput = z.input<
 >
 
 /**
- * A router with no marker is a standalone Core. An adopted router is a
- * satellite: an access point of its Core.
+ * A router with no marker is a main router. An adopted router is an access
+ * point of its main router.
  */
 export type RouterRole = z.output<typeof schemas.RouterRole>
 export type ScheduleGetParamsInput = z.input<typeof schemas.ScheduleGetParams>
@@ -350,9 +350,10 @@ export type WifiSetRequestInput = z.input<typeof schemas.WifiSetRequest>
 export type WifiSetResult = z.output<typeof schemas.WifiSetResult>
 
 /**
- * One access point the Core has adopted (`/etc/startwrt/satellites.json`).
+ * One access point the main router has adopted
+ * (`/etc/startwrt/access-points.json`).
  */
-export type PairedSatellite = z.output<typeof schemas.PairedSatellite>
+export type AccessPoint = z.output<typeof schemas.AccessPoint>
 export type PublishedPortsSetRequestInput = z.input<
   typeof schemas.PublishedPortsSetRequest
 >

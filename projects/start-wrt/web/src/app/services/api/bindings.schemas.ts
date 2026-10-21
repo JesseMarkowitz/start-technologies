@@ -48,19 +48,20 @@ export const AdoptParams: z.ZodObject<{
    */
   address: z.ZodString
   /**
-   * The satellite's registry name. An existing entry of that name is
-   * replaced: a satellite re-adopted after a factory reset keeps its name.
+   * The access point's registry name. An existing entry of that name is
+   * replaced: an access point re-adopted after a factory reset keeps its
+   * name.
    */
   name: z.ZodString
   /**
    * The candidate's sticker Wi-Fi password, or its adoption code.
    */
   secret: z.ZodString
-  coreTunnelAddr: z.ZodCodec<
+  mainTunnelAddr: z.ZodCodec<
     z.ZodOptional<z.ZodNullable<z.ZodString>>,
     z.ZodNullable<z.ZodString>
   >
-  satelliteTunnelAddr: z.ZodCodec<
+  accessPointTunnelAddr: z.ZodCodec<
     z.ZodOptional<z.ZodNullable<z.ZodString>>,
     z.ZodNullable<z.ZodString>
   >
@@ -76,12 +77,13 @@ export const AdoptParams: z.ZodObject<{
     description: "A candidate's address as `candidates` lists it.",
   }),
   /**
-   * The satellite's registry name. An existing entry of that name is
-   * replaced: a satellite re-adopted after a factory reset keeps its name.
+   * The access point's registry name. An existing entry of that name is
+   * replaced: an access point re-adopted after a factory reset keeps its
+   * name.
    */
   name: z.string().meta({
     description:
-      "The satellite's registry name. An existing entry of that name is\nreplaced: a satellite re-adopted after a factory reset keeps its name.",
+      "The access point's registry name. An existing entry of that name is\nreplaced: an access point re-adopted after a factory reset keeps its\nname.",
   }),
   /**
    * The candidate's sticker Wi-Fi password, or its adoption code.
@@ -90,8 +92,8 @@ export const AdoptParams: z.ZodObject<{
     description:
       "The candidate's sticker Wi-Fi password, or its adoption code.",
   }),
-  coreTunnelAddr: wire(z.string().nullable().optional(), z.string().nullable()),
-  satelliteTunnelAddr: wire(
+  mainTunnelAddr: wire(z.string().nullable().optional(), z.string().nullable()),
+  accessPointTunnelAddr: wire(
     z.string().nullable().optional(),
     z.string().nullable(),
   ),
@@ -101,11 +103,11 @@ export const AdoptParams: z.ZodObject<{
 })
 export const AdoptResponse: z.ZodObject<{
   name: z.ZodString
-  satelliteKey: z.ZodString
+  accessPointKey: z.ZodString
   interface: z.ZodString
 }> = /* @__PURE__ */ object({
   name: z.string(),
-  satelliteKey: z.string(),
+  accessPointKey: z.string(),
   interface: z.string(),
 }).meta({
   id: 'AdoptResponse',
@@ -294,7 +296,7 @@ export const BlackoutWindow: z.ZodObject<{
 })
 
 /**
- * A router waiting to be adopted, as the Core sees it.
+ * A router waiting to be adopted, as the main router sees it.
  */
 export const Candidate: z.ZodObject<{
   /**
@@ -302,7 +304,7 @@ export const Candidate: z.ZodObject<{
    */
   address: z.ZodString
   interface: z.ZodString
-  satelliteKey: z.ZodString
+  accessPointKey: z.ZodString
   version: z.ZodString
   hasSticker: z.ZodBoolean
   lastSeenSecs: z.ZodInt
@@ -315,13 +317,13 @@ export const Candidate: z.ZodObject<{
       'Link-local address with its interface, e.g. `fe80::1%br-lan.1`.',
   }),
   interface: z.string(),
-  satelliteKey: z.string(),
+  accessPointKey: z.string(),
   version: z.string(),
   hasSticker: z.boolean(),
   lastSeenSecs: z.int(),
 }).meta({
   id: 'Candidate',
-  description: 'A router waiting to be adopted, as the Core sees it.',
+  description: 'A router waiting to be adopted, as the main router sees it.',
 })
 export const CheckInitializedRes: z.ZodObject<{ initialized: z.ZodBoolean }> =
   /* @__PURE__ */ object({ initialized: z.boolean() }).meta({
@@ -369,7 +371,7 @@ export const ClientInfo: z.ZodObject<{
  */
 export const CodeResponse: z.ZodObject<{
   /**
-   * Listening for a Core.
+   * Listening for a main router.
    */
   waiting: z.ZodBoolean
   /**
@@ -380,12 +382,24 @@ export const CodeResponse: z.ZodObject<{
     z.ZodOptional<z.ZodNullable<z.ZodString>>,
     z.ZodNullable<z.ZodString>
   >
+  /**
+   * A main router announced itself on the port it listens on.
+   */
+  heardMain: z.ZodBoolean
+  /**
+   * A cable with a link is in that port.
+   */
+  link: z.ZodBoolean
+  /**
+   * The router has a default route.
+   */
+  internet: z.ZodBoolean
 }> = /* @__PURE__ */ object({
   /**
-   * Listening for a Core.
+   * Listening for a main router.
    */
   waiting: z.boolean().meta({
-    description: 'Listening for a Core.',
+    description: 'Listening for a main router.',
   }),
   /**
    * The sticker Wi-Fi password is the secret; no code is shown.
@@ -394,6 +408,24 @@ export const CodeResponse: z.ZodObject<{
     description: 'The sticker Wi-Fi password is the secret; no code is shown.',
   }),
   code: wire(z.string().nullable().optional(), z.string().nullable()),
+  /**
+   * A main router announced itself on the port it listens on.
+   */
+  heardMain: z.boolean().meta({
+    description: 'A main router announced itself on the port it listens on.',
+  }),
+  /**
+   * A cable with a link is in that port.
+   */
+  link: z.boolean().meta({
+    description: 'A cable with a link is in that port.',
+  }),
+  /**
+   * The router has a default route.
+   */
+  internet: z.boolean().meta({
+    description: 'The router has a default route.',
+  }),
 }).meta({
   id: 'CodeResponse',
   description: 'What the pre-adoption page shows.',
@@ -1099,7 +1131,7 @@ export const RadioInfo: z.ZodObject<{
 })
 
 /**
- * One radio's assignment in the Core's channel plan.
+ * One radio's assignment in the main router's channel plan.
  */
 export const RadioPlan: z.ZodObject<{
   band: z.ZodString
@@ -1119,7 +1151,7 @@ export const RadioPlan: z.ZodObject<{
   }),
 }).meta({
   id: 'RadioPlan',
-  description: "One radio's assignment in the Core's channel plan.",
+  description: "One radio's assignment in the main router's channel plan.",
 })
 export const ResetPasswordParams: z.ZodObject<{
   oldPassword: z.ZodString
@@ -1132,15 +1164,17 @@ export const ResetPasswordParams: z.ZodObject<{
 })
 
 /**
- * A router with no marker is a standalone Core. An adopted router is a
- * satellite: an access point of its Core.
+ * A router with no marker is a main router. An adopted router is an access
+ * point of its main router.
  */
-export const RouterRole: z.ZodEnum<{ core: 'core'; satellite: 'satellite' }> =
-  /* @__PURE__ */ z.enum(['core', 'satellite']).meta({
-    id: 'RouterRole',
-    description:
-      'A router with no marker is a standalone Core. An adopted router is a\nsatellite: an access point of its Core.',
-  })
+export const RouterRole: z.ZodEnum<{
+  main: 'main'
+  accessPoint: 'accessPoint'
+}> = /* @__PURE__ */ z.enum(['main', 'accessPoint']).meta({
+  id: 'RouterRole',
+  description:
+    'A router with no marker is a main router. An adopted router is an access\npoint of its main router.',
+})
 export const ScheduleGetParams: z.ZodObject<{ interface: z.ZodString }> =
   /* @__PURE__ */ object({ interface: z.string() }).meta({
     id: 'ScheduleGetParams',
@@ -1260,15 +1294,15 @@ export const SetPreferencesReq: z.ZodObject<{
 })
 export const SetRoleParams: z.ZodObject<{
   /**
-   * "core" or "satellite".
+   * "main" or "access-point".
    */
   role: z.ZodString
 }> = /* @__PURE__ */ object({
   /**
-   * "core" or "satellite".
+   * "main" or "access-point".
    */
   role: z.string().meta({
-    description: '"core" or "satellite".',
+    description: '"main" or "access-point".',
   }),
 }).meta({
   id: 'SetRoleParams',
@@ -1352,7 +1386,8 @@ export const UnpairParams: z.ZodObject<{ name: z.ZodString }> =
   })
 export const UpdateParams: z.ZodObject<{
   /**
-   * Access points to update; none means every one older than the Core.
+   * Access points to update; none means every one older than the main
+   * router.
    */
   names: z.ZodCodec<
     z.ZodOptional<z.ZodArray<z.ZodString>>,
@@ -1360,11 +1395,12 @@ export const UpdateParams: z.ZodObject<{
   >
 }> = /* @__PURE__ */ object({
   /**
-   * Access points to update; none means every one older than the Core.
+   * Access points to update; none means every one older than the main
+   * router.
    */
   names: wire(z.array(z.string()).optional(), z.array(z.string())).meta({
     description:
-      'Access points to update; none means every one older than the Core.',
+      'Access points to update; none means every one older than the main\nrouter.',
   }),
 }).meta({
   id: 'UpdateParams',
@@ -1379,18 +1415,20 @@ export const UpdateSystemParams: z.ZodObject<{
     z.ZodNullable<z.ZodString>
   >
   /**
-   * On a Core, update its access points to the same version once it is back.
+   * On a main router, update its access points to the same version once it
+   * is back.
    */
   updateAccessPoints: z.ZodCodec<z.ZodOptional<z.ZodBoolean>, z.ZodBoolean>
 }> = /* @__PURE__ */ object({
   registry: wire(z.string().nullable().optional(), z.string().nullable()),
   targetVersion: wire(z.string().nullable().optional(), z.string().nullable()),
   /**
-   * On a Core, update its access points to the same version once it is back.
+   * On a main router, update its access points to the same version once it
+   * is back.
    */
   updateAccessPoints: wire(z.boolean().optional(), z.boolean()).meta({
     description:
-      'On a Core, update its access points to the same version once it is back.',
+      'On a main router, update its access points to the same version once it\nis back.',
   }),
 }).meta({
   id: 'UpdateSystemParams',
@@ -1626,7 +1664,7 @@ export const ActivityListResponse: z.ZodObject<{
  */
 export const ApUpdate: z.ZodObject<{
   /**
-   * The version it is updating to: the Core's.
+   * The version it is updating to: the main router's.
    */
   target: z.ZodString
   state: typeof ApUpdateState
@@ -1636,10 +1674,10 @@ export const ApUpdate: z.ZodObject<{
   message: z.ZodOptional<z.ZodNullable<z.ZodString>>
 }> = /* @__PURE__ */ object({
   /**
-   * The version it is updating to: the Core's.
+   * The version it is updating to: the main router's.
    */
   target: z.string().meta({
-    description: "The version it is updating to: the Core's.",
+    description: "The version it is updating to: the main router's.",
   }),
   state: ApUpdateState,
   /**
@@ -2152,71 +2190,78 @@ export const PublishedPortInput: z.ZodObject<{
 export const RoleMarker: z.ZodObject<{
   role: typeof RouterRole
   /**
-   * On a satellite, the Core's link-local endpoint with its interface.
+   * On an access point, the main router's link-local endpoint with its
+   * interface.
    */
-  coreEndpoint: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  mainEndpoint: z.ZodOptional<z.ZodNullable<z.ZodString>>
   /**
-   * On a satellite, the Core's WireGuard public key (base64) pinned at
-   * adoption. A satellite with none waits to be adopted.
+   * On an access point, the main router's WireGuard public key (base64)
+   * pinned at adoption. An access point with none waits to be adopted.
    */
-  coreKey: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  mainKey: z.ZodOptional<z.ZodNullable<z.ZodString>>
   /**
-   * On a satellite, the Core's address inside the management tunnel.
+   * On an access point, the main router's address inside the management
+   * tunnel.
    */
-  coreAddress: z.ZodOptional<z.ZodNullable<z.ZodString>>
+  mainAddress: z.ZodOptional<z.ZodNullable<z.ZodString>>
   /**
-   * On a satellite, the name the Core adopted it under.
+   * On an access point, the name the main router adopted it under.
    */
   name: z.ZodOptional<z.ZodNullable<z.ZodString>>
   /**
-   * On a satellite, the port that carries the trunk to the Core.
+   * On an access point, the port that carries the trunk to the main router.
    */
   uplink: z.ZodOptional<z.ZodNullable<z.ZodString>>
   /**
-   * On a satellite, the sync generation applied last (0 = none).
+   * On an access point, the sync generation applied last (0 = none).
    */
   generation: z.ZodCodec<z.ZodOptional<z.ZodInt>, z.ZodInt>
 }> = /* @__PURE__ */ object({
   role: RouterRole,
   /**
-   * On a satellite, the Core's link-local endpoint with its interface.
+   * On an access point, the main router's link-local endpoint with its
+   * interface.
    */
-  coreEndpoint: z.string().nullable().optional().meta({
+  mainEndpoint: z.string().nullable().optional().meta({
     description:
-      "On a satellite, the Core's link-local endpoint with its interface.",
+      "On an access point, the main router's link-local endpoint with its\ninterface.",
   }),
   /**
-   * On a satellite, the Core's WireGuard public key (base64) pinned at
-   * adoption. A satellite with none waits to be adopted.
+   * On an access point, the main router's WireGuard public key (base64)
+   * pinned at adoption. An access point with none waits to be adopted.
    */
-  coreKey: z.string().nullable().optional().meta({
+  mainKey: z.string().nullable().optional().meta({
     description:
-      "On a satellite, the Core's WireGuard public key (base64) pinned at\nadoption. A satellite with none waits to be adopted.",
+      "On an access point, the main router's WireGuard public key (base64)\npinned at adoption. An access point with none waits to be adopted.",
   }),
   /**
-   * On a satellite, the Core's address inside the management tunnel.
+   * On an access point, the main router's address inside the management
+   * tunnel.
    */
-  coreAddress: z.string().nullable().optional().meta({
+  mainAddress: z.string().nullable().optional().meta({
     description:
-      "On a satellite, the Core's address inside the management tunnel.",
+      "On an access point, the main router's address inside the management\ntunnel.",
   }),
   /**
-   * On a satellite, the name the Core adopted it under.
+   * On an access point, the name the main router adopted it under.
    */
   name: z.string().nullable().optional().meta({
-    description: 'On a satellite, the name the Core adopted it under.',
+    description:
+      'On an access point, the name the main router adopted it under.',
   }),
   /**
-   * On a satellite, the port that carries the trunk to the Core.
+   * On an access point, the port that carries the trunk to the main router.
    */
   uplink: z.string().nullable().optional().meta({
-    description: 'On a satellite, the port that carries the trunk to the Core.',
+    description:
+      'On an access point, the port that carries the trunk to the main router.',
   }),
   /**
-   * On a satellite, the sync generation applied last (0 = none).
+   * On an access point, the sync generation applied last (0 = none).
    */
   generation: wire(z.int().optional(), z.int()).meta({
-    description: 'On a satellite, the sync generation applied last (0 = none).',
+    description:
+      'On an access point, the sync generation applied last (0 = none).',
   }),
 }).meta({
   id: 'RoleMarker',
@@ -2807,23 +2852,24 @@ export const WifiSetResult: z.ZodObject<{
 })
 
 /**
- * One access point the Core has adopted (`/etc/startwrt/satellites.json`).
+ * One access point the main router has adopted
+ * (`/etc/startwrt/access-points.json`).
  */
-export const PairedSatellite: z.ZodObject<{
+export const AccessPoint: z.ZodObject<{
   /**
    * Admin-facing label (unique).
    */
   name: z.ZodString
   /**
-   * The satellite's WireGuard public key (base64), pinned at adoption.
+   * The access point's WireGuard public key (base64), pinned at adoption.
    */
   publicKey: z.ZodString
   /**
-   * The satellite's address inside its management tunnel.
+   * The access point's address inside its management tunnel.
    */
   mgmtAddress: z.ZodString
   /**
-   * The config generation this satellite last acknowledged (0 = never).
+   * The config generation this access point last acknowledged (0 = never).
    */
   generationApplied: z.ZodCodec<z.ZodOptional<z.ZodInt>, z.ZodInt>
   /**
@@ -2831,12 +2877,12 @@ export const PairedSatellite: z.ZodObject<{
    */
   lastSeen: z.ZodCodec<z.ZodOptional<z.ZodInt>, z.ZodInt>
   /**
-   * Where its tunnel last handshaked from, as `wg` prints it; the Core
-   * re-pins it after a reload so it can initiate.
+   * Where its tunnel last handshaked from, as `wg` prints it; the main
+   * router re-pins it after a reload so it can initiate.
    */
   endpoint: z.ZodOptional<z.ZodNullable<z.ZodString>>
   /**
-   * The Core's trunk port its tunnel comes through, while it is live.
+   * The main router's trunk port its tunnel comes through, while it is live.
    */
   port: z.ZodOptional<z.ZodNullable<z.ZodString>>
   /**
@@ -2863,7 +2909,7 @@ export const PairedSatellite: z.ZodObject<{
     z.ZodArray<typeof ClientInfo>
   >
   /**
-   * The Core's channel plan for its radios (D20).
+   * The main router's channel plan for its radios (D20).
    */
   plan: z.ZodCodec<
     z.ZodOptional<z.ZodRecord<z.ZodString, typeof RadioPlan>>,
@@ -2879,13 +2925,21 @@ export const PairedSatellite: z.ZodObject<{
    */
   recoverySsid: z.ZodOptional<z.ZodNullable<z.ZodString>>
   /**
-   * It cannot read the Core's payload format and is dark until updated (D17).
+   * It cannot read the main router's payload format and is dark until
+   * updated (D17).
    */
   needsUpdate: z.ZodCodec<z.ZodOptional<z.ZodBoolean>, z.ZodBoolean>
   /**
    * Its firmware update, from queued until it is back on the new version.
    */
   update: z.ZodOptional<z.ZodNullable<typeof ApUpdate>>
+  /**
+   * Ports it stopped forwarding on to break a loop.
+   */
+  loopBlocked: z.ZodCodec<
+    z.ZodOptional<z.ZodArray<z.ZodString>>,
+    z.ZodArray<z.ZodString>
+  >
 }> = /* @__PURE__ */ object({
   /**
    * Admin-facing label (unique).
@@ -2894,24 +2948,24 @@ export const PairedSatellite: z.ZodObject<{
     description: 'Admin-facing label (unique).',
   }),
   /**
-   * The satellite's WireGuard public key (base64), pinned at adoption.
+   * The access point's WireGuard public key (base64), pinned at adoption.
    */
   publicKey: z.string().meta({
     description:
-      "The satellite's WireGuard public key (base64), pinned at adoption.",
+      "The access point's WireGuard public key (base64), pinned at adoption.",
   }),
   /**
-   * The satellite's address inside its management tunnel.
+   * The access point's address inside its management tunnel.
    */
   mgmtAddress: z.string().meta({
-    description: "The satellite's address inside its management tunnel.",
+    description: "The access point's address inside its management tunnel.",
   }),
   /**
-   * The config generation this satellite last acknowledged (0 = never).
+   * The config generation this access point last acknowledged (0 = never).
    */
   generationApplied: wire(z.int().optional(), z.int()).meta({
     description:
-      'The config generation this satellite last acknowledged (0 = never).',
+      'The config generation this access point last acknowledged (0 = never).',
   }),
   /**
    * Unix seconds of last successful contact (0 = never).
@@ -2920,19 +2974,19 @@ export const PairedSatellite: z.ZodObject<{
     description: 'Unix seconds of last successful contact (0 = never).',
   }),
   /**
-   * Where its tunnel last handshaked from, as `wg` prints it; the Core
-   * re-pins it after a reload so it can initiate.
+   * Where its tunnel last handshaked from, as `wg` prints it; the main
+   * router re-pins it after a reload so it can initiate.
    */
   endpoint: z.string().nullable().optional().meta({
     description:
-      'Where its tunnel last handshaked from, as `wg` prints it; the Core\nre-pins it after a reload so it can initiate.',
+      'Where its tunnel last handshaked from, as `wg` prints it; the main\nrouter re-pins it after a reload so it can initiate.',
   }),
   /**
-   * The Core's trunk port its tunnel comes through, while it is live.
+   * The main router's trunk port its tunnel comes through, while it is live.
    */
   port: z.string().nullable().optional().meta({
     description:
-      "The Core's trunk port its tunnel comes through, while it is live.",
+      "The main router's trunk port its tunnel comes through, while it is live.",
   }),
   /**
    * Its tunnel is receiving traffic (D18).
@@ -2964,13 +3018,13 @@ export const PairedSatellite: z.ZodObject<{
     description: 'The devices on it, as it reported them last.',
   }),
   /**
-   * The Core's channel plan for its radios (D20).
+   * The main router's channel plan for its radios (D20).
    */
   plan: wire(
     z.record(z.string(), RadioPlan).optional(),
     z.record(z.string(), RadioPlan),
   ).meta({
-    description: "The Core's channel plan for its radios (D20).",
+    description: "The main router's channel plan for its radios (D20).",
   }),
   /**
    * Its firmware version, as it reported it last.
@@ -2987,11 +3041,12 @@ export const PairedSatellite: z.ZodObject<{
       'The recovery network it broadcasts while dark (D22), when it has a\nsticker password to protect it with.',
   }),
   /**
-   * It cannot read the Core's payload format and is dark until updated (D17).
+   * It cannot read the main router's payload format and is dark until
+   * updated (D17).
    */
   needsUpdate: wire(z.boolean().optional(), z.boolean()).meta({
     description:
-      "It cannot read the Core's payload format and is dark until updated (D17).",
+      "It cannot read the main router's payload format and is dark until\nupdated (D17).",
   }),
   /**
    * Its firmware update, from queued until it is back on the new version.
@@ -3000,10 +3055,16 @@ export const PairedSatellite: z.ZodObject<{
     description:
       'Its firmware update, from queued until it is back on the new version.',
   }),
+  /**
+   * Ports it stopped forwarding on to break a loop.
+   */
+  loopBlocked: wire(z.array(z.string()).optional(), z.array(z.string())).meta({
+    description: 'Ports it stopped forwarding on to break a loop.',
+  }),
 }).meta({
-  id: 'PairedSatellite',
+  id: 'AccessPoint',
   description:
-    'One access point the Core has adopted (`/etc/startwrt/satellites.json`).',
+    'One access point the main router has adopted\n(`/etc/startwrt/access-points.json`).',
 })
 export const PublishedPortsSetRequest: z.ZodObject<{
   ports: z.ZodArray<typeof PublishedPortInput>
@@ -3062,7 +3123,7 @@ export const WifiRegulatory: z.ZodObject<{
 })
 export const StatusResponse: z.ZodObject<{
   role: typeof RouterRole
-  coreEndpoint: z.ZodCodec<
+  mainEndpoint: z.ZodCodec<
     z.ZodOptional<z.ZodNullable<z.ZodString>>,
     z.ZodNullable<z.ZodString>
   >
@@ -3086,11 +3147,11 @@ export const StatusResponse: z.ZodObject<{
     z.ZodOptional<z.ZodNullable<z.ZodBoolean>>,
     z.ZodNullable<z.ZodBoolean>
   >
-  satelliteCount: z.ZodInt
-  satellites: z.ZodArray<typeof PairedSatellite>
+  accessPointCount: z.ZodInt
+  accessPoints: z.ZodArray<typeof AccessPoint>
 }> = /* @__PURE__ */ object({
   role: RouterRole,
-  coreEndpoint: wire(z.string().nullable().optional(), z.string().nullable()),
+  mainEndpoint: wire(z.string().nullable().optional(), z.string().nullable()),
   uplink: wire(z.string().nullable().optional(), z.string().nullable()),
   generation: z.int(),
   /**
@@ -3111,14 +3172,141 @@ export const StatusResponse: z.ZodObject<{
     description:
       'On an access point: SSIDs down and access ports cut (D18); unset\nbefore the first reading.',
   }),
-  satelliteCount: z.int(),
-  satellites: z.array(PairedSatellite),
+  accessPointCount: z.int(),
+  accessPoints: z.array(AccessPoint),
 }).meta({
   id: 'StatusResponse',
 })
 export const Api = {
   _PARAMS: /* @__PURE__ */ empty,
   _CHILDREN: {
+    'access-point': {
+      _PARAMS: /* @__PURE__ */ empty,
+      _CHILDREN: {
+        adoption: {
+          _PARAMS: /* @__PURE__ */ empty,
+          _CHILDREN: {
+            adopt: {
+              _PARAMS: /* @__PURE__ */ z.intersection(
+                z.intersection(
+                  object({
+                    format: wire(
+                      IoFormat.nullable().optional(),
+                      IoFormat.nullable(),
+                    ),
+                  }),
+                  empty,
+                ),
+                AdoptParams,
+              ),
+              _RETURN: /* @__PURE__ */ AdoptResponse,
+            },
+            candidates: {
+              _PARAMS: /* @__PURE__ */ z.intersection(
+                z.intersection(
+                  object({
+                    format: wire(
+                      IoFormat.nullable().optional(),
+                      IoFormat.nullable(),
+                    ),
+                  }),
+                  empty,
+                ),
+                empty,
+              ),
+              _RETURN: /* @__PURE__ */ z.array(Candidate),
+            },
+            code: {
+              _PARAMS: /* @__PURE__ */ z.intersection(
+                z.intersection(
+                  object({
+                    format: wire(
+                      IoFormat.nullable().optional(),
+                      IoFormat.nullable(),
+                    ),
+                  }),
+                  empty,
+                ),
+                empty,
+              ),
+              _RETURN: /* @__PURE__ */ CodeResponse,
+            },
+          },
+        },
+        'get-role': {
+          _PARAMS: /* @__PURE__ */ z.intersection(
+            z.intersection(
+              object({
+                format: wire(
+                  IoFormat.nullable().optional(),
+                  IoFormat.nullable(),
+                ),
+              }),
+              empty,
+            ),
+            empty,
+          ),
+          _RETURN: /* @__PURE__ */ RoleMarker,
+        },
+        list: {
+          _PARAMS: /* @__PURE__ */ z.intersection(
+            z.intersection(
+              object({
+                format: wire(
+                  IoFormat.nullable().optional(),
+                  IoFormat.nullable(),
+                ),
+              }),
+              empty,
+            ),
+            empty,
+          ),
+          _RETURN: /* @__PURE__ */ z.array(AccessPoint),
+        },
+        'set-ports': {
+          _PARAMS: /* @__PURE__ */ SetPortsParams,
+          _RETURN: /* @__PURE__ */ z.null(),
+        },
+        'set-role': {
+          _PARAMS: /* @__PURE__ */ SetRoleParams,
+          _RETURN: /* @__PURE__ */ z.null(),
+        },
+        status: {
+          _PARAMS: /* @__PURE__ */ z.intersection(
+            z.intersection(
+              object({
+                format: wire(
+                  IoFormat.nullable().optional(),
+                  IoFormat.nullable(),
+                ),
+              }),
+              empty,
+            ),
+            empty,
+          ),
+          _RETURN: /* @__PURE__ */ StatusResponse,
+        },
+        unpair: {
+          _PARAMS: /* @__PURE__ */ UnpairParams,
+          _RETURN: /* @__PURE__ */ z.null(),
+        },
+        update: {
+          _PARAMS: /* @__PURE__ */ z.intersection(
+            z.intersection(
+              object({
+                format: wire(
+                  IoFormat.nullable().optional(),
+                  IoFormat.nullable(),
+                ),
+              }),
+              empty,
+            ),
+            UpdateParams,
+          ),
+          _RETURN: /* @__PURE__ */ z.array(z.string()),
+        },
+      },
+    },
     activity: {
       _PARAMS: /* @__PURE__ */ empty,
       _CHILDREN: {
@@ -3703,133 +3891,6 @@ export const Api = {
         'wan-changed': {
           _PARAMS: /* @__PURE__ */ empty,
           _RETURN: /* @__PURE__ */ z.unknown(),
-        },
-      },
-    },
-    satellite: {
-      _PARAMS: /* @__PURE__ */ empty,
-      _CHILDREN: {
-        adoption: {
-          _PARAMS: /* @__PURE__ */ empty,
-          _CHILDREN: {
-            adopt: {
-              _PARAMS: /* @__PURE__ */ z.intersection(
-                z.intersection(
-                  object({
-                    format: wire(
-                      IoFormat.nullable().optional(),
-                      IoFormat.nullable(),
-                    ),
-                  }),
-                  empty,
-                ),
-                AdoptParams,
-              ),
-              _RETURN: /* @__PURE__ */ AdoptResponse,
-            },
-            candidates: {
-              _PARAMS: /* @__PURE__ */ z.intersection(
-                z.intersection(
-                  object({
-                    format: wire(
-                      IoFormat.nullable().optional(),
-                      IoFormat.nullable(),
-                    ),
-                  }),
-                  empty,
-                ),
-                empty,
-              ),
-              _RETURN: /* @__PURE__ */ z.array(Candidate),
-            },
-            code: {
-              _PARAMS: /* @__PURE__ */ z.intersection(
-                z.intersection(
-                  object({
-                    format: wire(
-                      IoFormat.nullable().optional(),
-                      IoFormat.nullable(),
-                    ),
-                  }),
-                  empty,
-                ),
-                empty,
-              ),
-              _RETURN: /* @__PURE__ */ CodeResponse,
-            },
-          },
-        },
-        'get-role': {
-          _PARAMS: /* @__PURE__ */ z.intersection(
-            z.intersection(
-              object({
-                format: wire(
-                  IoFormat.nullable().optional(),
-                  IoFormat.nullable(),
-                ),
-              }),
-              empty,
-            ),
-            empty,
-          ),
-          _RETURN: /* @__PURE__ */ RoleMarker,
-        },
-        list: {
-          _PARAMS: /* @__PURE__ */ z.intersection(
-            z.intersection(
-              object({
-                format: wire(
-                  IoFormat.nullable().optional(),
-                  IoFormat.nullable(),
-                ),
-              }),
-              empty,
-            ),
-            empty,
-          ),
-          _RETURN: /* @__PURE__ */ z.array(PairedSatellite),
-        },
-        'set-ports': {
-          _PARAMS: /* @__PURE__ */ SetPortsParams,
-          _RETURN: /* @__PURE__ */ z.null(),
-        },
-        'set-role': {
-          _PARAMS: /* @__PURE__ */ SetRoleParams,
-          _RETURN: /* @__PURE__ */ z.null(),
-        },
-        status: {
-          _PARAMS: /* @__PURE__ */ z.intersection(
-            z.intersection(
-              object({
-                format: wire(
-                  IoFormat.nullable().optional(),
-                  IoFormat.nullable(),
-                ),
-              }),
-              empty,
-            ),
-            empty,
-          ),
-          _RETURN: /* @__PURE__ */ StatusResponse,
-        },
-        unpair: {
-          _PARAMS: /* @__PURE__ */ UnpairParams,
-          _RETURN: /* @__PURE__ */ z.null(),
-        },
-        update: {
-          _PARAMS: /* @__PURE__ */ z.intersection(
-            z.intersection(
-              object({
-                format: wire(
-                  IoFormat.nullable().optional(),
-                  IoFormat.nullable(),
-                ),
-              }),
-              empty,
-            ),
-            UpdateParams,
-          ),
-          _RETURN: /* @__PURE__ */ z.array(z.string()),
         },
       },
     },

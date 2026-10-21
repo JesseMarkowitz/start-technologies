@@ -57,7 +57,32 @@ function passwordsMatch(control: AbstractControl): ValidationErrors | null {
       </a>
     } @else {
       @if (adoption(); as adoption) {
-        @if (adoption.waiting) {
+        @if (adoption.waiting && !adoption.heardMain) {
+          <div tuiNotification appearance="neutral">
+            <p>
+              @if (!adoption.link) {
+                {{ 'No cable is connected to the WAN port.' | i18n }}
+              } @else if (adoption.internet) {
+                {{
+                  'The WAN port reaches the Internet, but no main StartWRT router answers on it.'
+                    | i18n
+                }}
+              } @else {
+                {{
+                  'The WAN port has a cable, but no Internet connection and no main StartWRT router.'
+                    | i18n
+                }}
+              }
+            </p>
+            <p>
+              {{
+                'To make this router an access point, connect its WAN port to a trunk port on your main router. To make it your main router, create a password below.'
+                  | i18n
+              }}
+            </p>
+          </div>
+        }
+        @if (adoption.waiting && adoption.heardMain) {
           <div tuiNotification appearance="info">
             <p>
               {{
@@ -148,13 +173,15 @@ export default class Setup {
   private readonly auth = inject(AuthService)
   private readonly i18n = inject(i18nPipe)
 
-  // A fresh router that hears a Core on its WAN port waits to be adopted
+  // A fresh router that hears a main router on its WAN port waits to be adopted
   // (design §19); the page says so and shows the code a board with no
   // sticker password needs.
   protected readonly adoption = toSignal(
     timer(0, 5000).pipe(
       switchMap(() =>
-        from(this.api.satelliteAdoptionCode()).pipe(catchError(() => of(null))),
+        from(this.api.accessPointAdoptionCode()).pipe(
+          catchError(() => of(null)),
+        ),
       ),
     ),
   )

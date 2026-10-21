@@ -1,24 +1,25 @@
 //! The adoption proof (design D24): how a candidate proves it is the unit whose
-//! sticker password the admin typed at the Core, and how the Core proves it
-//! holds that password too, without the password crossing the backhaul.
+//! sticker password the admin typed at the main router, and how the main router
+//! proves it holds that password too, without the password crossing the
+//! backhaul.
 //!
-//! Transport-agnostic. The Core runs an [`Adopter`] per candidate; the candidate
-//! runs a [`Responder`]. Three messages:
+//! Transport-agnostic. The main router runs an [`Adopter`] per candidate; the
+//! candidate runs a [`Responder`]. Three messages:
 //!
-//! 1. Core → candidate: [`Hello`], the Core's WireGuard public key and a fresh
-//!    challenge.
-//! 2. Candidate → Core: [`Offer`], its own public key, its own challenge and its
-//!    proof.
-//! 3. Core → candidate: [`Confirm`], the tunnel the satellite is to bring up and
-//!    the Core's proof over it, or [`Reject`].
+//! 1. Main router → candidate: [`Hello`], the main router's WireGuard public
+//!    key and a fresh challenge.
+//! 2. Candidate → main router: [`Offer`], its own public key, its own challenge
+//!    and its proof.
+//! 3. Main router → candidate: [`Confirm`], the tunnel the access point is to
+//!    bring up and the main router's proof over it, or [`Reject`].
 //!
 //! Each proof is a keyed BLAKE3 hash over both challenges and both public keys,
 //! keyed by the adoption secret, with a direction label so the two proofs can
-//! never stand in for each other; the Core's also covers the tunnel it dictates.
-//! A replayed proof fails on the fresh challenge and a substituted key fails on
-//! the transcript. The tunnel's pre-shared key is derived from the same material
-//! on both sides and never sent. Both sides refuse after [`ATTEMPT_LIMIT`] bad
-//! proofs for [`COOLDOWN`].
+//! never stand in for each other; the main router's also covers the tunnel it
+//! dictates. A replayed proof fails on the fresh challenge and a substituted key
+//! fails on the transcript. The tunnel's pre-shared key is derived from the same
+//! material on both sides and never sent. Both sides refuse after
+//! [`ATTEMPT_LIMIT`] bad proofs for [`COOLDOWN`].
 
 use std::time::{Duration, Instant};
 
@@ -36,10 +37,10 @@ pub const COOLDOWN: Duration = Duration::from_secs(60);
 /// Alphanumeric from `PASSWORD_CHARS_ALNUM`: 16 characters is about 93 bits.
 pub const CODE_LEN: usize = 16;
 
-const KEY_CONTEXT: &str = "StartWRT satellite adoption v1 proof";
-const PSK_CONTEXT: &str = "StartWRT satellite adoption v1 preshared key";
-const LABEL_SATELLITE: &[u8] = b"satellite->core";
-const LABEL_CORE: &[u8] = b"core->satellite";
+const KEY_CONTEXT: &str = "StartWRT access point adoption v1 proof";
+const PSK_CONTEXT: &str = "StartWRT access point adoption v1 preshared key";
+const LABEL_ACCESS_POINT: &[u8] = b"access-point->main";
+const LABEL_MAIN: &[u8] = b"main->access-point";
 
 /// A code for the pre-adoption page of a board with no sticker password.
 pub fn generate_code() -> String {
@@ -94,17 +95,18 @@ impl std::fmt::Debug for Proof {
     }
 }
 
-/// The tunnel the Core dictates at adoption. Covered by the Core's proof.
+/// The tunnel the main router dictates at adoption. Covered by the main
+/// router's proof.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TunnelSpec {
-    /// The satellite's registry name.
-    pub satellite: String,
-    pub core_listen_port: u16,
-    /// The Core's host address on the tunnel.
-    pub core_tunnel_addr: String,
-    /// The satellite's host address on the tunnel.
-    pub satellite_tunnel_addr: String,
+    /// The access point's registry name.
+    pub access_point: String,
+    pub main_listen_port: u16,
+    /// The main router's host address on the tunnel.
+    pub main_tunnel_addr: String,
+    /// The access point's host address on the tunnel.
+    pub access_point_tunnel_addr: String,
 }
 
 impl TunnelSpec {
@@ -116,19 +118,19 @@ impl TunnelSpec {
 /// Everything both proofs cover.
 #[derive(Clone, Copy, Debug)]
 struct Transcript {
-    core_key: WgPublicKey,
-    satellite_key: WgPublicKey,
-    core_challenge: Challenge,
-    satellite_challenge: Challenge,
+    main_key: WgPublicKey,
+    access_point_key: WgPublicKey,
+    main_challenge: Challenge,
+    access_point_challenge: Challenge,
 }
 
 impl Transcript {
     fn hasher(&self, key: &[u8; 32]) -> blake3::Hasher {
         let mut h = blake3::Hasher::new_keyed(key);
-        h.update(&self.core_challenge.0);
-        h.update(&self.satellite_challenge.0);
-        h.update(self.core_key.as_bytes());
-        h.update(self.satellite_key.as_bytes());
+        h.update(&self.main_challenge.0);
+        h.update(&self.access_point_challenge.0);
+        h.update(self.main_key.as_bytes());
+        h.update(self.access_point_key.as_bytes());
         h
     }
 
@@ -149,25 +151,25 @@ impl Transcript {
     }
 }
 
-/// Core → candidate: start the exchange.
+/// Main router → candidate: start the exchange.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Hello {
-    pub core_key: WgPublicKey,
-    pub core_challenge: Challenge,
+    pub main_key: WgPublicKey,
+    pub main_challenge: Challenge,
 }
 
-/// Candidate → Core: its identity and proof.
+/// Candidate → main router: its identity and proof.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Offer {
-    pub satellite_key: WgPublicKey,
-    pub satellite_challenge: Challenge,
+    pub access_point_key: WgPublicKey,
+    pub access_point_challenge: Challenge,
     pub proof: Proof,
 }
 
-/// Core → candidate: the tunnel to bring up and the Core's proof over it.
-/// Receiving a valid one completes adoption.
+/// Main router → candidate: the tunnel to bring up and the main router's proof
+/// over it. Receiving a valid one completes adoption.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Confirm {
@@ -252,34 +254,34 @@ impl AttemptGuard {
     }
 }
 
-/// The Core's side of one adoption exchange.
+/// The main router's side of one adoption exchange.
 #[derive(Debug)]
 pub struct Adopter {
     secret: Secret,
-    core_key: WgPublicKey,
-    core_challenge: Challenge,
+    main_key: WgPublicKey,
+    main_challenge: Challenge,
 }
 
-/// A candidate the Core has accepted.
+/// A candidate the main router has accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Adopted {
-    pub satellite_key: WgPublicKey,
+    pub access_point_key: WgPublicKey,
     pub preshared_key: [u8; 32],
 }
 
 impl Adopter {
-    pub fn new(secret: Secret, core_key: WgPublicKey) -> Self {
+    pub fn new(secret: Secret, main_key: WgPublicKey) -> Self {
         Self {
             secret,
-            core_key,
-            core_challenge: Challenge::generate(),
+            main_key,
+            main_challenge: Challenge::generate(),
         }
     }
 
     pub fn hello(&self) -> Hello {
         Hello {
-            core_key: self.core_key,
-            core_challenge: self.core_challenge,
+            main_key: self.main_key,
+            main_challenge: self.main_challenge,
         }
     }
 
@@ -297,21 +299,21 @@ impl Adopter {
             return Err(r);
         }
         let t = Transcript {
-            core_key: self.core_key,
-            satellite_key: offer.satellite_key,
-            core_challenge: self.core_challenge,
-            satellite_challenge: offer.satellite_challenge,
+            main_key: self.main_key,
+            access_point_key: offer.access_point_key,
+            main_challenge: self.main_challenge,
+            access_point_challenge: offer.access_point_challenge,
         };
-        self.core_challenge = Challenge::generate();
-        if !t.verify(&self.secret, LABEL_SATELLITE, &[], &offer.proof) {
+        self.main_challenge = Challenge::generate();
+        if !t.verify(&self.secret, LABEL_ACCESS_POINT, &[], &offer.proof) {
             return Err(guard.fail(now));
         }
         guard.succeed();
-        let proof = t.prove(&self.secret, LABEL_CORE, &tunnel.bytes());
+        let proof = t.prove(&self.secret, LABEL_MAIN, &tunnel.bytes());
         Ok((
             Confirm { tunnel, proof },
             Adopted {
-                satellite_key: offer.satellite_key,
+                access_point_key: offer.access_point_key,
                 preshared_key: t.preshared_key(&self.secret),
             },
         ))
@@ -322,28 +324,28 @@ impl Adopter {
 #[derive(Debug)]
 pub struct Responder {
     secret: Secret,
-    satellite_key: WgPublicKey,
+    access_point_key: WgPublicKey,
     pending: Option<Transcript>,
 }
 
-/// The Core a candidate has accepted.
+/// The main router a candidate has accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdoptedBy {
-    pub core_key: WgPublicKey,
+    pub main_key: WgPublicKey,
     pub preshared_key: [u8; 32],
     pub tunnel: TunnelSpec,
 }
 
 impl Responder {
-    pub fn new(secret: Secret, satellite_key: WgPublicKey) -> Self {
+    pub fn new(secret: Secret, access_point_key: WgPublicKey) -> Self {
         Self {
             secret,
-            satellite_key,
+            access_point_key,
             pending: None,
         }
     }
 
-    /// Answers a Core's hello. Only the latest hello can be confirmed.
+    /// Answers a main router's hello. Only the latest hello can be confirmed.
     pub fn respond(
         &mut self,
         hello: &Hello,
@@ -354,21 +356,21 @@ impl Responder {
             return Err(r);
         }
         let t = Transcript {
-            core_key: hello.core_key,
-            satellite_key: self.satellite_key,
-            core_challenge: hello.core_challenge,
-            satellite_challenge: Challenge::generate(),
+            main_key: hello.main_key,
+            access_point_key: self.access_point_key,
+            main_challenge: hello.main_challenge,
+            access_point_challenge: Challenge::generate(),
         };
-        let proof = t.prove(&self.secret, LABEL_SATELLITE, &[]);
+        let proof = t.prove(&self.secret, LABEL_ACCESS_POINT, &[]);
         self.pending = Some(t);
         Ok(Offer {
-            satellite_key: self.satellite_key,
-            satellite_challenge: t.satellite_challenge,
+            access_point_key: self.access_point_key,
+            access_point_challenge: t.access_point_challenge,
             proof,
         })
     }
 
-    /// Checks the Core's proof against the hello most recently answered.
+    /// Checks the main router's proof against the hello most recently answered.
     pub fn confirm(
         &mut self,
         confirm: &Confirm,
@@ -383,7 +385,7 @@ impl Responder {
         };
         if !t.verify(
             &self.secret,
-            LABEL_CORE,
+            LABEL_MAIN,
             &confirm.tunnel.bytes(),
             &confirm.proof,
         ) {
@@ -391,7 +393,7 @@ impl Responder {
         }
         guard.succeed();
         Ok(AdoptedBy {
-            core_key: t.core_key,
+            main_key: t.main_key,
             preshared_key: t.preshared_key(&self.secret),
             tunnel: confirm.tunnel.clone(),
         })
@@ -454,27 +456,27 @@ mod tests {
 
     fn spec() -> TunnelSpec {
         TunnelSpec {
-            satellite: "s1".into(),
-            core_listen_port: 51900,
-            core_tunnel_addr: "10.42.1.1".into(),
-            satellite_tunnel_addr: "10.42.1.2".into(),
+            access_point: "s1".into(),
+            main_listen_port: 51900,
+            main_tunnel_addr: "10.42.1.1".into(),
+            access_point_tunnel_addr: "10.42.1.2".into(),
         }
     }
 
     struct Pair {
-        core: Adopter,
-        sat: Responder,
-        cg: AttemptGuard,
-        sg: AttemptGuard,
+        main: Adopter,
+        ap: Responder,
+        mg: AttemptGuard,
+        ag: AttemptGuard,
     }
 
-    fn pair(core_secret: &str, sat_secret: &str) -> Pair {
-        let (ck, sk) = keys();
+    fn pair(main_secret: &str, ap_secret: &str) -> Pair {
+        let (mk, ak) = keys();
         Pair {
-            core: Adopter::new(Secret::new(core_secret), ck),
-            sat: Responder::new(Secret::new(sat_secret), sk),
-            cg: AttemptGuard::default(),
-            sg: AttemptGuard::default(),
+            main: Adopter::new(Secret::new(main_secret), mk),
+            ap: Responder::new(Secret::new(ap_secret), ak),
+            mg: AttemptGuard::default(),
+            ag: AttemptGuard::default(),
         }
     }
 
@@ -482,84 +484,84 @@ mod tests {
     fn matching_secrets_adopt_both_ways_and_agree_on_the_psk() {
         let mut p = pair("sticker", "sticker");
         let now = Instant::now();
-        let offer = p.sat.respond(&p.core.hello(), &mut p.sg, now).unwrap();
-        let (confirm, adopted) = p.core.accept(&offer, spec(), &mut p.cg, now).unwrap();
-        assert_eq!(adopted.satellite_key, p.sat.satellite_key);
-        let by = p.sat.confirm(&confirm, &mut p.sg, now).unwrap();
-        assert_eq!(by.core_key, p.core.core_key);
+        let offer = p.ap.respond(&p.main.hello(), &mut p.ag, now).unwrap();
+        let (confirm, adopted) = p.main.accept(&offer, spec(), &mut p.mg, now).unwrap();
+        assert_eq!(adopted.access_point_key, p.ap.access_point_key);
+        let by = p.ap.confirm(&confirm, &mut p.ag, now).unwrap();
+        assert_eq!(by.main_key, p.main.main_key);
         assert_eq!(by.preshared_key, adopted.preshared_key);
         assert_eq!(by.tunnel, spec());
     }
 
     #[test]
-    fn wrong_secret_is_rejected_by_the_core() {
+    fn wrong_secret_is_rejected_by_the_main_router() {
         let mut p = pair("sticker", "guess");
         let now = Instant::now();
-        let offer = p.sat.respond(&p.core.hello(), &mut p.sg, now).unwrap();
+        let offer = p.ap.respond(&p.main.hello(), &mut p.ag, now).unwrap();
         assert_eq!(
-            p.core.accept(&offer, spec(), &mut p.cg, now).unwrap_err(),
+            p.main.accept(&offer, spec(), &mut p.mg, now).unwrap_err(),
             Reject::BadProof { remaining: 4 }
         );
     }
 
     #[test]
-    fn fake_core_is_rejected_by_the_satellite() {
+    fn fake_main_router_is_rejected_by_the_access_point() {
         let mut p = pair("guess", "sticker");
         let now = Instant::now();
-        p.sat.respond(&p.core.hello(), &mut p.sg, now).unwrap();
+        p.ap.respond(&p.main.hello(), &mut p.ag, now).unwrap();
         let bogus = Confirm {
             tunnel: spec(),
             proof: Proof([7; 32]),
         };
         assert_eq!(
-            p.sat.confirm(&bogus, &mut p.sg, now).unwrap_err(),
+            p.ap.confirm(&bogus, &mut p.ag, now).unwrap_err(),
             Reject::BadProof { remaining: 4 }
         );
     }
 
     #[test]
-    fn tampered_tunnel_fails_the_core_proof() {
+    fn tampered_tunnel_fails_the_main_router_proof() {
         let mut p = pair("sticker", "sticker");
         let now = Instant::now();
-        let offer = p.sat.respond(&p.core.hello(), &mut p.sg, now).unwrap();
-        let (mut confirm, _) = p.core.accept(&offer, spec(), &mut p.cg, now).unwrap();
-        confirm.tunnel.core_listen_port += 1;
-        assert!(p.sat.confirm(&confirm, &mut p.sg, now).is_err());
+        let offer = p.ap.respond(&p.main.hello(), &mut p.ag, now).unwrap();
+        let (mut confirm, _) = p.main.accept(&offer, spec(), &mut p.mg, now).unwrap();
+        confirm.tunnel.main_listen_port += 1;
+        assert!(p.ap.confirm(&confirm, &mut p.ag, now).is_err());
     }
 
     #[test]
     fn the_two_proofs_are_not_interchangeable() {
-        let (ck, sk) = keys();
+        let (mk, ak) = keys();
         let t = Transcript {
-            core_key: ck,
-            satellite_key: sk,
-            core_challenge: Challenge::generate(),
-            satellite_challenge: Challenge::generate(),
+            main_key: mk,
+            access_point_key: ak,
+            main_challenge: Challenge::generate(),
+            access_point_challenge: Challenge::generate(),
         };
         let s = Secret::new("sticker");
         assert_ne!(
-            t.prove(&s, LABEL_SATELLITE, &[]),
-            t.prove(&s, LABEL_CORE, &[])
+            t.prove(&s, LABEL_ACCESS_POINT, &[]),
+            t.prove(&s, LABEL_MAIN, &[])
         );
-        assert!(!t.verify(&s, LABEL_CORE, &[], &t.prove(&s, LABEL_SATELLITE, &[])));
+        assert!(!t.verify(&s, LABEL_MAIN, &[], &t.prove(&s, LABEL_ACCESS_POINT, &[])));
     }
 
     #[test]
     fn substituted_key_fails_the_proof() {
         let mut p = pair("sticker", "sticker");
         let now = Instant::now();
-        let mut offer = p.sat.respond(&p.core.hello(), &mut p.sg, now).unwrap();
-        offer.satellite_key = WgKey::generate().public_key();
-        assert!(p.core.accept(&offer, spec(), &mut p.cg, now).is_err());
+        let mut offer = p.ap.respond(&p.main.hello(), &mut p.ag, now).unwrap();
+        offer.access_point_key = WgKey::generate().public_key();
+        assert!(p.main.accept(&offer, spec(), &mut p.mg, now).is_err());
     }
 
     #[test]
     fn replayed_offer_fails_on_the_fresh_challenge() {
         let mut p = pair("sticker", "sticker");
         let now = Instant::now();
-        let offer = p.sat.respond(&p.core.hello(), &mut p.sg, now).unwrap();
-        assert!(p.core.accept(&offer, spec(), &mut p.cg, now).is_ok());
-        assert!(p.core.accept(&offer, spec(), &mut p.cg, now).is_err());
+        let offer = p.ap.respond(&p.main.hello(), &mut p.ag, now).unwrap();
+        assert!(p.main.accept(&offer, spec(), &mut p.mg, now).is_ok());
+        assert!(p.main.accept(&offer, spec(), &mut p.mg, now).is_err());
     }
 
     #[test]
@@ -570,7 +572,7 @@ mod tests {
             proof: Proof([0; 32]),
         };
         assert_eq!(
-            p.sat.confirm(&c, &mut p.sg, Instant::now()).unwrap_err(),
+            p.ap.confirm(&c, &mut p.ag, Instant::now()).unwrap_err(),
             Reject::NoExchange
         );
     }
@@ -599,45 +601,45 @@ mod tests {
     }
 
     #[test]
-    fn locked_core_refuses_before_checking() {
+    fn locked_main_router_refuses_before_checking() {
         let mut p = pair("sticker", "sticker");
         let t0 = Instant::now();
         for _ in 0..ATTEMPT_LIMIT {
-            p.cg.fail(t0);
+            p.mg.fail(t0);
         }
-        let offer = p.sat.respond(&p.core.hello(), &mut p.sg, t0).unwrap();
+        let offer = p.ap.respond(&p.main.hello(), &mut p.ag, t0).unwrap();
         assert!(matches!(
-            p.core.accept(&offer, spec(), &mut p.cg, t0).unwrap_err(),
+            p.main.accept(&offer, spec(), &mut p.mg, t0).unwrap_err(),
             Reject::Locked { .. }
         ));
         let later = t0 + COOLDOWN;
-        let offer = p.sat.respond(&p.core.hello(), &mut p.sg, later).unwrap();
-        assert!(p.core.accept(&offer, spec(), &mut p.cg, later).is_ok());
+        let offer = p.ap.respond(&p.main.hello(), &mut p.ag, later).unwrap();
+        assert!(p.main.accept(&offer, spec(), &mut p.mg, later).is_ok());
     }
 
     #[test]
     fn a_success_clears_the_strike_count() {
         let mut p = pair("sticker", "sticker");
         let now = Instant::now();
-        p.cg.fail(now);
-        p.cg.fail(now);
-        let offer = p.sat.respond(&p.core.hello(), &mut p.sg, now).unwrap();
-        p.core.accept(&offer, spec(), &mut p.cg, now).unwrap();
-        assert_eq!(p.cg.fail(now), Reject::BadProof { remaining: 4 });
+        p.mg.fail(now);
+        p.mg.fail(now);
+        let offer = p.ap.respond(&p.main.hello(), &mut p.ag, now).unwrap();
+        p.main.accept(&offer, spec(), &mut p.mg, now).unwrap();
+        assert_eq!(p.mg.fail(now), Reject::BadProof { remaining: 4 });
     }
 
     #[test]
     fn messages_round_trip_through_json() {
-        let (ck, sk) = keys();
+        let (mk, ak) = keys();
         let hello = Hello {
-            core_key: ck,
-            core_challenge: Challenge::generate(),
+            main_key: mk,
+            main_challenge: Challenge::generate(),
         };
         let s = serde_json::to_string(&hello).unwrap();
         assert_eq!(serde_json::from_str::<Hello>(&s).unwrap(), hello);
         let offer = Offer {
-            satellite_key: sk,
-            satellite_challenge: Challenge::generate(),
+            access_point_key: ak,
+            access_point_challenge: Challenge::generate(),
             proof: Proof([9; 32]),
         };
         let s = serde_json::to_string(&offer).unwrap();

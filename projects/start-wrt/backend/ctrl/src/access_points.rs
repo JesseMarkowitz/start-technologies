@@ -1,4 +1,4 @@
-//! Router role, the Core's access-point registry, and the sync payload
+//! Router role, the main router's access-point registry, and the sync payload
 //! (design `docs/design/satellite-router.md`, D25).
 
 use std::collections::BTreeMap;
@@ -16,18 +16,18 @@ use crate::{CliContext, CtrlContext, ServerContext};
 
 const DIR: &str = "/etc/startwrt";
 const ROLE_PATH: &str = "/etc/startwrt/role.json";
-const REGISTRY_PATH: &str = "/etc/startwrt/satellites.json";
+const REGISTRY_PATH: &str = "/etc/startwrt/access-points.json";
 
-/// A router with no marker is a standalone Core. An adopted router is a
-/// satellite: an access point of its Core.
+/// A router with no marker is a main router. An adopted router is an access
+/// point of its main router.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default, visit_rs::VisitVariants,
 )]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "camelCase")]
 pub enum RouterRole {
     #[default]
-    Core,
-    Satellite,
+    Main,
+    AccessPoint,
 }
 rpc_toolkit::reflect_ts!(RouterRole);
 
@@ -36,49 +36,52 @@ rpc_toolkit::reflect_ts!(RouterRole);
 #[serde(rename_all = "camelCase")]
 pub struct RoleMarker {
     pub role: RouterRole,
-    /// On a satellite, the Core's link-local endpoint with its interface.
+    /// On an access point, the main router's link-local endpoint with its
+    /// interface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub core_endpoint: Option<String>,
-    /// On a satellite, the Core's WireGuard public key (base64) pinned at
-    /// adoption. A satellite with none waits to be adopted.
+    pub main_endpoint: Option<String>,
+    /// On an access point, the main router's WireGuard public key (base64)
+    /// pinned at adoption. An access point with none waits to be adopted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub core_key: Option<String>,
-    /// On a satellite, the Core's address inside the management tunnel.
+    pub main_key: Option<String>,
+    /// On an access point, the main router's address inside the management
+    /// tunnel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub core_address: Option<String>,
-    /// On a satellite, the name the Core adopted it under.
+    pub main_address: Option<String>,
+    /// On an access point, the name the main router adopted it under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// On a satellite, the port that carries the trunk to the Core.
+    /// On an access point, the port that carries the trunk to the main router.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uplink: Option<String>,
-    /// On a satellite, the sync generation applied last (0 = none).
+    /// On an access point, the sync generation applied last (0 = none).
     #[serde(default)]
     pub generation: u64,
 }
 rpc_toolkit::reflect_ts!(RoleMarker);
 
-/// One access point the Core has adopted (`/etc/startwrt/satellites.json`).
+/// One access point the main router has adopted
+/// (`/etc/startwrt/access-points.json`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
-pub struct PairedSatellite {
+pub struct AccessPoint {
     /// Admin-facing label (unique).
     pub name: String,
-    /// The satellite's WireGuard public key (base64), pinned at adoption.
+    /// The access point's WireGuard public key (base64), pinned at adoption.
     pub public_key: String,
-    /// The satellite's address inside its management tunnel.
+    /// The access point's address inside its management tunnel.
     pub mgmt_address: String,
-    /// The config generation this satellite last acknowledged (0 = never).
+    /// The config generation this access point last acknowledged (0 = never).
     #[serde(default)]
     pub generation_applied: u64,
     /// Unix seconds of last successful contact (0 = never).
     #[serde(default)]
     pub last_seen: i64,
-    /// Where its tunnel last handshaked from, as `wg` prints it; the Core
-    /// re-pins it after a reload so it can initiate.
+    /// Where its tunnel last handshaked from, as `wg` prints it; the main
+    /// router re-pins it after a reload so it can initiate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    /// The Core's trunk port its tunnel comes through, while it is live.
+    /// The main router's trunk port its tunnel comes through, while it is live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<String>,
     /// Its tunnel is receiving traffic (D18).
@@ -94,7 +97,7 @@ pub struct PairedSatellite {
     /// The devices on it, as it reported them last.
     #[serde(default)]
     pub clients: Vec<ClientInfo>,
-    /// The Core's channel plan for its radios (D20).
+    /// The main router's channel plan for its radios (D20).
     #[serde(default)]
     pub plan: BTreeMap<String, RadioPlan>,
     /// Its firmware version, as it reported it last.
@@ -104,20 +107,24 @@ pub struct PairedSatellite {
     /// sticker password to protect it with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_ssid: Option<String>,
-    /// It cannot read the Core's payload format and is dark until updated (D17).
+    /// It cannot read the main router's payload format and is dark until
+    /// updated (D17).
     #[serde(default)]
     pub needs_update: bool,
     /// Its firmware update, from queued until it is back on the new version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<ApUpdate>,
+    /// Ports it stopped forwarding on to break a loop.
+    #[serde(default)]
+    pub loop_blocked: Vec<String>,
 }
-rpc_toolkit::reflect_ts!(PairedSatellite);
+rpc_toolkit::reflect_ts!(AccessPoint);
 
 /// An access point's firmware update (D17).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 pub struct ApUpdate {
-    /// The version it is updating to: the Core's.
+    /// The version it is updating to: the main router's.
     pub target: String,
     pub state: ApUpdateState,
     /// Why it failed.
@@ -197,30 +204,36 @@ pub struct TunnelStatus {
     /// The newest payload format it reads; 0 predates the number and reads 1.
     #[serde(default)]
     pub format: u32,
-    /// It cannot read the Core's payload format (D17).
+    /// It cannot read the main router's payload format (D17).
     #[serde(default)]
     pub needs_update: bool,
     /// Its own firmware update, while one runs or after one failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<ApUpdate>,
+    /// Ports it stopped forwarding on to break a loop.
+    #[serde(default)]
+    pub loop_blocked: Vec<String>,
+    /// Its board, which picks the image the main router fetches for it.
+    #[serde(default)]
+    pub platform: String,
 }
 rpc_toolkit::reflect_ts!(TunnelStatus);
 
 /// The payload format this firmware writes and the newest it reads (D17).
 /// Raise it only when an access point that ignored a new field would serve
-/// something the Core's settings forbid.
+/// something the main router's settings forbid.
 pub const SYNC_FORMAT: u32 = 1;
 
 /// Serializes every read-modify-write of the registry across the daemon.
 pub(crate) static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// What an access point needs from its Core (D5). `generation` is monotonic;
-/// an access point rejects a snapshot older than the one it applied.
+/// What an access point needs from its main router (D5). `generation` is
+/// monotonic; an access point rejects a snapshot older than the one it applied.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncSnapshot {
     pub generation: u64,
-    /// `SYNC_FORMAT` of the Core that built it.
+    /// `SYNC_FORMAT` of the main router that built it.
     #[serde(default)]
     pub format: u32,
     pub ssid: String,
@@ -228,15 +241,13 @@ pub struct SyncSnapshot {
     pub broadcast_separately: bool,
     /// Unset runs the world regulatory domain.
     pub country: Option<String>,
-    /// The Core's channel plan for this access point, keyed by its radio name.
+    /// The main router's channel plan for this access point, keyed by its radio
+    /// name.
     pub radios: BTreeMap<String, RadioPlan>,
     pub profiles: Vec<ProfileSpec>,
     pub passwords: Vec<PasswordSpec>,
     /// Access ports by name: the profile VLAN each carries untagged, or none.
     pub ports: BTreeMap<String, Option<u16>>,
-    /// The registry the Core itself updates from. The access point reaches no other.
-    #[serde(default)]
-    pub update_source: Option<String>,
 }
 rpc_toolkit::reflect_ts!(SyncSnapshot);
 
@@ -250,7 +261,7 @@ pub struct ProfileSpec {
 }
 rpc_toolkit::reflect_ts!(ProfileSpec);
 
-/// One radio's assignment in the Core's channel plan.
+/// One radio's assignment in the main router's channel plan.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 pub struct RadioPlan {
@@ -275,7 +286,7 @@ rpc_toolkit::reflect_ts!(PasswordSpec);
 /// from every profile `/24`.
 pub const TRANSIT_BASE: [u8; 2] = [10, 42];
 
-/// The (Core, access point) addresses for tunnel `index`.
+/// The (main router, access point) addresses for tunnel `index`.
 pub fn transit_addrs(index: u8) -> (Ipv4Addr, Ipv4Addr) {
     (
         Ipv4Addr::new(TRANSIT_BASE[0], TRANSIT_BASE[1], index, 1),
@@ -285,7 +296,7 @@ pub fn transit_addrs(index: u8) -> (Ipv4Addr, Ipv4Addr) {
 
 // ── RPC surface ─────────────────────────────────────────────────────────────
 
-pub fn satellite<C: CtrlContext>() -> ParentHandler<C> {
+pub fn access_point<C: CtrlContext>() -> ParentHandler<C> {
     ParentHandler::new()
         .subcommand(
             "get-role",
@@ -336,21 +347,22 @@ pub fn satellite<C: CtrlContext>() -> ParentHandler<C> {
 #[serde(rename_all = "camelCase")]
 #[command(rename_all = "kebab-case")]
 pub struct UpdateParams {
-    /// Access points to update; none means every one older than the Core.
+    /// Access points to update; none means every one older than the main
+    /// router.
     #[arg(long = "name")]
     #[serde(default)]
     names: Vec<String>,
 }
 rpc_toolkit::reflect_ts!(UpdateParams);
 
-/// Queues access points to update to the Core's version, one at a time (D17).
-/// Returns the names queued.
+/// Queues access points to update to the main router's version, one at a time
+/// (D17). Returns the names queued.
 #[instrument(skip_all)]
 pub async fn update(
     _ctx: ServerContext,
     UpdateParams { names }: UpdateParams,
 ) -> Result<Vec<String>, Error> {
-    ensure_core()?;
+    ensure_main()?;
     crate::fleet_update::start(names).await
 }
 
@@ -363,12 +375,12 @@ pub async fn get_role(_ctx: ServerContext) -> Result<RoleMarker, Error> {
 #[serde(rename_all = "camelCase")]
 #[command(rename_all = "kebab-case")]
 pub struct SetRoleParams {
-    /// "core" or "satellite".
+    /// "main" or "access-point".
     role: String,
 }
 rpc_toolkit::reflect_ts!(SetRoleParams);
 
-/// Writes the marker alone; a satellite set this way waits to be adopted.
+/// Writes the marker alone; an access point set this way waits to be adopted.
 #[instrument(skip_all)]
 pub async fn set_role(
     _ctx: ServerContext,
@@ -384,18 +396,21 @@ pub async fn set_role(
     )
     .await?;
     crate::activity::log(
-        "satellite",
+        "access-point",
         "set-role",
         true,
-        &format!("Router role set to {role:?}"),
+        match role {
+            RouterRole::Main => "Router role set to main router",
+            RouterRole::AccessPoint => "Router role set to access point",
+        },
         None,
     );
     Ok(())
 }
 
 #[instrument(skip_all)]
-pub async fn list(_ctx: ServerContext) -> Result<Vec<PairedSatellite>, Error> {
-    ensure_core()?;
+pub async fn list(_ctx: ServerContext) -> Result<Vec<AccessPoint>, Error> {
+    ensure_main()?;
     Ok(load_registry())
 }
 
@@ -407,26 +422,26 @@ pub struct UnpairParams {
 }
 rpc_toolkit::reflect_ts!(UnpairParams);
 
-/// Forgets an access point: tells it so over the tunnel, then takes down
-/// the Core's end. The access point goes back to waiting for a Core; the
-/// trunk port closes when its tunnel stops.
+/// Forgets an access point: tells it so over the tunnel, then takes down the
+/// main router's end. The access point goes back to waiting for a main router;
+/// the trunk port closes when its tunnel stops.
 #[instrument(skip_all)]
 pub async fn unpair<C: CtrlContext>(
     ctx: C,
     UnpairParams { name }: UnpairParams,
 ) -> Result<(), Error> {
-    ensure_core()?;
+    ensure_main()?;
     let _guard = REGISTRY_LOCK.lock().await;
     let mut registry = load_registry();
-    let Some(sat) = registry.iter().find(|s| s.name == name).cloned() else {
+    let Some(ap) = registry.iter().find(|s| s.name == name).cloned() else {
         return Err(Error::new(
-            eyre!("no adopted satellite named '{name}'"),
+            eyre!("no adopted access point named '{name}'"),
             ErrorKind::NotFound,
         ));
     };
-    remove_satellite(&mut registry, &name);
+    remove_access_point(&mut registry, &name);
     let released = if ctx.effectful() {
-        match sat.mgmt_address.parse() {
+        match ap.mgmt_address.parse() {
             Ok(addr) => crate::control::release(addr).await.unwrap_or(false),
             Err(_) => false,
         }
@@ -436,10 +451,7 @@ pub async fn unpair<C: CtrlContext>(
     {
         let arena = uciedit::Arena::new();
         let mut cfgs = uciedit::parse_all(ctx.uci_root(), &arena, &["network", "firewall"]).await?;
-        crate::mgmt_tunnel::remove_core_end(&mut cfgs, &name)?;
-        if registry.is_empty() {
-            crate::update_reach::remove_rules(&mut cfgs);
-        }
+        crate::mgmt_tunnel::remove_main_end(&mut cfgs, &name)?;
         uciedit::dump_all(ctx.uci_root(), cfgs).await?;
     }
     persist_json(REGISTRY_PATH, &registry).await?;
@@ -455,11 +467,11 @@ pub async fn unpair<C: CtrlContext>(
         .await;
     }
     crate::activity::log(
-        "satellite",
+        "access-point",
         "unpaired",
         true,
         &format!(
-            "Removed satellite '{name}'{}",
+            "Removed access point '{name}'{}",
             if released {
                 ""
             } else {
@@ -498,7 +510,7 @@ pub async fn set_ports(
     ctx: ServerContext,
     SetPortsParams { name, ports }: SetPortsParams,
 ) -> Result<(), Error> {
-    ensure_core()?;
+    ensure_main()?;
     let ports = ports
         .iter()
         .map(|p| parse_port_assignment(p))
@@ -524,16 +536,16 @@ pub async fn set_ports(
     }
     let _guard = REGISTRY_LOCK.lock().await;
     let mut registry = load_registry();
-    let sat = registry
+    let ap = registry
         .iter_mut()
         .find(|s| s.name == name)
         .ok_or_else(|| {
             Error::new(
-                eyre!("no adopted satellite named '{name}'"),
+                eyre!("no adopted access point named '{name}'"),
                 ErrorKind::NotFound,
             )
         })?;
-    if let Some(inv) = &sat.inventory {
+    if let Some(inv) = &ap.inventory {
         for (port, _) in &ports {
             match inv.ports.iter().find(|p| p.name == *port) {
                 None => {
@@ -552,13 +564,13 @@ pub async fn set_ports(
             }
         }
     }
-    sat.ports = ports.into_iter().collect();
+    ap.ports = ports.into_iter().collect();
     persist_registry(&registry).await?;
     crate::activity::log(
-        "satellite",
+        "access-point",
         "set-ports",
         true,
-        &format!("Updated the port assignments of satellite '{name}'"),
+        &format!("Updated the port assignments of access point '{name}'"),
         None,
     );
     Ok(())
@@ -568,7 +580,7 @@ pub async fn set_ports(
 #[serde(rename_all = "camelCase")]
 pub struct StatusResponse {
     pub role: RouterRole,
-    pub core_endpoint: Option<String>,
+    pub main_endpoint: Option<String>,
     pub uplink: Option<String>,
     pub generation: u64,
     /// On an access point: its management tunnel is receiving traffic.
@@ -576,20 +588,21 @@ pub struct StatusResponse {
     /// On an access point: SSIDs down and access ports cut (D18); unset
     /// before the first reading.
     pub dark: Option<bool>,
-    pub satellite_count: usize,
-    pub satellites: Vec<PairedSatellite>,
+    pub access_point_count: usize,
+    pub access_points: Vec<AccessPoint>,
 }
 rpc_toolkit::reflect_ts!(StatusResponse);
 
 #[instrument(skip_all)]
 pub async fn status(_ctx: ServerContext) -> Result<StatusResponse, Error> {
     let marker = load_role();
-    let satellites = if marker.role == RouterRole::Core {
+    let access_points = if marker.role == RouterRole::Main {
         load_registry()
     } else {
         Vec::new()
     };
-    let (tunnel_live, dark) = if marker.role == RouterRole::Satellite && marker.core_key.is_some() {
+    let (tunnel_live, dark) = if marker.role == RouterRole::AccessPoint && marker.main_key.is_some()
+    {
         let (live, dark) = crate::liveness::ap_status();
         (Some(live), dark)
     } else {
@@ -597,19 +610,19 @@ pub async fn status(_ctx: ServerContext) -> Result<StatusResponse, Error> {
     };
     Ok(StatusResponse {
         role: marker.role,
-        core_endpoint: marker.core_endpoint,
+        main_endpoint: marker.main_endpoint,
         uplink: marker.uplink,
         generation: marker.generation,
         tunnel_live,
         dark,
-        satellite_count: satellites.len(),
-        satellites,
+        access_point_count: access_points.len(),
+        access_points,
     })
 }
 
 // ── Load / persist ──────────────────────────────────────────────────────────
 
-/// The persisted role; a missing or unreadable marker reads as a Core.
+/// The persisted role; a missing or unreadable marker reads as a main router.
 pub fn load_role() -> RoleMarker {
     std::fs::read_to_string(ROLE_PATH)
         .ok()
@@ -617,14 +630,14 @@ pub fn load_role() -> RoleMarker {
         .unwrap_or_default()
 }
 
-pub(crate) fn load_registry() -> Vec<PairedSatellite> {
+pub(crate) fn load_registry() -> Vec<AccessPoint> {
     std::fs::read_to_string(REGISTRY_PATH)
         .ok()
         .and_then(|c| serde_json::from_str(&c).ok())
         .unwrap_or_default()
 }
 
-pub(crate) async fn persist_registry(list: &[PairedSatellite]) -> Result<(), Error> {
+pub(crate) async fn persist_registry(list: &[AccessPoint]) -> Result<(), Error> {
     persist_json(REGISTRY_PATH, &list).await
 }
 
@@ -660,48 +673,48 @@ async fn persist_json<T: Serialize>(path: &str, value: &T) -> Result<(), Error> 
 // ── Pure logic ──────────────────────────────────────────────────────────────
 
 fn parse_role(s: &str) -> Result<RouterRole, Error> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "core" => Ok(RouterRole::Core),
-        "satellite" => Ok(RouterRole::Satellite),
-        other => Err(Error::new(
-            eyre!("invalid role '{other}' (expected 'core' or 'satellite')"),
+    match s.trim().to_ascii_lowercase().replace('-', "").as_str() {
+        "main" => Ok(RouterRole::Main),
+        "accesspoint" => Ok(RouterRole::AccessPoint),
+        _ => Err(Error::new(
+            eyre!(
+                "invalid role '{}' (expected 'main' or 'access-point')",
+                s.trim()
+            ),
             ErrorKind::InvalidRequest,
         )),
     }
 }
 
-/// A first slice of D7: Core-only operations refuse on a satellite.
-pub(crate) fn ensure_core() -> Result<(), Error> {
-    if load_role().role == RouterRole::Satellite {
+/// A first slice of D7: main-router-only operations refuse on an access point.
+pub(crate) fn ensure_main() -> Result<(), Error> {
+    if load_role().role == RouterRole::AccessPoint {
         return Err(Error::new(
-            eyre!("this operation is only available on a Core router"),
+            eyre!("this operation is only available on a main router"),
             ErrorKind::Authorization,
         ));
     }
     Ok(())
 }
 
-pub(crate) fn add_satellite(
-    list: &mut Vec<PairedSatellite>,
-    sat: PairedSatellite,
-) -> Result<(), Error> {
-    if list.iter().any(|s| s.name == sat.name) {
+pub(crate) fn add_access_point(list: &mut Vec<AccessPoint>, ap: AccessPoint) -> Result<(), Error> {
+    if list.iter().any(|s| s.name == ap.name) {
         return Err(Error::new(
-            eyre!("a satellite named '{}' is already adopted", sat.name),
+            eyre!("an access point named '{}' is already adopted", ap.name),
             ErrorKind::Duplicate,
         ));
     }
-    if list.iter().any(|s| s.public_key == sat.public_key) {
+    if list.iter().any(|s| s.public_key == ap.public_key) {
         return Err(Error::new(
             eyre!("that public key is already adopted"),
             ErrorKind::Duplicate,
         ));
     }
-    list.push(sat);
+    list.push(ap);
     Ok(())
 }
 
-pub(crate) fn remove_satellite(list: &mut Vec<PairedSatellite>, name: &str) -> bool {
+pub(crate) fn remove_access_point(list: &mut Vec<AccessPoint>, name: &str) -> bool {
     let before = list.len();
     list.retain(|s| s.name != name);
     list.len() != before
@@ -711,8 +724,8 @@ pub(crate) fn remove_satellite(list: &mut Vec<PairedSatellite>, name: &str) -> b
 mod tests {
     use super::*;
 
-    fn sat(name: &str, key: &str) -> PairedSatellite {
-        PairedSatellite {
+    fn ap(name: &str, key: &str) -> AccessPoint {
+        AccessPoint {
             name: name.to_string(),
             public_key: key.to_string(),
             mgmt_address: "10.42.1.2".to_string(),
@@ -721,54 +734,60 @@ mod tests {
     }
 
     #[test]
-    fn role_defaults_to_core() {
-        assert_eq!(RouterRole::default(), RouterRole::Core);
-        assert_eq!(RoleMarker::default().role, RouterRole::Core);
+    fn role_defaults_to_main() {
+        assert_eq!(RouterRole::default(), RouterRole::Main);
+        assert_eq!(RoleMarker::default().role, RouterRole::Main);
     }
 
     #[test]
     fn parse_role_accepts_known_roles() {
-        assert_eq!(parse_role("core").unwrap(), RouterRole::Core);
-        assert_eq!(parse_role(" Satellite ").unwrap(), RouterRole::Satellite);
+        assert_eq!(parse_role("main").unwrap(), RouterRole::Main);
+        assert_eq!(
+            parse_role(" Access-Point ").unwrap(),
+            RouterRole::AccessPoint
+        );
+        assert_eq!(parse_role("accessPoint").unwrap(), RouterRole::AccessPoint);
+        assert!(parse_role("core").is_err());
         assert!(parse_role("hub").is_err());
     }
 
     #[test]
-    fn add_then_remove_satellite() {
+    fn add_then_remove_access_point() {
         let mut list = Vec::new();
-        add_satellite(&mut list, sat("a", "k1")).unwrap();
-        add_satellite(&mut list, sat("b", "k2")).unwrap();
+        add_access_point(&mut list, ap("a", "k1")).unwrap();
+        add_access_point(&mut list, ap("b", "k2")).unwrap();
         assert_eq!(list.len(), 2);
-        assert!(remove_satellite(&mut list, "a"));
-        assert!(!remove_satellite(&mut list, "a"));
+        assert!(remove_access_point(&mut list, "a"));
+        assert!(!remove_access_point(&mut list, "a"));
         assert_eq!(list.len(), 1);
     }
 
     #[test]
     fn rejects_duplicate_name_and_key() {
         let mut list = Vec::new();
-        add_satellite(&mut list, sat("a", "k1")).unwrap();
-        assert!(add_satellite(&mut list, sat("a", "k2")).is_err());
-        assert!(add_satellite(&mut list, sat("b", "k1")).is_err());
+        add_access_point(&mut list, ap("a", "k1")).unwrap();
+        assert!(add_access_point(&mut list, ap("a", "k2")).is_err());
+        assert!(add_access_point(&mut list, ap("b", "k1")).is_err());
     }
 
     #[test]
     fn role_marker_round_trips() {
         let marker = RoleMarker {
-            role: RouterRole::Satellite,
-            core_endpoint: Some("fe80::1%eth1".into()),
-            core_key: Some("KEY=".into()),
-            core_address: Some("10.42.1.1".into()),
+            role: RouterRole::AccessPoint,
+            main_endpoint: Some("fe80::1%eth1".into()),
+            main_key: Some("KEY=".into()),
+            main_address: Some("10.42.1.1".into()),
             name: Some("garage".into()),
             uplink: Some("eth1".into()),
             generation: 4,
         };
         let json = serde_json::to_string(&marker).unwrap();
+        assert!(json.contains(r#""role":"accessPoint""#));
         let back: RoleMarker = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.role, RouterRole::Satellite);
+        assert_eq!(back.role, RouterRole::AccessPoint);
         assert_eq!(back.uplink.as_deref(), Some("eth1"));
         assert_eq!(back.generation, 4);
-        let old: RoleMarker = serde_json::from_str(r#"{"role":"satellite"}"#).unwrap();
+        let old: RoleMarker = serde_json::from_str(r#"{"role":"accessPoint"}"#).unwrap();
         assert_eq!(old.generation, 0);
         assert!(old.uplink.is_none());
     }
@@ -824,7 +843,6 @@ mod tests {
                 vlan_tag: 101,
             }],
             ports: BTreeMap::from([("eth0".into(), Some(101)), ("eth2".into(), None)]),
-            update_source: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         assert!(json.contains("\"vlanTag\":101"));

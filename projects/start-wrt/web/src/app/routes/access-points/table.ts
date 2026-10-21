@@ -55,6 +55,15 @@ const BAND = { '2g': '2.4 GHz', '5g': '5 GHz', '6g': '6 GHz' } as const
                 {{ 'Recovery network' | i18n }}: {{ item.recoverySsid }}
               </div>
             }
+            @if (item.loopBlocked.length) {
+              <span tuiBadge size="s" appearance="negative">
+                {{ 'Loop detected' | i18n }}
+              </span>
+              <div class="g-secondary">
+                {{ 'Stopped forwarding on' | i18n }}:
+                {{ item.loopBlocked.join(', ') }}
+              </div>
+            }
           </td>
           <td tuiTd>
             {{ item.version || '—' }}
@@ -68,7 +77,7 @@ const BAND = { '2g': '2.4 GHz', '5g': '5 GHz', '6g': '6 GHz' } as const
               </span>
             } @else if (service.newer(item)) {
               <span tuiBadge size="s" appearance="neutral">
-                {{ 'Newer than the Core' | i18n }}
+                {{ 'Newer than the main router' | i18n }}
               </span>
             }
             @if (item.update; as update) {
@@ -122,7 +131,14 @@ const BAND = { '2g': '2.4 GHz', '5g': '5 GHz', '6g': '6 GHz' } as const
               <span class="g-secondary">—</span>
             }
           </td>
-          <td tuiTd>{{ item.clients.length }}</td>
+          <td tuiTd>
+            {{ item.clients.length }}
+            @for (row of wifiByProfile(item); track row.name) {
+              <div class="g-secondary">
+                {{ row.name }}: {{ row.count }} {{ 'on Wi-Fi' | i18n }}
+              </div>
+            }
+          </td>
           <td tuiTd>
             <button
               tuiIconButton
@@ -212,6 +228,21 @@ export class AccessPointsTable {
       this.service.profiles().find(p => p.vlan_tag === vlan)?.fullname ??
       `VLAN ${vlan}`
     )
+  }
+
+  wifiByProfile(item: AccessPoint): { name: string; count: number }[] {
+    const counts = new Map<number, number>()
+    for (const c of item.clients) {
+      if (c.via.startsWith('Wi-Fi') && c.vlan !== null) {
+        counts.set(c.vlan, (counts.get(c.vlan) ?? 0) + 1)
+      }
+    }
+    return [...counts].map(([vlan, count]) => ({
+      name:
+        this.service.profiles().find(p => p.vlan_tag === vlan)?.fullname ??
+        `VLAN ${vlan}`,
+      count,
+    }))
   }
 
   onPortChange(item: AccessPoint, port: string, vlan: number | null) {

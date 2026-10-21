@@ -2000,7 +2000,7 @@ fn ensure_wireguard_firewall_rule(
 
 /// Like `ensure_wireguard_firewall_rule` but parameterized on the source firewall
 /// zone the handshake arrives on. Inbound VPN servers listen on "wan"; a
-/// locally-attached satellite (satellite-router design) dials the Core across the
+/// locally-attached access point dials the main router across the
 /// transit link, so its handshake arrives on that link's zone instead.
 pub(crate) fn ensure_wireguard_firewall_rule_in_zone(
     cfgs: &mut Configs,

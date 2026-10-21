@@ -1,13 +1,13 @@
-//! Bridge-family nftables files the daemon writes into fw4's include
-//! directory (design D18, D25): the Core's trunk gate and the access point's
+//! Bridge-family nftables files the daemon writes into fw4's include directory
+//! (design D18, D25): the main router's trunk gate and the access point's
 //! variant of the DHCP guard. Nothing goes under `/etc/nftables.d`, which
-//! sysupgrade restores over the image; `/usr/share` is the image's, so a
-//! file here is rewritten on first boot after an upgrade.
+//! sysupgrade restores over the image; `/usr/share` is the image's, so a file
+//! here is rewritten on first boot after an upgrade.
 //!
-//! Both files match the ingress or egress port, which needs
-//! `kmod-nft-bridge`. Without it the gate is not written and the trunk stays
-//! open, and an access point runs no guard at all rather than the Core's,
-//! which would drop the Core's DHCP replies to its clients.
+//! Both files match the ingress or egress port, which needs `kmod-nft-bridge`.
+//! Without it the gate is not written and the trunk stays open, and an access
+//! point runs no guard at all rather than the main router's, which would drop
+//! the main router's DHCP replies to its clients.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -25,7 +25,7 @@ const BRIDGE_META_MODULE: &str = "nft_meta_bridge";
 
 const GATE: &str = "\
 # Profile VLANs cross a trunk port only while an adopted access point's
-# management tunnel is up through it (startwrt satellite). The daemon fills
+# management tunnel is up through it (startwrt access-point). The daemon fills
 # the set; empty is closed. The backhaul VLAN is never gated.
 table bridge startwrt_trunk_gate
 delete table bridge startwrt_trunk_gate
@@ -44,7 +44,7 @@ table bridge startwrt_trunk_gate {
 }
 ";
 
-/// The shipped guard with the uplink exempted: the Core's replies and
+/// The shipped guard with the uplink exempted: the main router's replies and
 /// advertisements come in there, a rogue server's from any other port.
 pub fn ap_guard(uplink: &str) -> Result<String, Error> {
     if uplink.is_empty()
@@ -127,9 +127,9 @@ async fn remove_if_present(path: &str) -> Result<bool, Error> {
     }
 }
 
-/// A Core's files: the gate while it has a trunk, the guard as shipped.
+/// A main router's files: the gate while it has a trunk, the guard as shipped.
 /// Returns whether anything changed, which calls for a firewall reload.
-pub async fn sync_core(has_trunk: bool) -> Result<bool, Error> {
+pub async fn sync_main(has_trunk: bool) -> Result<bool, Error> {
     let mut changed = false;
     if Path::new(GUARD_PATH).exists() {
         changed |= write_if_changed(GUARD_PATH, SHIPPED_GUARD).await?;

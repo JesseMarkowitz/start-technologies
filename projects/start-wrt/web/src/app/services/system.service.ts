@@ -34,7 +34,7 @@ export class SystemService {
   readonly updateAvailable = signal(false)
   readonly updating = signal(false)
   readonly rebooting = signal(false)
-  /** This Core has access points to offer updating after it. */
+  /** This main router has access points to offer updating after it. */
   readonly hasAccessPoints = signal(false)
   readonly updateAccessPoints = signal(true)
 
@@ -80,7 +80,7 @@ export class SystemService {
       const [info, newerVersions, accessPoints] = await Promise.all([
         this.api.systemInfo(),
         this.api.systemNewerVersions(),
-        this.api.satelliteList().catch(() => []),
+        this.api.accessPointList().catch(() => []),
       ])
 
       this.setInfo(info)

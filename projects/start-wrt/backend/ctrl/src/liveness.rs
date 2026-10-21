@@ -1,12 +1,12 @@
 //! Whether a management tunnel is alive, and what each end does about it
 //! (design D18, D25).
 //!
-//! The Core opens a trunk port only while an adopted access point's tunnel
-//! is alive through it, re-pins the endpoint it last learned so it can
-//! initiate a handshake itself, keeps the access point's path to the update
-//! source resolved, and runs config sync over the live tunnels (`sync`). An access point whose tunnel is not alive takes
-//! its SSIDs down and cuts its access ports, and brings them back once the
-//! tunnel has held for a moment.
+//! The main router opens a trunk port only while an adopted access point's
+//! tunnel is alive through it, re-pins the endpoint it last learned so it can
+//! initiate a handshake itself, and runs config sync over the live tunnels
+//! (`sync`). An access point whose tunnel is not alive takes its SSIDs down and
+//! cuts its access ports, and brings them back once the tunnel has held for a
+//! moment.
 //!
 //! Liveness is traffic received. Each end sends the other an echo every
 //! tick, so a tunnel that is up receives something every few seconds from
@@ -21,13 +21,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::satellite::{self, RouterRole};
+use crate::access_points::{self, RouterRole};
 
 pub const TICK: Duration = Duration::from_secs(5);
 /// One keepalive may be lost; two in a row is dark.
 pub const THRESHOLD: Duration = Duration::from_secs(45);
 /// A resumed tunnel must hold this long before the access point reopens, and
-/// the access point must have applied the Core's current generation (D18).
+/// the access point must have applied the main router's current generation
+/// (D18).
 pub const RESUME_AFTER: Duration = Duration::from_secs(10);
 /// A session is renewed at least this often while traffic flows; an older
 /// handshake on first sight says nothing about the present.
@@ -132,11 +133,11 @@ static RUNNING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 /// Starts the loop this router's role calls for, once. On its own thread:
 /// adoption calls this from a runtime that ends with the exchange.
 pub fn start() {
-    let role = satellite::load_role();
+    let role = access_points::load_role();
     let run: fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> = match role.role {
-        RouterRole::Core => || Box::pin(run_core()),
-        RouterRole::Satellite if role.core_key.is_some() => || Box::pin(run_ap()),
-        RouterRole::Satellite => return,
+        RouterRole::Main => || Box::pin(run_main()),
+        RouterRole::AccessPoint if role.main_key.is_some() => || Box::pin(run_ap()),
+        RouterRole::AccessPoint => return,
     };
     {
         let mut running = RUNNING.lock().unwrap();
@@ -161,7 +162,7 @@ pub fn start() {
     }
 }
 
-// ── Core ────────────────────────────────────────────────────────────────────
+// ── Main router ─────────────────────────────────────────────────────────────
 
 /// `[<ip>%<scope>]:<port>` or `<ip>:<port>` as `wg` prints it.
 pub fn endpoint_host(endpoint: &str) -> Option<(&str, Option<&str>)> {
@@ -226,46 +227,45 @@ async fn repin_endpoint(interface: &str, public_key: &str, endpoint: &str) {
     }
 }
 
-async fn run_core() {
+async fn run_main() {
     let mut monitors: BTreeMap<String, Monitor> = BTreeMap::new();
     let mut pusher = crate::sync::Pusher::default();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_persist = Instant::now();
-    let mut reach_due = Instant::now();
     let mut applied: Option<BTreeSet<String>> = None;
     loop {
         tick.tick().await;
         let now = Instant::now();
         let now_unix = unix_now();
-        let _guard = satellite::REGISTRY_LOCK.lock().await;
-        let mut registry = satellite::load_registry();
+        let _guard = access_points::REGISTRY_LOCK.lock().await;
+        let mut registry = access_points::load_registry();
         monitors.retain(|name, _| registry.iter().any(|s| s.name == *name));
         let mut changed = false;
         let mut live_ports = BTreeSet::new();
-        for sat in &mut registry {
-            let interface = crate::mgmt_tunnel::core_interface_name(&sat.name);
-            probe(&sat.mgmt_address);
+        for ap in &mut registry {
+            let interface = crate::mgmt_tunnel::ap_interface_name(&ap.name);
+            probe(&ap.mgmt_address);
             let obs = observe_interface(&interface).await;
             let live =
                 monitors
-                    .entry(sat.name.clone())
+                    .entry(ap.name.clone())
                     .or_default()
                     .observe(obs.as_ref(), now, now_unix);
             match obs.as_ref().and_then(|o| o.endpoint.as_deref()) {
-                Some(ep) if sat.endpoint.as_deref() != Some(ep) => {
-                    sat.endpoint = Some(ep.to_string());
+                Some(ep) if ap.endpoint.as_deref() != Some(ep) => {
+                    ap.endpoint = Some(ep.to_string());
                     changed = true;
                 }
                 Some(_) => {}
                 None => {
-                    if let (Some(ep), true) = (&sat.endpoint, obs.is_some()) {
-                        repin_endpoint(&interface, &sat.public_key, ep).await;
+                    if let (Some(ep), true) = (&ap.endpoint, obs.is_some()) {
+                        repin_endpoint(&interface, &ap.public_key, ep).await;
                     }
                 }
             }
             let port = if live {
-                match &sat.endpoint {
+                match &ap.endpoint {
                     Some(ep) => port_for_endpoint(ep).await,
                     None => None,
                 }
@@ -275,20 +275,20 @@ async fn run_core() {
             if let Some(p) = &port {
                 live_ports.insert(p.clone());
             }
-            if sat.port != port {
-                sat.port = port;
+            if ap.port != port {
+                ap.port = port;
                 changed = true;
             }
-            if sat.live != live {
-                sat.live = live;
+            if ap.live != live {
+                ap.live = live;
                 changed = true;
                 crate::activity::log(
-                    "satellite",
+                    "access-point",
                     if live { "up" } else { "dark" },
                     live,
                     &format!(
-                        "Satellite '{}' is {}",
-                        sat.name,
+                        "Access point '{}' is {}",
+                        ap.name,
                         if live {
                             "in contact; its trunk port is open"
                         } else {
@@ -299,7 +299,7 @@ async fn run_core() {
                 );
             }
             if live {
-                sat.last_seen = now_unix as i64;
+                ap.last_seen = now_unix as i64;
             }
         }
         let live_names: BTreeSet<String> = registry
@@ -312,7 +312,7 @@ async fn run_core() {
             Err(e) => tracing::warn!("sync: tick failed: {e}"),
         }
         if changed || (registry.iter().any(|s| s.live) && last_persist.elapsed() > PERSIST_EVERY) {
-            if let Err(e) = satellite::persist_registry(&registry).await {
+            if let Err(e) = access_points::persist_registry(&registry).await {
                 tracing::error!("liveness: registry not saved: {e}");
             }
             last_persist = Instant::now();
@@ -325,12 +325,6 @@ async fn run_core() {
                 Ok(()) => applied = Some(live_ports),
                 Err(e) => tracing::debug!("liveness: live set not applied: {e}"),
             }
-        }
-        if !registry.is_empty() && now >= reach_due {
-            if let Err(e) = crate::update_reach::refresh().await {
-                tracing::warn!("liveness: update reach not refreshed: {e}");
-            }
-            reach_due = now + crate::update_reach::REFRESH;
         }
     }
 }
@@ -354,12 +348,12 @@ pub fn ap_status() -> (bool, Option<bool>) {
     (TUNNEL_LIVE.load(Ordering::Relaxed) == 1, dark)
 }
 
-/// The Core has said which generation is current and this access point has
-/// applied it. Before the first status call nothing is known, and the access
-/// point stays dark (D18: a tunnel alone is not enough).
+/// The main router has said which generation is current and this access point
+/// has applied it. Before the first status call nothing is known, and the
+/// access point stays dark (D18: a tunnel alone is not enough).
 fn reconciled() -> bool {
-    let core = crate::control::core_generation();
-    core > 0 && satellite::load_role().generation >= core
+    let main_gen = crate::control::main_generation();
+    main_gen > 0 && access_points::load_role().generation >= main_gen
 }
 
 /// Bridge ports that are neither the uplink nor a radio.
@@ -384,39 +378,39 @@ async fn set_ports(ports: &[String], state: &str) {
     }
 }
 
-/// Lost the Core, or it sends a payload this firmware cannot read (D17).
+/// Lost the main router, or it sends a payload this firmware cannot read (D17).
 async fn go_dark(uplink: &str, needs_update: bool) {
     let message = if needs_update {
-        "The Core's configuration needs newer firmware: Wi-Fi off and access ports cut until this access point is updated"
+        "The main router's configuration needs newer firmware: Wi-Fi off and access ports cut until this access point is updated"
     } else {
-        "Lost the Core: Wi-Fi off and access ports cut until it is back"
+        "Lost the main router: Wi-Fi off and access ports cut until it is back"
     };
     tracing::warn!("liveness: {message}");
     let _ = crate::run_quiet_async(tokio::process::Command::new("wifi").arg("down")).await;
     set_ports(&access_ports(uplink), "down").await;
-    crate::activity::log("satellite", "dark", false, message, None);
+    crate::activity::log("access-point", "dark", false, message, None);
 }
 
 async fn resume(uplink: &str) {
-    tracing::info!("liveness: the Core is back; SSIDs up, access ports restored");
+    tracing::info!("liveness: the main router is back; SSIDs up, access ports restored");
     if let Err(e) = crate::recovery::exit(uplink).await {
         tracing::error!("liveness: recovery mode not removed: {e}");
     }
     set_ports(&access_ports(uplink), "up").await;
     let _ = crate::run_quiet_async(tokio::process::Command::new("wifi").arg("up")).await;
     crate::activity::log(
-        "satellite",
+        "access-point",
         "resumed",
         true,
-        "The Core is back: Wi-Fi on and access ports restored",
+        "The main router is back: Wi-Fi on and access ports restored",
         None,
     );
 }
 
 async fn run_ap() {
-    let role = satellite::load_role();
+    let role = access_points::load_role();
     let uplink = role.uplink.unwrap_or_default();
-    let core_address = role.core_address.unwrap_or_default();
+    let main_address = role.main_address.unwrap_or_default();
     let mut monitor = Monitor::default();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -428,8 +422,8 @@ async fn run_ap() {
     loop {
         tick.tick().await;
         let now = Instant::now();
-        if !core_address.is_empty() {
-            probe(&core_address);
+        if !main_address.is_empty() {
+            probe(&main_address);
         }
         // Recovery mode (D22) a minute into the dark, so a blip does not
         // flash it on and off.
@@ -445,7 +439,7 @@ async fn run_ap() {
         } else {
             dark_since = None;
         }
-        let obs = observe_interface(crate::mgmt_tunnel::AP_INTERFACE).await;
+        let obs = observe_interface(crate::mgmt_tunnel::MAIN_INTERFACE).await;
         let live = monitor.observe(obs.as_ref(), now, unix_now());
         TUNNEL_LIVE.store(live as u8, Ordering::Relaxed);
         let needs_update = crate::ap::needs_update();

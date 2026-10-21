@@ -111,31 +111,36 @@ export abstract class ApiService {
   abstract backupCreate(): Promise<BackupCreateRes>
   abstract backupRestore(): Promise<BackupRestoreRes>
   abstract diagnosticsCreate(): Promise<DiagnosticsCreateRes>
-  abstract satelliteList(): Promise<AccessPoint[]>
-  abstract satelliteUnpair(params: { name: string }): Promise<null>
-  abstract satelliteSetPorts(params: AccessPointSetPorts): Promise<null>
-  abstract satelliteUpdate(params: AccessPointUpdate): Promise<string[]>
-  abstract satelliteCandidates(): Promise<AccessPointCandidate[]>
-  abstract satelliteAdopt(params: AccessPointAdopt): Promise<AccessPointAdopted>
-  abstract satelliteAdoptionCode(): Promise<AdoptionCode>
+  abstract accessPointList(): Promise<AccessPoint[]>
+  abstract accessPointUnpair(params: { name: string }): Promise<null>
+  abstract accessPointSetPorts(params: AccessPointSetPorts): Promise<null>
+  abstract accessPointUpdate(params: AccessPointUpdate): Promise<string[]>
+  abstract accessPointCandidates(): Promise<AccessPointCandidate[]>
+  abstract accessPointAdopt(
+    params: AccessPointAdopt,
+  ): Promise<AccessPointAdopted>
+  abstract accessPointAdoptionCode(): Promise<AdoptionCode>
 }
 
-export type AdoptionCode = RpcReturnType<Api, 'satellite.adoption.code'>
+export type AdoptionCode = RpcReturnType<Api, 'access-point.adoption.code'>
 
-export type AccessPoint = RpcReturnType<Api, 'satellite.list'>[number]
+export type AccessPoint = RpcReturnType<Api, 'access-point.list'>[number]
 
-export type AccessPointSetPorts = RpcParamType<Api, 'satellite.set-ports'>
+export type AccessPointSetPorts = RpcParamType<Api, 'access-point.set-ports'>
 
-export type AccessPointUpdate = RpcParamType<Api, 'satellite.update'>
+export type AccessPointUpdate = RpcParamType<Api, 'access-point.update'>
 
 export type AccessPointCandidate = RpcReturnType<
   Api,
-  'satellite.adoption.candidates'
+  'access-point.adoption.candidates'
 >[number]
 
-export type AccessPointAdopt = RpcParamType<Api, 'satellite.adoption.adopt'>
+export type AccessPointAdopt = RpcParamType<Api, 'access-point.adoption.adopt'>
 
-export type AccessPointAdopted = RpcReturnType<Api, 'satellite.adoption.adopt'>
+export type AccessPointAdopted = RpcReturnType<
+  Api,
+  'access-point.adoption.adopt'
+>
 
 export type BackupCreateRes = RpcReturnType<Api, 'backup.create'>
 

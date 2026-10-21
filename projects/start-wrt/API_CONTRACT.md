@@ -213,8 +213,8 @@ struct UpdateSystemParams {
     /// `https://startwrt-registry.start9.com`.
     registry: Option<String>,
     target_version: Option<String>, // wire: `targetVersion` (default: latest)
-    /// On a Core: once it has booted the target and stayed up 3 minutes,
-    /// update its access points to it one at a time (`satellite.update`).
+    /// On a main router: once it has booted the target and stayed up 3 minutes,
+    /// update its access points to it one at a time (`access-point.update`).
     update_access_points: bool, // wire: `updateAccessPoints` (default: false)
 }
 
@@ -2020,14 +2020,15 @@ struct InjectedDnsRecord {
 
 ---
 
-## 18. Satellite Router
+## 18. Access Points
 
-Router **role**, the Core's **access-point registry**, adoption, and the sync payload an
-access point applies. See `docs/design/satellite-router.md` (D25): a satellite is a thin
-access point on a tagged trunk from the Core, with one WireGuard management tunnel. A trunk
-port is set on the Ethernet page (`ethernet.set` with `trunk: true`, §6).
+Router **role**, the main router's **access-point registry**, adoption, and the sync payload an
+access point applies. A StartWRT router can be configured as a StartWRT-AP (the role is a setting,
+not a different product). See `docs/design/satellite-router.md` (D25): an access point is thin,
+on a tagged trunk from the main router, with one WireGuard management tunnel. A trunk port is set
+on the Ethernet page (`ethernet.set` with `trunk: true`, §6).
 
-The daemon keeps both ends honest (D18): the Core passes profile VLANs on a trunk port only
+The daemon keeps both ends honest (D18): the main router passes profile VLANs on a trunk port only
 while an adopted access point's tunnel is receiving traffic through it (a bridge-family
 nftables gate under `/usr/share/nftables.d`, filled from a 5 s liveness loop; it needs
 `kmod-nft-bridge` and is not written without it), and an access point whose tunnel has gone
@@ -2035,81 +2036,83 @@ quiet for 45 s takes its Wi-Fi down and cuts its access ports until the tunnel h
 10 s. Each end echoes the other's tunnel address every 5 s, so "quiet" means the peer is gone,
 not that WireGuard's keepalive scheduling fell silent on one side.
 
-**Config sync (D5, D20).** Every 5 s the Core rebuilds each access point's payload from its own
+**Config sync (D5, D20).** Every 5 s the main router rebuilds each access point's payload from its own
 Wi-Fi settings (SSID, country, every password with the VLAN of its profile), its profiles, the
-port assignments set with `satellite.set-ports`, a channel plan for the access point's reported
-radios (2.4 GHz channels 1/6/11 at HE20, 5 GHz 36–48 at HE80, the least used across the Core
-and every access point; a dual-band phy takes 2.4 GHz first) and its own update source. A
-digest of all payloads decides whether the generation advances (`/etc/startwrt/sync.json`), so a
+port assignments set with `access-point.set-ports`, a channel plan for the access point's reported
+radios (2.4 GHz channels 1/6/11 at HE20, 5 GHz 36–48 at HE80, the least used across the main router
+and every access point; a dual-band phy takes 2.4 GHz first). A digest of all payloads decides whether the generation advances (`/etc/startwrt/sync.json`), so a
 change anywhere reaches every live access point within seconds with no hook in the code that
 made it. An access point behind the current generation is pushed to over the tunnel; one that
 fails is retried after 30 s. An access point that is dark reopens only once it has applied the
-Core's current generation (D18).
+main router's current generation (D18).
 
 **Tunnel API.** An adopted access point serves JSON-RPC at `http://<its tunnel address>:8720/rpc`
-and answers only the Core's tunnel address. Methods: `apply` (params: a `SyncSnapshot`; refuses a
+and answers only the main router's tunnel address. Methods: `apply` (params: a `SyncSnapshot`; refuses a
 `format` newer than its firmware reads and a generation older than the applied one, treats the
-same generation as done), `status` (params `{ coreGeneration, coreVersion, name, coreFormat }`, the
-name being what the Core adopted it under, which an access point without one on record keeps;
+same generation as done), `status` (params `{ mainGeneration, mainVersion, name, mainFormat }`, the
+name being what the main router adopted it under, which an access point without one on record keeps;
 returns `TunnelStatus { generation, tunnelLive, dark, inventory, clients, version, recoverySsid,
-format, needsUpdate, update }`, where
+format, needsUpdate, update, loopBlocked, platform }`, where
 `clients` lists every device the access point's bridge learned on a port other than its uplink as
 `{ mac, via, vlan }`, `via` being a Wi-Fi band label when hostapd knows the device or else the port
 name, `format` the newest payload format the access point reads (absent: it predates the number
-and reads format 1), and `update` its own firmware update while one runs or after one failed),
-`release` (the Core has forgotten this access point), `update` (params `{ registry, targetVersion }`:
-answers at once, then downloads that exact version from that registry, checks it and runs
-`sysupgrade`; a failure shows in `status`). The access point reads its inventory
+and reads format 1), `update` its own firmware update while one runs or after one failed,
+`loopBlocked` the ports its loop guard stopped forwarding on, and `platform` its board),
+`release` (the main router has forgotten this access point), `update` (params `{ targetVersion, asset }`,
+the image's signed registry metadata: refused unless its signatures check; the image follows as
+`PUT /firmware` on the same port, is written to `/tmp`, checked against the asset's commitment and
+flashed with `sysupgrade` after the reply; a failure shows in `status`). The access point reads its inventory
 from the kernel: ports from `/sys/class/net` with link state, radios from its wireless config's
 `path` resolved to a phy and the bands `iw phy` lists, so a stale `wifi-device` with no phy is
-absent. The Core keeps the clients in the registry and the device list shows such a device as, for
-example, `Wi-Fi 2.4GHz (garage)` or `Ethernet (garage)` instead of Ethernet on the Core's trunk
-port (D13). The Core answers NTP and DNS on its end of every tunnel and forwards an access point
-only to the update source it is itself configured with (HTTPS to the registry host and the hosts
-its asset URLs name, resolved every 10 minutes into fw4 sets `sat_reach4`/`sat_reach6`).
+absent. The main router keeps the clients in the registry and the device list shows such a device as, for
+example, `Wi-Fi 2.4GHz (garage)` or `Ethernet (garage)` instead of Ethernet on the main router's trunk
+port (D13). The main router answers NTP and DNS on its end of every tunnel and forwards nothing for an access
+point: its firmware arrives through the tunnel `update`.
 
-**Fleet updates (D17).** Every payload carries `format`, the Core's `SYNC_FORMAT`, raised only when
-an access point that ignored a new field would serve something the Core's settings forbid. An
+**Fleet updates (D17).** Every payload carries `format`, the main router's `SYNC_FORMAT`, raised only when
+an access point that ignored a new field would serve something the main router's settings forbid. An
 access point told of a newer format, by `status` or `apply`, writes `/etc/startwrt/needs-update`
 (outside the sysupgrade keep list, so new firmware starts without it), refuses the payload and goes
-dark with its tunnel up; the Core marks it `needsUpdate` and stops pushing to it. Older firmware
-that reads the format keeps serving. `satellite.update` queues access points (`PairedSatellite.update`
+dark with its tunnel up; the main router marks it `needsUpdate` and stops pushing to it. Older firmware
+that reads the format keeps serving. `access-point.update` queues access points (`AccessPoint.update`
 `{ target, state: "queued" | "updating" | "failed", message }`) and a single sequence works through
-them: wait up to 10 minutes for the access point to be in contact, send the tunnel `update` with the
-Core's own version and update source, then poll `status` until it reports that version (up to 15
+them: wait up to 10 minutes for the access point to be in contact, fetch the main router's own
+version for the access point's platform from the main router's update source (once per board per
+sequence, kept in RAM and checked against its signatures and commitment), send the tunnel `update`
+and the image, then poll `status` until it reports that version (up to 15
 minutes) before starting the next. A failure the access point reports before rebooting marks that
 one failed and moves on; one that restarts on an older version or does not come back marks it and
 every one still queued as failed and stops. A dark access point's recovery layout left in its
 configs by a reboot is removed when its daemon starts.
 
-**Role gate (D7).** On an adopted access point the RPC server answers only `satellite.get-role`,
-`satellite.status`, `satellite.adoption.code`, `system.info`, `system.restart` and `auth.logout`;
+**Role gate (D7).** On an adopted access point the RPC server answers only `access-point.get-role`,
+`access-point.status`, `access-point.adoption.code`, `system.info`, `system.restart` and `auth.logout`;
 every other method returns an Authorization error ("not available on an access point; use its
-Core") before session validation. The access point serves its own page (D23) in place of the web
-UI at every path: "Satellite _name_", a link to `router.lan`, the tunnel state, the generation
-applied against the Core's, firmware against the Core's, its ports and radios, its devices with
-their profile, and the last log lines. The page holds nothing the Core controls.
+main router") before session validation. The access point serves its own page (D23) in place of the web
+UI at every path: "Access point _name_", a link to `router.lan`, the tunnel state, the generation
+applied against the main router's, firmware against the main router's, its ports and radios, its devices with
+their profile, and the last log lines. The page holds nothing the main router controls.
 
 **Recovery mode (D22).** An access point dark for 60 s brings up an isolated recovery network:
 its access ports move to VLAN 4093 with `192.168.255.1/24`, DHCP and `router.lan` answered by
 the access point itself, in a firewall zone that forwards nowhere; with a sticker password it also
 broadcasts `StartWRT-Recovery-<last four hex digits of the uplink MAC>` on 2.4 GHz, one client at
 a time, protected by that password, with every profile SSID disabled. There `http://router.lan`
-is a page headed "Satellite _name_ — recovery mode": why it is dark (uplink link, whether the Core
-answers on the cable, tunnel handshake age, firmware against the Core's, a refused payload),
+is a page headed "Access point _name_ — recovery mode": why it is dark (uplink link, whether the main router
+answers on the cable, tunnel handshake age, firmware against the main router's, a refused payload),
 Restart and Factory reset (`firstboot -y`) behind confirmations, and the log filtered to link,
 tunnel, firewall and sync lines, viewable and downloadable. No login: being on the recovery
 network is the credential. When the tunnel is back the layout applied last is restored and the
-recovery network goes. `PairedSatellite.recoverySsid` tells the admin the name in advance;
-`PairedSatellite.version` is the access point's firmware.
+recovery network goes. `AccessPoint.recoverySsid` tells the admin the name in advance;
+`AccessPoint.version` is the access point's firmware.
 
 **Fresh and reset routers (§19).** A router with no password yet runs the candidate listener on
-its WAN port whatever its role, so one that hears a Core joins it instead of becoming one; its
-setup page says so and shows the adoption code (`satellite.adoption.code`, answered without a
+its WAN port whatever its role, so one that hears a main router joins it instead of becoming one; its
+setup page says so and shows the adoption code (`access-point.adoption.code`, answered without a
 session while uninitialized). Re-adopting a name whose entry is still in the registry takes over
-that saved configuration's port assignments; removing the entry (`satellite.unpair`) revokes it.
+that saved configuration's port assignments; removing the entry (`access-point.unpair`) revokes it.
 
-### `satellite.get-role`
+### `access-point.get-role`
 
 ```rust
 // Request: {}
@@ -2117,97 +2120,98 @@ that saved configuration's port assignments; removing the entry (`satellite.unpa
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RoleMarker {
-    role: RouterRole,              // "core" | "satellite"
-    coreEndpoint: Option<String>, // satellite: the Core's link-local endpoint, "<addr>%<iface>"
-    coreKey: Option<String>,      // satellite: the Core's WireGuard public key pinned at adoption
-    coreAddress: Option<String>,  // satellite: the Core's address inside the management tunnel
-    name: Option<String>,         // satellite: the name the Core adopted it under
-    uplink: Option<String>,       // satellite: the port that carries the trunk
-    generation: u64,              // satellite: the sync generation applied last (0 = none)
+    role: RouterRole,              // "main" | "accessPoint"
+    mainEndpoint: Option<String>, // access point: the main router's link-local endpoint, "<addr>%<iface>"
+    mainKey: Option<String>,      // access point: the main router's WireGuard public key pinned at adoption
+    mainAddress: Option<String>,  // access point: the main router's address inside the management tunnel
+    name: Option<String>,         // access point: the name the main router adopted it under
+    uplink: Option<String>,       // access point: the port that carries the trunk
+    generation: u64,              // access point: the sync generation applied last (0 = none)
 }
-// Response: RoleMarker  (a router with no marker reads as "core")
+// Response: RoleMarker  (a router with no marker reads as "main")
 ```
 
-### `satellite.set-role`
+### `access-point.set-role`
 
 ```rust
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SetRoleRequest { role: String } // "core" | "satellite"
+struct SetRoleRequest { role: String } // "main" | "access-point" (case and hyphens ignored)
 // Response: null
-// Backend: writes /etc/startwrt/role.json (0600) with the role alone. A satellite set
+// Backend: writes /etc/startwrt/role.json (0600) with the role alone. An access point set
 //          this way waits to be adopted; adoption fills in the rest.
 ```
 
-### `satellite.list`
+### `access-point.list`
 
 ```rust
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PairedSatellite {
+struct AccessPoint {
     name: String,               // admin label (unique)
     publicKey: String,          // the access point's WireGuard public key (base64), pinned at adoption
     mgmtAddress: String,        // its address inside the management tunnel
     generationApplied: u64,     // config generation last acked (0 = never)
     lastSeen: i64,              // unix seconds of last contact (0 = never)
     endpoint: Option<String>,   // where its tunnel last handshaked from, as `wg` prints it
-    port: Option<String>,       // the Core's trunk port its tunnel comes through, while live
+    port: Option<String>,       // the main router's trunk port its tunnel comes through, while live
     live: bool,                 // its tunnel is receiving traffic (D18)
     ports: BTreeMap<String, Option<u16>>, // access port -> profile VLAN untagged, or null for off
     inventory: Option<Inventory>,          // what it reported last
     clients: Vec<ClientInfo>,              // its devices, as it reported them last
-    plan: BTreeMap<String, RadioPlan>,     // the Core's channel plan for its radios (D20)
+    plan: BTreeMap<String, RadioPlan>,     // the main router's channel plan for its radios (D20)
     version: String,                       // its firmware, as it reported it last
     recoverySsid: Option<String>,          // its recovery network's name, if it has a sticker password
-    needsUpdate: bool,                     // it cannot read the Core's payload format; dark until updated
+    needsUpdate: bool,                     // it cannot read the main router's payload format; dark until updated
     update: Option<ApUpdate>,              // its firmware update, queued until back on the new version
+    loopBlocked: Vec<String>,              // ports its loop guard stopped forwarding on
 }
 struct ApUpdate { target: String, state: String, message: Option<String> } // "queued" | "updating" | "failed"
 struct ClientInfo { mac: String, via: String, vlan: Option<u16> }
 struct Inventory { ports: Vec<PortInfo>, radios: Vec<RadioInfo> }
 struct PortInfo { name: String, uplink: bool, link: bool }
 struct RadioInfo { name: String, phy: String, bands: Vec<String> } // "2g" | "5g" | "6g"
-// Response: Vec<PairedSatellite>
-// Core-only (Authorization error on a satellite). `endpoint`, `port`, `live` and
+// Response: Vec<AccessPoint>
+// Main router only (Authorization error on an access point). `endpoint`, `port`, `live` and
 // `lastSeen` are written by the daemon's liveness loop, at most once a minute while
 // nothing changes.
 ```
 
-### `satellite.unpair`
+### `access-point.unpair`
 
 ```rust
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UnpairRequest { name: String }
-// Response: null. Core-only (NotFound if the name is not adopted). Tells the access point
+// Response: null. Main router only (NotFound if the name is not adopted). Tells the access point
 // over the tunnel that it is released (UDP 8720 at its tunnel address, 2 s wait; an access
 // point that does not answer learns the same from its tunnel never coming back), then
-// removes the registry entry and the Core's end of the management tunnel (interface, peer,
-// accept rule). The last unpair also removes the update-reach sets and rules. The released
+// removes the registry entry and the main router's end of the management tunnel (interface, peer,
+// accept rule). The released
 // access point drops its tunnel, keeps its base layout, stays dark (D18) and answers the
-// next Core on its backhaul VLAN as a candidate.
+// next main router on its backhaul VLAN as a candidate.
 ```
 
-### `satellite.status`
+### `access-point.status`
 
 ```rust
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SatelliteStatus {
+struct StatusResponse {
     role: RouterRole,
-    coreEndpoint: Option<String>,
+    mainEndpoint: Option<String>,
     uplink: Option<String>,
     generation: u64,
     tunnelLive: Option<bool>,   // access point: its tunnel is receiving traffic
     dark: Option<bool>,         // access point: Wi-Fi down and access ports cut (D18);
                                 // null before the first reading
-    satelliteCount: usize,
-    satellites: Vec<PairedSatellite>,
+    accessPointCount: usize,
+    accessPoints: Vec<AccessPoint>,
 }
-// Response: SatelliteStatus
+// Response: StatusResponse
 ```
 
-### `satellite.set-ports`
+### `access-point.set-ports`
 
 ```rust
 #[derive(Deserialize)]
@@ -2216,23 +2220,23 @@ struct SetPortsRequest {
     name: String,
     ports: Vec<String>,  // "<port>=<vlan>" or "<port>=off"
 }
-// Response: null. Core-only. NotFound for an unknown name; InvalidRequest for a VLAN no
+// Response: null. Main router only. NotFound for an unknown name; InvalidRequest for a VLAN no
 // profile carries, a port the access point has not reported, or its uplink. Replaces the
 // access point's assignments; the next sync tick carries them.
 ```
 
-### `satellite.update`
+### `access-point.update`
 
 ```rust
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateRequest {
-    names: Vec<String>,  // CLI: --name, repeatable; empty = every access point behind the Core
+    names: Vec<String>,  // CLI: --name, repeatable; empty = every access point behind the main router
 }
-// Response: Vec<String>, the names queued. Core-only. NotFound for an unknown name;
-// InvalidRequest for a named access point that is not behind the Core (older firmware, or
+// Response: Vec<String>, the names queued. Main router only. NotFound for an unknown name;
+// InvalidRequest for a named access point that is not behind the main router (older firmware, or
 // `needsUpdate`). One already queued or updating stays as it is; a failed one is queued again.
-// Updates run one at a time to the Core's own version (Fleet updates, above).
+// Updates run one at a time to the main router's own version (Fleet updates, above).
 ```
 
 ### The sync payload
@@ -2242,7 +2246,7 @@ struct UpdateRequest {
 #[serde(rename_all = "camelCase")]
 struct SyncSnapshot {
     generation: u64,                       // monotonic; an older one is refused
-    format: u32,                           // the Core's SYNC_FORMAT; a newer one than the AP reads is refused
+    format: u32,                           // the main router's SYNC_FORMAT; a newer one than the AP reads is refused
     ssid: String,
     broadcastSeparately: bool,             // 5 GHz radios broadcast "<ssid>-5G"
     country: Option<String>,               // regulatory country; unset = world
@@ -2250,36 +2254,35 @@ struct SyncSnapshot {
     profiles: Vec<ProfileSpec>,            // { fullname, interface, vlanTag }
     passwords: Vec<PasswordSpec>,          // { label, key, vlanTag }
     ports: BTreeMap<String, Option<u16>>,  // access port -> profile VLAN untagged, or null for off
-    updateSource: Option<String>,          // the registry the Core updates from
 }
 struct RadioPlan { band: String, channel: u32, htmode: String }
-// Built by the Core and pushed through the tunnel API's `apply`; not a public RPC. The
+// Built by the main router and pushed through the tunnel API's `apply`; not a public RPC. The
 // access point rewrites network (the uplink tagged on every profile VLAN and untagged on the
 // backhaul VLAN, an address-less interface per profile, access ports), wireless (SSID,
 // per-password dynamic VLAN, wifi-vlan per profile, radios enabled with the plan) and
 // firewall (no LAN or WAN zone), then reloads network, firewall, dnsmasq and wifi.
 ```
 
-### `satellite.adoption.candidates`
+### `access-point.adoption.candidates`
 
 ```rust
-// Params: none. Core-only.
+// Params: none. Main router only.
 // Response:
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Candidate {
     address: String,        // link-local address with interface, e.g. "fe80::1%br-lan.4094"
     interface: String,
-    satelliteKey: String,   // the candidate's WireGuard public key (base64), as it presents it
+    accessPointKey: String,   // the candidate's WireGuard public key (base64), as it presents it
     version: String,
     hasSticker: bool,       // true: the secret is its sticker Wi-Fi password; false: a code
     lastSeenSecs: u64,
 }
-// Vec<Candidate>. Routers in the satellite role with no pinned Core that answered the
-// Core's link-local announcement on the backhaul VLAN of a trunk port within the last 30 s.
+// Vec<Candidate>. Routers in the access point role with no pinned main router that answered the
+// main router's link-local announcement on the backhaul VLAN of a trunk port within the last 30 s.
 ```
 
-### `satellite.adoption.adopt`
+### `access-point.adoption.adopt`
 
 ```rust
 #[derive(Deserialize)]
@@ -2289,40 +2292,40 @@ struct AdoptParams {
     name: String,                        // registry name, at most 11 characters; an existing
                                          // entry of that name is replaced
     secret: String,                      // sticker Wi-Fi password, or the code its page shows
-    coreTunnelAddr: Option<String>,      // default: next free 10.42.<n>.1
-    satelliteTunnelAddr: Option<String>, // default: 10.42.<n>.2
+    mainTunnelAddr: Option<String>,      // default: next free 10.42.<n>.1
+    accessPointTunnelAddr: Option<String>, // default: 10.42.<n>.2
     listenPort: Option<u16>,             // default: first free from 51900
 }
 // Response:
-struct AdoptResponse { name: String, satelliteKey: String, interface: String } // "sat_<name>"
-// Core-only. Runs the D24 proof exchange with the candidate over link-local UDP 8719:
+struct AdoptResponse { name: String, accessPointKey: String, interface: String } // "ap_<name>"
+// Main router only. Runs the D24 proof exchange with the candidate over link-local UDP 8719:
 // hello -> offer -> confirm, each proof a keyed hash under the secret over both
-// challenges and both WireGuard keys (the Core's also over the tunnel it dictates).
-// Refused (InvalidRequest) while the Core has no Wi-Fi country: the country travels in the
-// payload (D20). On success the Core provisions its end of the management tunnel (listening
-// on the backhaul zone, answering NTP, with the update-reach sets and rules) and records the
+// challenges and both WireGuard keys (the main router's also over the tunnel it dictates).
+// Refused (InvalidRequest) while the main router has no Wi-Fi country: the country travels in the
+// payload (D20). On success the main router provisions its end of the management tunnel (listening
+// on the backhaul zone, answering NTP) and records the
 // access point; the access point puts its uplink into its bridge, drops its WAN and LAN
-// addressing, and dials the Core through the backhaul VLAN while listening on UDP 51899
-// for the Core's own handshakes, with its default route, resolver and time source inside
+// addressing, and dials the main router through the backhaul VLAN while listening on UDP 51899
+// for the main router's own handshakes, with its default route, resolver and time source inside
 // the tunnel. Re-adopting a name already in the registry keeps that tunnel's addresses
 // and port. A released access point is adopted again the same way, on its backhaul.
 // Errors: IncorrectPassword (wrong secret; the message says how many attempts remain),
 // RateLimited (5 failures -> 60 s cooldown, on either side), Timeout (no answer in 5 s).
 ```
 
-### `satellite.adoption.code`
+### `access-point.adoption.code`
 
 ```rust
 // Params: none.
 // Response:
 struct CodeResponse {
-    waiting: bool,        // this router is listening for a Core on its uplink port
+    waiting: bool,        // this router is listening for a main router on its uplink port
     hasSticker: bool,     // the sticker Wi-Fi password is the secret; no code is shown
     code: Option<String>, // 16-character adoption code for a board with no sticker password;
                           // valid until adopted or the daemon restarts
 }
-// What the pre-adoption page shows (design §19). Only meaningful on a satellite that
-// has not yet pinned a Core; elsewhere `waiting` is false.
+// What the pre-adoption page shows (design §19). Only meaningful on an access point that
+// has not yet pinned a main router; elsewhere `waiting` is false.
 ```
 
 ---

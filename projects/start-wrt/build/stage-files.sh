@@ -208,18 +208,14 @@ cat > "${FILES_DIR}/lib/upgrade/keep.d/startwrt" << 'KEEPEOF'
 # Per-device IPv6 address history (same atomic-write pattern) — the stability
 # evidence the ipv6_tracker's election needs across reboots.
 /etc/startwrt/ipv6_neighbors.json
-# Router role. Absent, load_role() returns Core, so a satellite that updated
-# would boot as a Core and start serving its own LAN.
+# Router role. Absent, load_role() reads as a main router, so an access point
+# that updated would boot as a main router and start serving its own LAN.
 /etc/startwrt/role.json
-# Paired satellites. The Core is the only holder of these records; losing them
-# orphans every satellite from the authoritative side.
-/etc/startwrt/satellites.json
-# What access points may reach through the Core. fw4 loads these at boot,
-# before the daemon refreshes them.
-/etc/startwrt/sat-reach4
-/etc/startwrt/sat-reach6
-# The Core's sync generation. Lost, it restarts at one and every access point
-# refuses the payload as older than what it applied.
+# Adopted access points. The main router is the only holder of these records;
+# losing them orphans every access point from the authoritative side.
+/etc/startwrt/access-points.json
+# The main router's sync generation. Lost, it restarts at one and every access
+# point refuses the payload as older than what it applied.
 /etc/startwrt/sync.json
 # The payload an access point applied last: its page and recovery mode read it.
 /etc/startwrt/applied.json

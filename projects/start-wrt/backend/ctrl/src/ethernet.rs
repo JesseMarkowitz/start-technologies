@@ -391,7 +391,7 @@ pub async fn set<C: CtrlContext>(
                         .await;
                         // The gate file must be in place before fw4 reads its
                         // include directory; the liveness loop fills the set.
-                        if let Err(e) = crate::bridge_filters::sync_core(has_trunk).await {
+                        if let Err(e) = crate::bridge_filters::sync_main(has_trunk).await {
                             tracing::error!("ethernet: trunk gate not written: {e}");
                         }
                         let _ = crate::run_quiet_async(
@@ -677,7 +677,7 @@ fn set_config(
             None,
         )?;
     }
-    crate::backhaul::sync_core_backhaul(cfgs, &bridge.name, !trunks.is_empty())?;
+    crate::backhaul::sync_main_backhaul(cfgs, &bridge.name, !trunks.is_empty())?;
     Ok(())
 }
 

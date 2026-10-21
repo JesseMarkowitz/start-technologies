@@ -51,6 +51,18 @@ impl DeviceInfo {
         })
     }
 
+    /// Another router's: an access point the main router fetches an image for.
+    pub fn for_router(version: &str, platform: &str) -> Self {
+        Self {
+            os: OsInfo {
+                version: version.to_string(),
+                compat: compute_compat_range(version),
+                platform: platform.to_string(),
+            },
+            hardware: None,
+        }
+    }
+
     /// Encode as a URL-query-encoded header value for the registry.
     /// Matches start-os: only `os.*` fields are sent.
     pub fn to_header_value(&self) -> Result<HeaderValue, Error> {
@@ -76,7 +88,7 @@ fn compute_compat_range(version: &str) -> String {
 }
 
 /// Detect the platform from the OpenWrt board name.
-fn detect_platform() -> String {
+pub fn detect_platform() -> String {
     std::fs::read_to_string("/tmp/sysinfo/board_name")
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "unknown".to_string())

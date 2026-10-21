@@ -25,7 +25,8 @@ pub struct UpdateSystemParams {
     pub registry: Option<String>,
     #[arg(long)]
     pub target_version: Option<String>,
-    /// On a Core, update its access points to the same version once it is back.
+    /// On a main router, update its access points to the same version once it
+    /// is back.
     #[arg(long)]
     #[serde(default)]
     pub update_access_points: bool,
@@ -47,13 +48,19 @@ rpc_toolkit::reflect_ts!(UpdateSystemRes);
 pub async fn fetch_newer_versions(
     registry_url: &str,
 ) -> Result<BTreeMap<String, OsVersionInfo>, Error> {
-    let device_info = DeviceInfo::load()?;
-    let device_info_header = device_info.to_header_value()?;
+    fetch_versions(registry_url, &DeviceInfo::load()?).await
+}
+
+/// The versions the registry offers a router described by `device`.
+async fn fetch_versions(
+    registry_url: &str,
+    device: &DeviceInfo,
+) -> Result<BTreeMap<String, OsVersionInfo>, Error> {
+    let device_info_header = device.to_header_value()?;
     let client = reqwest::Client::new();
 
-    let current_version = env!("CARGO_PKG_VERSION");
     let params = serde_json::json!({
-        "sourceVersion": current_version,
+        "sourceVersion": device.os.version,
     });
 
     let result = registry::call_registry_rpc(
@@ -71,13 +78,21 @@ pub async fn fetch_newer_versions(
     Ok(versions)
 }
 
-type Asset = crate::registry::asset::RegistryAsset<crate::sign::commitment::Blake3Commitment>;
+pub type Asset = crate::registry::asset::RegistryAsset<crate::sign::commitment::Blake3Commitment>;
 
 /// The version to install, `target` or else the newest offered, and its
 /// signature-checked image for this platform. `None` when nothing newer is offered.
 async fn select(registry: &str, target: Option<&str>) -> Result<Option<(String, Asset)>, Error> {
-    let platform = DeviceInfo::load()?.os.platform;
-    let versions = fetch_newer_versions(registry).await?;
+    select_for(registry, target, &DeviceInfo::load()?).await
+}
+
+async fn select_for(
+    registry: &str,
+    target: Option<&str>,
+    device: &DeviceInfo,
+) -> Result<Option<(String, Asset)>, Error> {
+    let platform = &device.os.platform;
+    let versions = fetch_versions(registry, device).await?;
     // BTreeMap keys sort lexicographically, which is wrong for semver.
     let (target_ver, version_info) = match target {
         Some(target) => {
@@ -95,7 +110,7 @@ async fn select(registry: &str, target: Option<&str>) -> Result<Option<(String, 
         },
     };
     let asset = version_info
-        .asset_for_platform(&platform)
+        .asset_for_platform(platform)
         .ok_or_else(|| {
             Error::other(format!(
                 "no asset for platform '{platform}' in version {target_ver}"
@@ -106,27 +121,35 @@ async fn select(registry: &str, target: Option<&str>) -> Result<Option<(String, 
     Ok(Some((target_ver, asset)))
 }
 
-/// Updates to exactly `target` from `registry` with no progress stream; an
-/// access point's update, ordered by its Core. Returns only if it failed.
-pub async fn install(registry: &str, target: &str) -> Result<(), Error> {
-    let (target_ver, asset) = select(registry, Some(target))
+/// Downloads to `dst` the image of `target` for another router, one on
+/// `platform` running `from`: what a main router pushes to an access point. The
+/// signatures and the commitment are checked.
+pub async fn fetch_image(
+    registry: &str,
+    target: &str,
+    platform: &str,
+    from: &str,
+    dst: &Path,
+) -> Result<Asset, Error> {
+    let device = DeviceInfo::for_router(from, platform);
+    let (_, asset) = select_for(registry, Some(target), &device)
         .await?
         .ok_or_else(|| Error::other(format!("requested version {target} not available")))?;
-    let tracker = FullProgressTracker::new();
-    let mut download_phase = tracker.add_phase("Downloading firmware".into(), Some(100));
-    download_phase.start();
-    let mut verify_phase = tracker.add_phase("Verifying integrity".into(), Some(10));
-    let mut apply_phase = tracker.add_phase("Applying update".into(), Some(1));
-    do_update(
-        &reqwest::Client::new(),
-        asset,
-        &target_ver,
-        false,
-        &mut download_phase,
-        &mut verify_phase,
-        &mut apply_phase,
-    )
-    .await
+    asset.download(&reqwest::Client::new(), dst, |_| {}).await?;
+    Ok(asset)
+}
+
+/// Flashes an image already checked against its commitment; returns only if
+/// sysupgrade did not reboot.
+pub async fn flash(path: &Path, target: &str) -> Result<(), Error> {
+    crate::activity::log(
+        "system",
+        "update",
+        true,
+        &format!("Applying update to v{target}"),
+        None,
+    );
+    sysupgrade(path, target, false).await
 }
 
 /// Main update handler: fetch, validate, download, verify, sysupgrade.
@@ -247,7 +270,7 @@ pub async fn update_system(
 // sysupgrade overlay wipe.
 const PENDING_UPDATE_MARKER: &str = "/etc/startwrt/pending-update";
 
-/// The marker's line asking the Core to update its access points after it.
+/// The marker's line asking the main router to then update its access points.
 const ACCESS_POINTS_LINE: &str = "access-points";
 
 /// Record the in-flight update target so the next boot can confirm it.
@@ -281,7 +304,7 @@ pub fn check_pending_update_marker() {
     let current = env!("CARGO_PKG_VERSION");
     if target == current {
         if access_points {
-            crate::fleet_update::after_core_update();
+            crate::fleet_update::after_main_update();
         }
         crate::activity::log(
             "system",
@@ -343,24 +366,23 @@ async fn do_update(
         &format!("Applying update to v{target_ver}"),
         None,
     );
+    sysupgrade(firmware_path, target_ver, access_points).await?;
+    apply_phase.complete();
+    Ok(())
+}
+
+/// Returns only if sysupgrade did not reboot.
+async fn sysupgrade(path: &Path, target_ver: &str, access_points: bool) -> Result<(), Error> {
     write_pending_marker(target_ver, access_points);
-    let status = Command::new("sysupgrade")
-        .arg("/tmp/firmware.bin")
-        .status()
-        .await;
-    // Reached only if sysupgrade did not reboot us — i.e. it failed.
+    let status = Command::new("sysupgrade").arg(path).status().await;
     clear_pending_marker();
     let status = status.map_err(|e| Error::other(format!("spawning sysupgrade: {e}")))?;
-
     if !status.success() {
         return Err(Error::other(format!(
             "sysupgrade exited with code {}",
             status.code().unwrap_or(-1)
         )));
     }
-    apply_phase.complete();
-
-    // Device reboots — this point is likely unreachable
     Ok(())
 }
 

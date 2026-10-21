@@ -158,14 +158,14 @@ async fn reload_firewall() {
             .await;
 }
 
-/// Writes or removes the Core's trunk gate for the trunks on record.
+/// Writes or removes the main router's trunk gate for the trunks on record.
 async fn sync_trunk_gate() -> Result<bool, Error> {
     let has_trunk = {
         let arena = uciedit::Arena::new();
         let cfgs = uciedit::parse_all("/etc/config", &arena, &["network"]).await?;
         !crate::backhaul::trunk_ports(&cfgs).is_empty()
     };
-    crate::bridge_filters::sync_core(has_trunk).await
+    crate::bridge_filters::sync_main(has_trunk).await
 }
 
 /// Initialize SSL certificates. Returns true if HTTPS is ready.
@@ -228,10 +228,11 @@ async fn inner_main() -> Result<(), Error> {
     let open_authed = crate::continuations::OpenAuthedContinuations::new();
     let app_state;
 
-    // Adopted, not merely in the role: a candidate behaves as a router until a Core takes it.
+    // Adopted, not merely in the role: a candidate behaves as a router until a
+    // main router takes it.
     let is_access_point = {
-        let role = crate::satellite::load_role();
-        role.role == crate::satellite::RouterRole::Satellite && role.core_key.is_some()
+        let role = crate::access_points::load_role();
+        role.role == crate::access_points::RouterRole::AccessPoint && role.main_key.is_some()
     };
     if setup_mode {
         tracing::info!("setup mode detected (booted from removable media)");
@@ -271,10 +272,11 @@ async fn inner_main() -> Result<(), Error> {
             flash_in_progress: Arc::new(AtomicBool::new(false)),
         };
     } else if is_access_point {
-        // An access point holds nothing the Core does not push (design D25).
+        // An access point holds nothing the main router does not push (design
+        // D25).
         crate::update::check_pending_update_marker();
         // The guard variant lives under /usr/share, which an upgrade replaces.
-        let uplink = crate::satellite::load_role().uplink.unwrap_or_default();
+        let uplink = crate::access_points::load_role().uplink.unwrap_or_default();
         match crate::bridge_filters::sync_ap(&uplink).await {
             Ok(true) => reload_firewall().await,
             Ok(false) => {}
@@ -330,7 +332,7 @@ async fn inner_main() -> Result<(), Error> {
             Ok(false) => {}
             Err(e) => tracing::error!("Trunk gate not written: {e}"),
         }
-        match crate::mgmt_tunnel::heal_core("/etc/config").await {
+        match crate::mgmt_tunnel::heal_main("/etc/config").await {
             Ok(true) => {
                 reload_firewall().await;
                 let _ = crate::run_quiet_async(
@@ -450,6 +452,7 @@ async fn inner_main() -> Result<(), Error> {
     if !setup_mode {
         crate::adoption::start();
         crate::liveness::start();
+        crate::loop_guard::start();
         crate::control::start();
     }
 

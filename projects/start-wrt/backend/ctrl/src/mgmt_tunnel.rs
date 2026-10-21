@@ -1,15 +1,16 @@
-//! The management tunnel between a Core and one access point (design D25).
+//! The management tunnel between a main router and one access point
+//! (design D25).
 //!
-//! One WireGuard interface per access point on the Core, one on the access
-//! point, over IPv6 link-local on the backhaul VLAN. It carries sync, status,
-//! liveness, logs, the access point's time and its path to the update source;
-//! profile traffic never enters it.
+//! One WireGuard interface per access point on the main router, one on the
+//! access point, over IPv6 link-local on the backhaul VLAN. It carries sync,
+//! status, liveness, logs, firmware and the access point's time; profile
+//! traffic never enters it.
 //!
 //! Both ends keep a persistent keepalive and both can initiate: the access
-//! point listens on a fixed port, and the Core re-pins the endpoint it last
-//! learned (`liveness`), so an access point that reboots with a stale clock,
-//! whose own handshakes the Core's replay check drops, is reached from the
-//! Core's side.
+//! point listens on a fixed port, and the main router re-pins the endpoint it
+//! last learned (`liveness`), so an access point that reboots with a stale
+//! clock, whose own handshakes the main router's replay check drops, is reached
+//! from the main router's side.
 
 use std::net::IpAddr;
 
@@ -20,21 +21,21 @@ use crate::backhaul::{ensure_udp_rule, ensure_zone, remove_zone, BACKHAUL_ZONE};
 use crate::prelude::*;
 use crate::vpn_server::WgInterface;
 
-/// The Core's zone holding every management tunnel.
-pub const CORE_ZONE: &str = "satellites";
+/// The main router's zone holding every management tunnel.
+pub const AP_ZONE: &str = "ap_mgmt";
 /// The access point's tunnel interface and zone.
-pub const AP_INTERFACE: &str = "core";
-pub const AP_ZONE: &str = "core";
-/// Below the Core's listen ports, which start at 51900.
+pub const MAIN_INTERFACE: &str = "main";
+pub const MAIN_ZONE: &str = "main";
+/// Below the main router's listen ports, which start at 51900.
 pub const AP_LISTEN_PORT: u16 = 51899;
 pub const KEEPALIVE: &str = "25";
 /// The tunnel's two addresses share a /24, which makes the access point a
-/// local client of the Core's dnsmasq.
+/// local client of the main router's dnsmasq.
 const PREFIX_LEN: u8 = 24;
 
-/// Linux `IFNAMSIZ` is 15 characters, so a registry name is at most 11.
-pub fn core_interface_name(satellite: &str) -> String {
-    format!("sat_{satellite}")
+/// Linux `IFNAMSIZ` caps the result at 15 characters.
+pub fn ap_interface_name(access_point: &str) -> String {
+    format!("ap_{access_point}")
 }
 
 fn host_cidr(addr: IpAddr) -> String {
@@ -152,30 +153,30 @@ fn set_peer<'a>(
     Ok(())
 }
 
-pub struct CoreEnd<'p> {
-    pub satellite: &'p str,
-    pub core_addr: IpAddr,
-    pub satellite_addr: IpAddr,
-    pub satellite_public_key: &'p str,
+pub struct MainEnd<'p> {
+    pub access_point: &'p str,
+    pub main_addr: IpAddr,
+    pub access_point_addr: IpAddr,
+    pub access_point_public_key: &'p str,
     pub preshared_key: &'p str,
     pub listen_port: u16,
-    pub core_private_key: &'p str,
+    pub main_private_key: &'p str,
 }
 
-/// The Core's end: listens on the backhaul, learns the access point's
+/// The main router's end: listens on the backhaul, learns the access point's
 /// endpoint from its first handshake.
-pub fn provision_core_end<'a>(
+pub fn provision_main_end<'a>(
     cfgs: &mut Configs<'a>,
     arena: &'a Arena,
-    end: &CoreEnd,
+    end: &MainEnd,
 ) -> Result<(), Error> {
-    let interface = core_interface_name(end.satellite);
+    let interface = ap_interface_name(end.access_point);
     set_interface(
         cfgs,
         &interface,
-        end.core_private_key,
+        end.main_private_key,
         Some(end.listen_port),
-        end.core_addr,
+        end.main_addr,
         None,
         Vec::new(),
     )?;
@@ -184,22 +185,22 @@ pub fn provision_core_end<'a>(
         arena,
         &interface,
         &Peer {
-            public_key: end.satellite_public_key,
+            public_key: end.access_point_public_key,
             preshared_key: end.preshared_key,
-            description: format!("satellite {}", end.satellite),
-            allowed_ip: host_cidr(end.satellite_addr),
+            description: format!("access point {}", end.access_point),
+            allowed_ip: host_cidr(end.access_point_addr),
             endpoint: None,
         },
     )?;
-    ensure_zone(cfgs, CORE_ZONE, FirewallTarget::ACCEPT, &interface)?;
+    ensure_zone(cfgs, AP_ZONE, FirewallTarget::ACCEPT, &interface)?;
     let (section, name) = wg_rule_names(&interface);
     ensure_udp_rule(cfgs, &section, &name, BACKHAUL_ZONE, end.listen_port)?;
     Ok(())
 }
 
-/// Removes the Core's end of one access point's tunnel.
-pub fn remove_core_end(cfgs: &mut Configs, satellite: &str) -> Result<(), Error> {
-    let interface = core_interface_name(satellite);
+/// Removes the main router's end of one access point's tunnel.
+pub fn remove_main_end(cfgs: &mut Configs, access_point: &str) -> Result<(), Error> {
+    let interface = ap_interface_name(access_point);
     let peer_type = format!("wireguard_{interface}");
     cfgs["network"].sections.retain(|s| {
         s.ty() != peer_type
@@ -214,7 +215,7 @@ pub fn remove_core_end(cfgs: &mut Configs, satellite: &str) -> Result<(), Error>
         let Ok(mut zone) = section.get::<uciedit::openwrt::FirewallZone>() else {
             continue;
         };
-        if zone.name == CORE_ZONE && zone.network.iter().any(|n| *n == interface) {
+        if zone.name == AP_ZONE && zone.network.iter().any(|n| *n == interface) {
             zone.network.retain(|n| *n != interface);
             section.set(&zone)?;
         }
@@ -223,69 +224,69 @@ pub fn remove_core_end(cfgs: &mut Configs, satellite: &str) -> Result<(), Error>
 }
 
 pub struct ApEnd<'p> {
-    pub satellite_addr: IpAddr,
-    pub core_addr: IpAddr,
-    pub core_public_key: &'p str,
+    pub access_point_addr: IpAddr,
+    pub main_addr: IpAddr,
+    pub main_public_key: &'p str,
     /// `<link-local>%<interface>`; netifd brackets a host with a colon itself.
-    pub core_endpoint_host: &'p str,
-    pub core_endpoint_port: u16,
+    pub main_endpoint_host: &'p str,
+    pub main_endpoint_port: u16,
     pub preshared_key: &'p str,
     pub private_key: &'p str,
 }
 
-/// The access point's end dials the Core, listens on [`AP_LISTEN_PORT`] for
-/// the Core's own initiations, and sends everything that is not on-link
-/// through the tunnel: the Core resolves for it and forwards only to the
-/// update source.
+/// The access point's end dials the main router, listens on [`AP_LISTEN_PORT`]
+/// for the main router's own initiations, and routes everything that is not
+/// on-link through the tunnel.
 pub fn provision_ap_end<'a>(
     cfgs: &mut Configs<'a>,
     arena: &'a Arena,
     end: &ApEnd,
 ) -> Result<(), Error> {
-    let nohostroute = end.core_endpoint_host.contains('%').then_some(true);
+    let nohostroute = end.main_endpoint_host.contains('%').then_some(true);
     set_interface(
         cfgs,
-        AP_INTERFACE,
+        MAIN_INTERFACE,
         end.private_key,
         Some(AP_LISTEN_PORT),
-        end.satellite_addr,
+        end.access_point_addr,
         nohostroute,
-        vec![end.core_addr.to_string()],
+        vec![end.main_addr.to_string()],
     )?;
     set_peer(
         cfgs,
         arena,
-        AP_INTERFACE,
+        MAIN_INTERFACE,
         &Peer {
-            public_key: end.core_public_key,
+            public_key: end.main_public_key,
             preshared_key: end.preshared_key,
-            description: "core".to_string(),
-            allowed_ip: match end.core_addr {
+            description: "main router".to_string(),
+            allowed_ip: match end.main_addr {
                 IpAddr::V4(_) => "0.0.0.0/0".to_string(),
                 IpAddr::V6(_) => "::/0".to_string(),
             },
-            endpoint: Some((end.core_endpoint_host, end.core_endpoint_port)),
+            endpoint: Some((end.main_endpoint_host, end.main_endpoint_port)),
         },
     )?;
-    ensure_zone(cfgs, AP_ZONE, FirewallTarget::ACCEPT, AP_INTERFACE)?;
-    let (section, name) = wg_rule_names(AP_INTERFACE);
+    ensure_zone(cfgs, MAIN_ZONE, FirewallTarget::ACCEPT, MAIN_INTERFACE)?;
+    let (section, name) = wg_rule_names(MAIN_INTERFACE);
     ensure_udp_rule(cfgs, &section, &name, BACKHAUL_ZONE, AP_LISTEN_PORT)?;
-    set_ap_timeserver(cfgs, end.core_addr)?;
+    set_ap_timeserver(cfgs, end.main_addr)?;
     Ok(())
 }
 
 /// Removes the access point's end: the tunnel, its zone and listen rule, and
-/// the Core as its time source. The base layout stays.
+/// the main router as its time source. The base layout stays.
 pub fn remove_ap_end(cfgs: &mut Configs) -> Result<(), Error> {
-    let peer_type = format!("wireguard_{AP_INTERFACE}");
+    let peer_type = format!("wireguard_{MAIN_INTERFACE}");
     cfgs["network"].sections.retain(|s| {
-        s.ty() != peer_type && !(s.ty() == "interface" && s.name().as_deref() == Some(AP_INTERFACE))
+        s.ty() != peer_type
+            && !(s.ty() == "interface" && s.name().as_deref() == Some(MAIN_INTERFACE))
     });
-    let (_, rule_name) = wg_rule_names(AP_INTERFACE);
+    let (_, rule_name) = wg_rule_names(MAIN_INTERFACE);
     cfgs["firewall"]
         .sections
         .retain(|s| !s.get::<FirewallRule>().is_ok_and(|r| r.name == rule_name));
-    remove_zone(cfgs, AP_ZONE);
+    remove_zone(cfgs, MAIN_ZONE);
     set_timeserver(cfgs, |t| {
         t.server.clear();
         t.enabled = Some(false);
@@ -307,21 +308,21 @@ fn set_timeserver(cfgs: &mut Configs, edit: impl FnOnce(&mut Timeserver)) -> Res
     Ok(())
 }
 
-/// The Core answers NTP on every management tunnel.
-pub fn ensure_core_ntp_server(cfgs: &mut Configs) -> Result<(), Error> {
+/// The main router answers NTP on every management tunnel.
+pub fn ensure_main_ntp_server(cfgs: &mut Configs) -> Result<(), Error> {
     set_timeserver(cfgs, |t| {
         t.enabled = Some(true);
         t.enable_server = Some(true);
     })
 }
 
-/// Boot heal on a Core with access points: the NTP server and the update
-/// reach, which a Core adopted under an earlier release lacks. Returns
+/// Boot heal on a main router with access points: the NTP server, which a main
+/// router adopted under an earlier build lacks. Returns
 /// whether it wrote, which calls for a firewall reload and an NTP restart.
-pub async fn heal_core(uci_root: impl AsRef<std::path::Path>) -> Result<bool, Error> {
+pub async fn heal_main(uci_root: impl AsRef<std::path::Path>) -> Result<bool, Error> {
     use uciedit::{dump_all, parse_all};
 
-    if crate::satellite::load_registry().is_empty() {
+    if crate::access_points::load_registry().is_empty() {
         return Ok(false);
     }
     let arena = Arena::new();
@@ -334,8 +335,7 @@ pub async fn heal_core(uci_root: impl AsRef<std::path::Path>) -> Result<bool, Er
             .find_map(|s| s.get::<Timeserver>().ok())
             .and_then(|t| t.enable_server),
     );
-    crate::update_reach::ensure_rules(&mut cfgs)?;
-    ensure_core_ntp_server(&mut cfgs)?;
+    ensure_main_ntp_server(&mut cfgs)?;
     let after = (cfgs["firewall"].sections.len(), Some(true));
     if before == after {
         return Ok(false);
@@ -344,12 +344,12 @@ pub async fn heal_core(uci_root: impl AsRef<std::path::Path>) -> Result<bool, Er
     Ok(true)
 }
 
-/// The access point takes its time from the Core alone.
-fn set_ap_timeserver(cfgs: &mut Configs, core_addr: IpAddr) -> Result<(), Error> {
+/// The access point takes its time from the main router alone.
+fn set_ap_timeserver(cfgs: &mut Configs, main_addr: IpAddr) -> Result<(), Error> {
     set_timeserver(cfgs, |t| {
         t.enabled = Some(true);
         t.enable_server = Some(false);
-        t.server = vec![core_addr.to_string()];
+        t.server = vec![main_addr.to_string()];
         t.use_dhcp = Some(false);
     })
 }
@@ -382,45 +382,45 @@ mod tests {
             .unwrap()
     }
 
-    fn core_end() -> CoreEnd<'static> {
-        CoreEnd {
-            satellite: "s1",
-            core_addr: "10.42.1.1".parse().unwrap(),
-            satellite_addr: "10.42.1.2".parse().unwrap(),
-            satellite_public_key: "SATKEY=",
+    fn main_end() -> MainEnd<'static> {
+        MainEnd {
+            access_point: "s1",
+            main_addr: "10.42.1.1".parse().unwrap(),
+            access_point_addr: "10.42.1.2".parse().unwrap(),
+            access_point_public_key: "APKEY=",
             preshared_key: "PSK=",
             listen_port: 51900,
-            core_private_key: "COREPRIV=",
+            main_private_key: "MAINPRIV=",
         }
     }
 
     #[tokio::test]
-    async fn core_end_is_idempotent_and_removable() {
+    async fn main_end_is_idempotent_and_removable() {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path()).await;
         let arena = Arena::new();
         let mut cfgs = parse_all(dir.path(), &arena, ALL).await.unwrap();
-        provision_core_end(&mut cfgs, &arena, &core_end()).unwrap();
-        provision_core_end(&mut cfgs, &arena, &core_end()).unwrap();
-        ensure_core_ntp_server(&mut cfgs).unwrap();
+        provision_main_end(&mut cfgs, &arena, &main_end()).unwrap();
+        provision_main_end(&mut cfgs, &arena, &main_end()).unwrap();
+        ensure_main_ntp_server(&mut cfgs).unwrap();
         let ts = timeserver(&cfgs);
         assert_eq!(ts.enable_server, Some(true));
-        assert_eq!(ts.server.len(), 1, "the Core keeps its own sources");
+        assert_eq!(ts.server.len(), 1, "the main router keeps its own sources");
         let ifaces = cfgs["network"]
             .sections
             .iter()
-            .filter(|s| s.name().as_deref() == Some("sat_s1"))
+            .filter(|s| s.name().as_deref() == Some("ap_s1"))
             .count();
         let peers = cfgs["network"]
             .sections
             .iter()
-            .filter(|s| s.ty() == "wireguard_sat_s1")
+            .filter(|s| s.ty() == "wireguard_ap_s1")
             .count();
         assert_eq!((ifaces, peers), (1, 1));
         let wg = cfgs["network"]
             .sections
             .iter()
-            .find(|s| s.name().as_deref() == Some("sat_s1"))
+            .find(|s| s.name().as_deref() == Some("ap_s1"))
             .unwrap()
             .get::<WgInterface>()
             .unwrap();
@@ -430,30 +430,30 @@ mod tests {
             .sections
             .iter()
             .filter_map(|s| s.get::<uciedit::openwrt::FirewallZone>().ok())
-            .find(|z| z.name == CORE_ZONE)
+            .find(|z| z.name == AP_ZONE)
             .unwrap();
-        assert_eq!(zone.network, vec!["sat_s1"]);
+        assert_eq!(zone.network, vec!["ap_s1"]);
         let rule = cfgs["firewall"]
             .sections
             .iter()
             .filter_map(|s| s.get::<uciedit::openwrt::FirewallRule>().ok())
-            .find(|r| r.name == "Allow-WireGuard-sat_s1")
+            .find(|r| r.name == "Allow-WireGuard-ap_s1")
             .unwrap();
         assert_eq!(
             (rule.src.as_str(), rule.dest_port.as_deref()),
             (BACKHAUL_ZONE, Some("51900"))
         );
 
-        remove_core_end(&mut cfgs, "s1").unwrap();
+        remove_main_end(&mut cfgs, "s1").unwrap();
         assert!(cfgs["network"]
             .sections
             .iter()
-            .all(|s| s.name().as_deref() != Some("sat_s1") && s.ty() != "wireguard_sat_s1"));
+            .all(|s| s.name().as_deref() != Some("ap_s1") && s.ty() != "wireguard_ap_s1"));
         let zone = cfgs["firewall"]
             .sections
             .iter()
             .filter_map(|s| s.get::<uciedit::openwrt::FirewallZone>().ok())
-            .find(|z| z.name == CORE_ZONE)
+            .find(|z| z.name == AP_ZONE)
             .unwrap();
         assert!(zone.network.is_empty());
     }
@@ -465,11 +465,11 @@ mod tests {
         let arena = Arena::new();
         let mut cfgs = parse_all(dir.path(), &arena, ALL).await.unwrap();
         let end = ApEnd {
-            satellite_addr: "10.42.1.2".parse().unwrap(),
-            core_addr: "10.42.1.1".parse().unwrap(),
-            core_public_key: "COREKEY=",
-            core_endpoint_host: "fe80::1%br-lan.4094",
-            core_endpoint_port: 51900,
+            access_point_addr: "10.42.1.2".parse().unwrap(),
+            main_addr: "10.42.1.1".parse().unwrap(),
+            main_public_key: "MAINKEY=",
+            main_endpoint_host: "fe80::1%br-lan.4094",
+            main_endpoint_port: 51900,
             preshared_key: "PSK=",
             private_key: "APPRIV=",
         };
@@ -477,7 +477,7 @@ mod tests {
         let wg = cfgs["network"]
             .sections
             .iter()
-            .find(|s| s.name().as_deref() == Some(AP_INTERFACE))
+            .find(|s| s.name().as_deref() == Some(MAIN_INTERFACE))
             .unwrap()
             .get::<WgInterface>()
             .unwrap();
@@ -487,7 +487,7 @@ mod tests {
         let peer = cfgs["network"]
             .sections
             .iter()
-            .find(|s| s.ty() == "wireguard_core")
+            .find(|s| s.ty() == "wireguard_main")
             .unwrap();
         let text = peer
             .lines
@@ -505,7 +505,7 @@ mod tests {
         );
         assert!(cfgs["firewall"].sections.iter().any(|s| {
             s.get::<FirewallRule>().is_ok_and(|r| {
-                r.name == "Allow-WireGuard-core"
+                r.name == "Allow-WireGuard-main"
                     && r.src == BACKHAUL_ZONE
                     && r.dest_port.as_deref() == Some("51899")
             })
@@ -518,13 +518,13 @@ mod tests {
         assert!(cfgs["network"]
             .sections
             .iter()
-            .all(|s| s.name().as_deref() != Some(AP_INTERFACE) && s.ty() != "wireguard_core"));
+            .all(|s| s.name().as_deref() != Some(MAIN_INTERFACE) && s.ty() != "wireguard_main"));
         assert!(cfgs["firewall"].sections.iter().all(|s| {
             !s.get::<FirewallRule>()
-                .is_ok_and(|r| r.name == "Allow-WireGuard-core")
+                .is_ok_and(|r| r.name == "Allow-WireGuard-main")
                 && !s
                     .get::<uciedit::openwrt::FirewallZone>()
-                    .is_ok_and(|z| z.name == AP_ZONE)
+                    .is_ok_and(|z| z.name == MAIN_ZONE)
         }));
         assert!(timeserver(&cfgs).server.is_empty());
     }

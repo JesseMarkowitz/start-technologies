@@ -1,12 +1,12 @@
-//! The Core's RPC path to an access point, inside the management tunnel
+//! The main router's RPC path to an access point, inside the management tunnel
 //! (design D4, D5, D25).
 //!
 //! The access point serves a small JSON-RPC API on its tunnel address: the
-//! Core pushes the sync payload, reads status and inventory, and releases the
-//! access point on unpair. The access point trusts a request by its source
-//! address alone: inside the tunnel, WireGuard's cryptokey routing binds that
-//! address to the Core's key, and the access point's firewall admits the port
-//! from the tunnel zone only.
+//! main router pushes the sync payload, reads status and inventory, orders and
+//! sends a firmware image, and releases the access point on unpair. The access
+//! point trusts a request by its source address alone: inside the tunnel,
+//! WireGuard's cryptokey routing binds that address to the main router's key,
+//! and the access point's firewall admits the port from the tunnel zone only.
 
 use std::future::ready;
 use std::net::{IpAddr, SocketAddr};
@@ -16,46 +16,53 @@ use std::time::Duration;
 
 use axum::extract::ConnectInfo;
 use axum::response::IntoResponse;
-use axum::routing::post;
+use axum::routing::{post, put};
 use axum::Router;
 use clap::Parser;
 use rpc_toolkit::{from_fn_async, from_fn_async_local, HandlerExt, ParentHandler, Server};
 use serde::{Deserialize, Serialize};
 use uciedit::{dump_all, parse_all, Arena};
 
-use crate::prelude::*;
-use crate::satellite::{
+use crate::access_points::{
     self, ApUpdate, ApUpdateState, ClientInfo, Inventory, PortInfo, RadioInfo, RouterRole,
     SyncSnapshot, TunnelStatus,
 };
+use crate::prelude::*;
 use crate::utils::DeserializeStdin;
 use crate::ServerContext;
 
 pub const PORT: u16 = 8720;
 const PATH: &str = "/rpc";
+const FIRMWARE_PATH: &str = "/firmware";
 const TIMEOUT: Duration = Duration::from_secs(20);
+/// Sending an image over the tunnel.
+const FIRMWARE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const FIRMWARE_FILE: &str = "/tmp/firmware.bin";
 
 static RUNNING: Mutex<bool> = Mutex::new(false);
-/// The Core's current generation, as its last status call said it.
-static CORE_GENERATION: AtomicU64 = AtomicU64::new(0);
-/// The Core's firmware version, as its last status call said it.
-static CORE_VERSION: Mutex<String> = Mutex::new(String::new());
-/// This access point's own firmware update, once the Core has ordered one.
+/// The main router's current generation, as its last status call said it.
+static MAIN_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// The main router's firmware version, as its last status call said it.
+static MAIN_VERSION: Mutex<String> = Mutex::new(String::new());
+/// This access point's own firmware update, once the main router has ordered
+/// one.
 static AP_UPDATE: Mutex<Option<ApUpdate>> = Mutex::new(None);
+/// The image the main router ordered, until it arrives.
+static ORDER: Mutex<Option<FirmwareOrder>> = Mutex::new(None);
 
-/// The generation the Core last announced; 0 before any contact.
-pub fn core_generation() -> u64 {
-    CORE_GENERATION.load(Ordering::Relaxed)
+/// The generation the main router last announced; 0 before any contact.
+pub fn main_generation() -> u64 {
+    MAIN_GENERATION.load(Ordering::Relaxed)
 }
 
-/// The Core's firmware version; empty before any contact.
-pub fn core_version() -> String {
-    CORE_VERSION.lock().unwrap().clone()
+/// The main router's firmware version; empty before any contact.
+pub fn main_version() -> String {
+    MAIN_VERSION.lock().unwrap().clone()
 }
 
-fn core_address() -> Option<IpAddr> {
-    satellite::load_role()
-        .core_address
+fn main_address() -> Option<IpAddr> {
+    access_points::load_role()
+        .main_address
         .and_then(|a| a.parse().ok())
 }
 
@@ -69,7 +76,8 @@ fn tunnel_api() -> ParentHandler<ServerContext> {
         .subcommand("update", from_fn_async(update_handler).no_display())
 }
 
-/// The Core's payload; an older generation is refused, the applied one is a no-op.
+/// The main router's payload; an older generation is refused, the applied one
+/// is a no-op.
 #[instrument(skip_all)]
 async fn apply(
     _ctx: ServerContext,
@@ -82,43 +90,44 @@ async fn apply(
 #[serde(rename_all = "camelCase")]
 #[command(rename_all = "kebab-case")]
 pub struct StatusParams {
-    /// The Core's current generation, which the access point must have
+    /// The main router's current generation, which the access point must have
     /// applied before it serves clients again (D18).
     #[serde(default)]
     #[clap(long, default_value_t = 0)]
-    pub core_generation: u64,
-    /// The Core's firmware version, which the access point shows against its own.
+    pub main_generation: u64,
+    /// The main router's firmware version, which the access point shows against
+    /// its own.
     #[serde(default)]
     #[clap(long, default_value = "")]
-    pub core_version: String,
-    /// The name the Core knows this access point by; an access point adopted
-    /// before names were recorded takes it from here.
+    pub main_version: String,
+    /// The name the main router knows this access point by; an access point
+    /// adopted before names were recorded takes it from here.
     #[serde(default)]
     #[clap(long, default_value = "")]
     pub name: String,
-    /// The Core's payload format; one newer than this firmware reads darkens
-    /// the access point until it is updated (D17).
+    /// The main router's payload format; one newer than this firmware reads
+    /// darkens the access point until it is updated (D17).
     #[serde(default)]
     #[clap(long, default_value_t = 0)]
-    pub core_format: u32,
+    pub main_format: u32,
 }
 rpc_toolkit::reflect_ts!(StatusParams);
 
 #[instrument(skip_all)]
 async fn status_handler(_ctx: ServerContext, p: StatusParams) -> Result<TunnelStatus, Error> {
-    if p.core_generation > 0 {
-        CORE_GENERATION.store(p.core_generation, Ordering::Relaxed);
+    if p.main_generation > 0 {
+        MAIN_GENERATION.store(p.main_generation, Ordering::Relaxed);
     }
-    if !p.core_version.is_empty() {
-        *CORE_VERSION.lock().unwrap() = p.core_version;
+    if !p.main_version.is_empty() {
+        *MAIN_VERSION.lock().unwrap() = p.main_version;
     }
-    if p.core_format > 0 {
-        crate::ap::check_format(p.core_format);
+    if p.main_format > 0 {
+        crate::ap::check_format(p.main_format);
     }
-    let mut role = satellite::load_role();
+    let mut role = access_points::load_role();
     if role.name.is_none() && !p.name.is_empty() {
         role.name = Some(p.name);
-        let _ = satellite::persist_role(&role).await;
+        let _ = access_points::persist_role(&role).await;
     }
     let (tunnel_live, dark) = crate::liveness::ap_status();
     let uplink = role.uplink.unwrap_or_default();
@@ -130,45 +139,68 @@ async fn status_handler(_ctx: ServerContext, p: StatusParams) -> Result<TunnelSt
         clients: clients(&uplink).await,
         version: env!("CARGO_PKG_VERSION").to_string(),
         recovery_ssid: crate::recovery::wifi_available().then(|| crate::recovery::ssid(&uplink)),
-        format: satellite::SYNC_FORMAT,
+        format: access_points::SYNC_FORMAT,
         needs_update: crate::ap::needs_update(),
         update: AP_UPDATE.lock().unwrap().clone(),
+        loop_blocked: crate::loop_guard::blocked(),
+        platform: crate::registry::device_info::detect_platform(),
     })
 }
 
-#[derive(Debug, Serialize, Deserialize, Parser, visit_rs::VisitFields)]
+/// The main router's firmware order: the version, and the image's signed
+/// metadata from the main router's update source.
+#[derive(Clone, Debug, Serialize, Deserialize, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
-#[command(rename_all = "kebab-case")]
-pub struct UpdateParams {
-    /// The Core's update source.
-    #[clap(long)]
-    pub registry: String,
-    /// The Core's version.
-    #[clap(long)]
+pub struct FirmwareOrder {
     pub target_version: String,
+    pub asset: crate::update::Asset,
 }
-rpc_toolkit::reflect_ts!(UpdateParams);
+rpc_toolkit::reflect_ts!(FirmwareOrder);
 
-/// Answers first; the download, check and sysupgrade run after. Status reports
-/// the outcome until the reboot.
+/// Takes the order once its signatures check; the image follows on
+/// `PUT /firmware`. Status reports the outcome until the reboot.
 #[instrument(skip_all)]
-async fn update_handler(_ctx: ServerContext, p: UpdateParams) -> Result<(), Error> {
-    {
-        let mut current = AP_UPDATE.lock().unwrap();
-        if current
+async fn update_handler(
+    _ctx: ServerContext,
+    DeserializeStdin(order): DeserializeStdin<FirmwareOrder>,
+) -> Result<(), Error> {
+    order
+        .asset
+        .validate(crate::registry::os::SIG_CONTEXT, order.asset.all_signers())?;
+    let mut current = AP_UPDATE.lock().unwrap();
+    let mut pending = ORDER.lock().unwrap();
+    // An order whose image never arrived is replaced.
+    if pending.is_none()
+        && current
             .as_ref()
             .is_some_and(|u| u.state == ApUpdateState::Updating)
-        {
-            return Err(Error::new(
-                eyre!("an update is already running"),
-                ErrorKind::InvalidRequest,
-            ));
-        }
-        *current = Some(ApUpdate {
-            target: p.target_version.clone(),
-            state: ApUpdateState::Updating,
-            message: None,
-        });
+    {
+        return Err(Error::new(
+            eyre!("an update is already running"),
+            ErrorKind::InvalidRequest,
+        ));
+    }
+    *current = Some(ApUpdate {
+        target: order.target_version.clone(),
+        state: ApUpdateState::Updating,
+        message: None,
+    });
+    *pending = Some(order);
+    Ok(())
+}
+
+/// The ordered image: written to `/tmp`, checked against the order's
+/// commitment, then flashed after the reply.
+async fn firmware_handler(body: axum::body::Body) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    let Some(order) = ORDER.lock().unwrap().take() else {
+        return (StatusCode::CONFLICT, "no update ordered").into_response();
+    };
+    if let Err(e) = receive_firmware(body, &order.asset).await {
+        let message = format!("{:#}", e.source);
+        update_failed(&order.target_version, &message);
+        return (StatusCode::BAD_REQUEST, message).into_response();
     }
     std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
@@ -176,24 +208,61 @@ async fn update_handler(_ctx: ServerContext, p: UpdateParams) -> Result<(), Erro
             .build()
             .expect("update runtime")
             .block_on(async {
-                if let Err(e) = crate::update::install(&p.registry, &p.target_version).await {
-                    tracing::error!("control: update to {} failed: {e}", p.target_version);
-                    crate::activity::log(
-                        "system",
-                        "update",
-                        false,
-                        &format!("Update to v{} failed", p.target_version),
-                        Some(&e.to_string()),
-                    );
-                    *AP_UPDATE.lock().unwrap() = Some(ApUpdate {
-                        target: p.target_version,
-                        state: ApUpdateState::Failed,
-                        message: Some(e.to_string()),
-                    });
+                let path = std::path::Path::new(FIRMWARE_FILE);
+                if let Err(e) = crate::update::flash(path, &order.target_version).await {
+                    update_failed(&order.target_version, &format!("{:#}", e.source));
                 }
             });
     });
-    Ok(())
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn receive_firmware(
+    body: axum::body::Body,
+    asset: &crate::update::Asset,
+) -> Result<(), Error> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let path = std::path::Path::new(FIRMWARE_FILE);
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .with_kind(ErrorKind::Filesystem)?;
+    let mut stream = body.into_data_stream();
+    let mut size = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| Error::new(eyre!("receiving the image: {e}"), ErrorKind::Network))?;
+        size += chunk.len() as u64;
+        if size > asset.commitment.size {
+            return Err(Error::new(
+                eyre!("the image is larger than ordered"),
+                ErrorKind::InvalidRequest,
+            ));
+        }
+        file.write_all(&chunk)
+            .await
+            .with_kind(ErrorKind::Filesystem)?;
+    }
+    file.flush().await.with_kind(ErrorKind::Filesystem)?;
+    drop(file);
+    asset.commitment.verify_file(path).await
+}
+
+fn update_failed(target: &str, message: &str) {
+    tracing::error!("control: update to {target} failed: {message}");
+    crate::activity::log(
+        "system",
+        "update",
+        false,
+        &format!("Update to v{target} failed"),
+        Some(message),
+    );
+    *AP_UPDATE.lock().unwrap() = Some(ApUpdate {
+        target: target.to_string(),
+        state: ApUpdateState::Failed,
+        message: Some(message.to_string()),
+    });
 }
 
 /// Answers first; the release tears the tunnel down a moment later.
@@ -208,7 +277,9 @@ async fn release_handler(_ctx: ServerContext) -> Result<(), Error> {
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 match release_self().await {
                     Ok(()) => {
-                        tracing::info!("control: released by the Core; waiting to be adopted")
+                        tracing::info!(
+                            "control: released by the main router; waiting to be adopted"
+                        )
                     }
                     Err(e) => tracing::error!("control: release failed: {e}"),
                 }
@@ -219,8 +290,8 @@ async fn release_handler(_ctx: ServerContext) -> Result<(), Error> {
 
 /// Listens on an adopted access point. Idempotent across re-adoptions.
 pub fn start() {
-    let role = satellite::load_role();
-    if role.role != RouterRole::Satellite || role.core_key.is_none() {
+    let role = access_points::load_role();
+    if role.role != RouterRole::AccessPoint || role.main_key.is_none() {
         return;
     }
     {
@@ -256,7 +327,8 @@ async fn serve() -> Result<(), Error> {
     let server = Server::new(move || ready(Ok(ctx.clone())), tunnel_api()).for_http();
     let app = Router::new()
         .route(PATH, post(server))
-        .layer(axum::middleware::from_fn(only_the_core));
+        .route(FIRMWARE_PATH, put(firmware_handler))
+        .layer(axum::middleware::from_fn(only_the_main_router));
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], PORT)))
         .await
         .with_kind(ErrorKind::Network)?;
@@ -269,12 +341,12 @@ async fn serve() -> Result<(), Error> {
     .with_kind(ErrorKind::Network)
 }
 
-async fn only_the_core(
+async fn only_the_main_router(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if Some(peer.ip()) != core_address() {
+    if Some(peer.ip()) != main_address() {
         tracing::debug!("control: refused a request from {}", peer.ip());
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
@@ -282,7 +354,7 @@ async fn only_the_core(
 }
 
 /// Back to a candidate: the tunnel goes, the base layout stays, and the
-/// candidate listener answers the next Core on the backhaul.
+/// candidate listener answers the next main router on the backhaul.
 async fn release_self() -> Result<(), Error> {
     {
         let arena = Arena::new();
@@ -290,13 +362,13 @@ async fn release_self() -> Result<(), Error> {
         crate::mgmt_tunnel::remove_ap_end(&mut cfgs)?;
         dump_all("/etc/config", cfgs).await?;
     }
-    let mut role = satellite::load_role();
-    role.core_key = None;
-    role.core_endpoint = None;
-    role.core_address = None;
+    let mut role = access_points::load_role();
+    role.main_key = None;
+    role.main_endpoint = None;
+    role.main_address = None;
     role.generation = 0;
-    satellite::persist_role(&role).await?;
-    CORE_GENERATION.store(0, Ordering::Relaxed);
+    access_points::persist_role(&role).await?;
+    MAIN_GENERATION.store(0, Ordering::Relaxed);
     for (service, action) in [
         ("network", "reload"),
         ("firewall", "reload"),
@@ -308,10 +380,10 @@ async fn release_self() -> Result<(), Error> {
         .await;
     }
     crate::activity::log(
-        "satellite",
+        "access-point",
         "released",
         true,
-        "Released by the Core; waiting to be adopted again",
+        "Released by the main router; waiting to be adopted again",
         None,
     );
     crate::adoption::start();
@@ -549,7 +621,7 @@ pub async fn clients(uplink: &str) -> Vec<ClientInfo> {
         .collect()
 }
 
-// ── Core: client ────────────────────────────────────────────────────────────
+// ── Main router: client ─────────────────────────────────────────────────────
 
 async fn call<T: serde::de::DeserializeOwned>(
     addr: IpAddr,
@@ -610,34 +682,78 @@ pub async fn push(addr: IpAddr, snapshot: &SyncSnapshot) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn status(addr: IpAddr, name: &str, core_generation: u64) -> Result<TunnelStatus, Error> {
+pub async fn status(addr: IpAddr, name: &str, main_generation: u64) -> Result<TunnelStatus, Error> {
     call(
         addr,
         "status",
         serde_json::json!({
-            "coreGeneration": core_generation,
-            "coreVersion": env!("CARGO_PKG_VERSION"),
+            "mainGeneration": main_generation,
+            "mainVersion": env!("CARGO_PKG_VERSION"),
             "name": name,
-            "coreFormat": satellite::SYNC_FORMAT,
+            "mainFormat": access_points::SYNC_FORMAT,
         }),
     )
     .await
 }
 
 /// Orders the access point at `addr` to update to `target` from `registry`.
-pub async fn update(addr: IpAddr, registry: &str, target: &str) -> Result<(), Error> {
+/// Orders the access point at `addr` to take `target`'s image.
+pub async fn update(addr: IpAddr, target: &str, asset: &crate::update::Asset) -> Result<(), Error> {
     call::<serde_json::Value>(
         addr,
         "update",
-        serde_json::json!({ "registry": registry, "targetVersion": target }),
+        serde_json::json!({ "targetVersion": target, "asset": asset }),
     )
     .await?;
     Ok(())
 }
 
-/// Tells the access point at `addr` that the Core has forgotten it. `Ok(false)`
-/// when it did not answer: a dark access point learns the same from its
-/// tunnel never coming back.
+/// Sends the ordered image; `Ok` once the access point has checked it.
+pub async fn send_firmware(addr: IpAddr, image: &std::path::Path) -> Result<(), Error> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(FIRMWARE_TIMEOUT)
+        .build()
+        .map_err(|e| Error::other(format!("tunnel client: {e}")))?;
+    let file = tokio::fs::File::open(image)
+        .await
+        .with_kind(ErrorKind::Filesystem)?;
+    let len = file
+        .metadata()
+        .await
+        .with_kind(ErrorKind::Filesystem)?
+        .len();
+    let res = client
+        .put(format!(
+            "http://{}{FIRMWARE_PATH}",
+            SocketAddr::new(addr, PORT)
+        ))
+        .header(http::header::CONTENT_LENGTH, len)
+        .body(reqwest::Body::wrap_stream(
+            tokio_util::io::ReaderStream::new(file),
+        ))
+        .send()
+        .await
+        .map_err(|e| {
+            Error::new(
+                eyre!("sending the image to {addr}: {e}"),
+                ErrorKind::Network,
+            )
+        })?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(Error::new(
+            eyre!("{addr} refused the image: {status}: {text}"),
+            ErrorKind::Network,
+        ));
+    }
+    Ok(())
+}
+
+/// Tells the access point at `addr` that the main router has forgotten it.
+/// `Ok(false)` when it did not answer: a dark access point learns the same from
+/// its tunnel never coming back.
 pub async fn release(addr: IpAddr) -> Result<bool, Error> {
     match tokio::time::timeout(
         Duration::from_secs(3),

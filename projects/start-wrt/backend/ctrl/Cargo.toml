@@ -116,3 +116,6 @@ uciedit = { path = "../uciedit" }
 url = { version = "2", features = ["serde"] }
 visit-rs = { path = "../../../../shared-libs/crates/visit-rs" }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[dev-dependencies]
+tokio = { version = "1.41.1", features = ["test-util"] }

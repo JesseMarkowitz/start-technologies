@@ -407,35 +407,40 @@ export class LiveApiService extends ApiService {
     return this.rpc.request({ method: 'ethernet.get', params: {} })
   }
 
-  async satelliteList(): Promise<AccessPoint[]> {
-    return this.rpc.request({ method: 'satellite.list', params: {} })
+  async accessPointList(): Promise<AccessPoint[]> {
+    return this.rpc.request({ method: 'access-point.list', params: {} })
   }
 
-  async satelliteUnpair(params: { name: string }): Promise<null> {
-    return this.rpc.request({ method: 'satellite.unpair', params })
+  async accessPointUnpair(params: { name: string }): Promise<null> {
+    return this.rpc.request({ method: 'access-point.unpair', params })
   }
 
-  async satelliteSetPorts(params: AccessPointSetPorts): Promise<null> {
-    return this.rpc.request({ method: 'satellite.set-ports', params })
+  async accessPointSetPorts(params: AccessPointSetPorts): Promise<null> {
+    return this.rpc.request({ method: 'access-point.set-ports', params })
   }
 
-  async satelliteUpdate(params: AccessPointUpdate): Promise<string[]> {
-    return this.rpc.request({ method: 'satellite.update', params })
+  async accessPointUpdate(params: AccessPointUpdate): Promise<string[]> {
+    return this.rpc.request({ method: 'access-point.update', params })
   }
 
-  async satelliteCandidates(): Promise<AccessPointCandidate[]> {
+  async accessPointCandidates(): Promise<AccessPointCandidate[]> {
     return this.rpc.request({
-      method: 'satellite.adoption.candidates',
+      method: 'access-point.adoption.candidates',
       params: {},
     })
   }
 
-  async satelliteAdopt(params: AccessPointAdopt): Promise<AccessPointAdopted> {
-    return this.rpc.request({ method: 'satellite.adoption.adopt', params })
+  async accessPointAdopt(
+    params: AccessPointAdopt,
+  ): Promise<AccessPointAdopted> {
+    return this.rpc.request({ method: 'access-point.adoption.adopt', params })
   }
 
-  async satelliteAdoptionCode(): Promise<AdoptionCode> {
-    return this.rpc.request({ method: 'satellite.adoption.code', params: {} })
+  async accessPointAdoptionCode(): Promise<AdoptionCode> {
+    return this.rpc.request({
+      method: 'access-point.adoption.code',
+      params: {},
+    })
   }
 
   async ethernetSet(params: EthernetSetConfig): Promise<EthernetSetResult> {

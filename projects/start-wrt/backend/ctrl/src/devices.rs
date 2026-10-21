@@ -1232,7 +1232,7 @@ pub async fn list(_ctx: ServerContext) -> Result<Vec<Device>, Error> {
     let (wifi_clients, wifi_ports) = wifi_result;
     // Devices behind an access point reach the bridge through its trunk
     // port; the access point reports where they really are (D13, D25).
-    let satellite_clients: HashMap<String, String> = crate::satellite::load_registry()
+    let access_point_clients: HashMap<String, String> = crate::access_points::load_registry()
         .into_iter()
         .flat_map(|s| {
             s.clients.into_iter().map(move |c| {
@@ -1579,7 +1579,7 @@ pub async fn list(_ctx: ServerContext) -> Result<Vec<Device>, Error> {
         let connection = if matches!(status, DeviceStatus::Online) {
             wifi_clients
                 .get(mac)
-                .or_else(|| satellite_clients.get(mac))
+                .or_else(|| access_point_clients.get(mac))
                 .cloned()
                 .or_else(|| {
                     if !on_wifi_port && (!arp_list.is_empty() || fdb_by_mac.contains_key(mac)) {

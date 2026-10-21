@@ -1,11 +1,12 @@
 import { Component, computed, inject } from '@angular/core'
 import { TuiResponsiveDialogService } from '@taiga-ui/addon-mobile'
 import { TuiButton, TuiCell, TuiTitle } from '@taiga-ui/core'
-import { TuiSkeleton } from '@taiga-ui/kit'
+import { TUI_CONFIRM, TuiSkeleton } from '@taiga-ui/kit'
 import { TuiHeader } from '@taiga-ui/layout'
 import { provideFormService } from 'src/app/services/form.service'
 import { i18nPipe } from 'src/app/i18n/i18n.pipe'
 import { AccessPointCandidate } from 'src/app/services/api/api.service'
+import { filter } from 'rxjs'
 
 import { ADOPT_DIALOG, AdoptResult } from './dialog'
 import { AccessPointsService } from './service'
@@ -38,7 +39,7 @@ import { AccessPointsTable } from './table'
         <h3>{{ 'Waiting to be adopted' | i18n }}</h3>
         <p tuiSubtitle>
           {{
-            'Routers in the satellite role that are cabled to a trunk port and waiting to be adopted.'
+            'Routers in the access point role that are cabled to a trunk port and waiting to be adopted.'
               | i18n
           }}
         </p>
@@ -80,6 +81,7 @@ import { AccessPointsTable } from './table'
 })
 export default class AccessPoints {
   private readonly dialogs = inject(TuiResponsiveDialogService)
+  private readonly i18n = inject(i18nPipe)
 
   protected readonly service = inject(AccessPointsService)
   protected readonly updatable = computed(() =>
@@ -92,8 +94,32 @@ export default class AccessPoints {
         size: 's',
         data: { candidate, saved: this.service.saved() },
       })
-      .subscribe(({ name, secret }) =>
-        this.service.adopt({ address: candidate.address, name, secret }),
-      )
+      .subscribe(async result => {
+        if ('remove' in result) {
+          this.confirmRemove(candidate, result.remove)
+        } else {
+          const { name, secret } = result
+          this.service.adopt({ address: candidate.address, name, secret })
+        }
+      })
+  }
+
+  private confirmRemove(candidate: AccessPointCandidate, names: string[]) {
+    this.dialogs
+      .open<boolean>(TUI_CONFIRM, {
+        label: this.i18n.transform('Delete saved configurations'),
+        data: {
+          content: `${names.join(', ')}: ${this.i18n.transform(
+            'their keys are revoked, and each must be adopted again.',
+          )}`,
+          yes: this.i18n.transform('Delete'),
+          no: this.i18n.transform('Cancel'),
+        },
+      })
+      .pipe(filter(Boolean))
+      .subscribe(async () => {
+        await this.service.removeSaved(names)
+        this.adopt(candidate)
+      })
   }
 }

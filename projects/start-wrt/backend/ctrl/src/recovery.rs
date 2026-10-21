@@ -21,10 +21,10 @@ use uciedit::openwrt::{
 };
 use uciedit::{dump_all, parse_all, Arena, Configs};
 
+use crate::access_points;
 use crate::ap_page::esc;
 use crate::backhaul::{ensure_zone, primary, remove_zone, tagged, BACKHAUL_VLAN};
 use crate::prelude::*;
-use crate::satellite;
 
 /// Dark this long before the recovery network comes up.
 pub const AFTER_DARK: Duration = Duration::from_secs(60);
@@ -278,7 +278,7 @@ pub async fn enter(uplink: &str) -> Result<(), Error> {
     });
     *ACTIVE.lock().unwrap() = Some(handle.abort_handle());
     crate::activity::log(
-        "satellite",
+        "access-point",
         "recovery",
         false,
         &format!(
@@ -311,7 +311,7 @@ pub async fn exit(uplink: &str) -> Result<(), Error> {
         dump_all("/etc/config", cfgs).await?;
     }
     crate::ap::reload_all().await;
-    crate::activity::log("satellite", "recovery", true, "Recovery mode off", None);
+    crate::activity::log("access-point", "recovery", true, "Recovery mode off", None);
     Ok(())
 }
 
@@ -321,21 +321,21 @@ pub async fn exit(uplink: &str) -> Result<(), Error> {
 pub struct Reasons {
     pub uplink: String,
     pub uplink_link: bool,
-    pub core_neighbour: bool,
+    pub main_neighbour: bool,
     pub handshake_age: Option<u64>,
     pub version: String,
-    pub core_version: String,
+    pub main_version: String,
     pub refused: Option<String>,
-    /// The Core's payload needs newer firmware (D17).
+    /// The main router's payload needs newer firmware (D17).
     pub needs_update: bool,
 }
 
 async fn reasons(uplink: &str) -> Reasons {
-    let role = satellite::load_role();
+    let role = access_points::load_role();
     let link = std::fs::read_to_string(format!("/sys/class/net/{uplink}/carrier"))
         .is_ok_and(|c| c.trim() == "1");
-    let core_neighbour = match role
-        .core_endpoint
+    let main_neighbour = match role
+        .main_endpoint
         .as_deref()
         .and_then(|e| e.split_once('%'))
     {
@@ -355,7 +355,7 @@ async fn reasons(uplink: &str) -> Reasons {
     let handshake_age = tokio::process::Command::new("wg")
         .args([
             "show",
-            crate::mgmt_tunnel::AP_INTERFACE,
+            crate::mgmt_tunnel::MAIN_INTERFACE,
             "latest-handshakes",
         ])
         .output()
@@ -378,10 +378,10 @@ async fn reasons(uplink: &str) -> Reasons {
     Reasons {
         uplink: uplink.to_string(),
         uplink_link: link,
-        core_neighbour,
+        main_neighbour,
         handshake_age,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        core_version: crate::control::core_version(),
+        main_version: crate::control::main_version(),
         refused: crate::ap::last_apply_error(),
         needs_update: crate::ap::needs_update(),
     }
@@ -427,9 +427,10 @@ async fn log_text() -> String {
     lines[start..].join("\n")
 }
 
-/// Firmware behind the Core's; unknown is not behind.
-fn older(version: &str, core: &str) -> bool {
-    !core.is_empty() && crate::system::cmp_versions(version, core) == std::cmp::Ordering::Less
+/// Firmware behind the main router's; unknown is not behind.
+fn older(version: &str, main_version: &str) -> bool {
+    !main_version.is_empty()
+        && crate::system::cmp_versions(version, main_version) == std::cmp::Ordering::Less
 }
 
 pub fn render(name: &str, r: &Reasons, log: &str) -> String {
@@ -439,14 +440,14 @@ pub fn render(name: &str, r: &Reasons, log: &str) -> String {
         h,
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>Satellite {name} — recovery mode</title>\
+         <title>Access point {name} — recovery mode</title>\
          <style>body{{font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;color:#222}}\
          h1{{font-size:1.5rem}}h2{{font-size:1.1rem;margin-top:1.5rem}}table{{border-collapse:collapse;width:100%}}\
          td,th{{text-align:left;padding:.25rem .5rem;border-bottom:1px solid #ddd;vertical-align:top}}\
          pre{{font-size:.75rem;overflow:auto;background:#f4f4f4;padding:.5rem;max-height:24rem}}\
          .muted{{color:#666}}.bad{{color:#b00}}.ok{{color:#070}}form{{display:inline}}\
          button{{font:inherit;padding:.4rem .9rem;margin:.25rem .5rem 0 0}}</style></head><body>\
-         <h1>Satellite {name} — recovery mode</h1>\
+         <h1>Access point {name} — recovery mode</h1>\
          <p>{lead} \
          Devices near it find their usual network only where the main router or another access point \
          still reaches them.</p>\
@@ -465,19 +466,19 @@ pub fn render(name: &str, r: &Reasons, log: &str) -> String {
         uplink = esc(&r.uplink),
         lc = if r.uplink_link { "ok" } else { "bad" },
         link = if r.uplink_link { "link up" } else { "no link: check the cable to the main router" },
-        nc = if r.core_neighbour { "ok" } else { "bad" },
-        neigh = if r.core_neighbour { "answers" } else { "not answering" },
+        nc = if r.main_neighbour { "ok" } else { "bad" },
+        neigh = if r.main_neighbour { "answers" } else { "not answering" },
         hc = match r.handshake_age { Some(a) if a < 180 => "ok", _ => "bad" },
         hs = match r.handshake_age {
             Some(a) if a < 180 => "up".to_string(),
             Some(a) => format!("last handshake {} ago", age(a)),
             None => "never handshaked".to_string(),
         },
-        vc = if older(&r.version, &r.core_version) { "bad" } else { "" },
-        ver = if !older(&r.version, &r.core_version) {
+        vc = if older(&r.version, &r.main_version) { "bad" } else { "" },
+        ver = if !older(&r.version, &r.main_version) {
             esc(&r.version)
         } else {
-            format!("{} (the main router runs {}; update this access point)", esc(&r.version), esc(&r.core_version))
+            format!("{} (the main router runs {}; update this access point)", esc(&r.version), esc(&r.main_version))
         },
         rc = if r.refused.is_some() { "bad" } else { "ok" },
         refused = match &r.refused { Some(e) => format!("refused: {}", esc(e)), None => "applied".to_string() },
@@ -513,9 +514,12 @@ fn html(body: String) -> Response<Body> {
 }
 
 async fn page() -> Response<Body> {
-    let role = satellite::load_role();
+    let role = access_points::load_role();
     let uplink = role.uplink.clone().unwrap_or_default();
-    let name = role.name.clone().unwrap_or_else(|| "satellite".to_string());
+    let name = role
+        .name
+        .clone()
+        .unwrap_or_else(|| "access-point".to_string());
     html(render(&name, &reasons(&uplink).await, &log_text().await))
 }
 
@@ -525,7 +529,7 @@ async fn logs() -> Response<Body> {
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .header(
             header::CONTENT_DISPOSITION,
-            "attachment; filename=\"satellite-recovery.log\"",
+            "attachment; filename=\"access-point-recovery.log\"",
         )
         .body(Body::from(text))
         .unwrap()
@@ -533,7 +537,7 @@ async fn logs() -> Response<Body> {
 
 async fn restart() -> Response<Body> {
     crate::activity::log(
-        "satellite",
+        "access-point",
         "recovery",
         true,
         "Restart from recovery mode",
@@ -548,7 +552,7 @@ async fn restart() -> Response<Body> {
 
 async fn factory_reset() -> Response<Body> {
     crate::activity::log(
-        "satellite",
+        "access-point",
         "recovery",
         true,
         "Factory reset from recovery mode",
@@ -605,10 +609,10 @@ mod tests {
         let log = "Mon Oct 19 00:00:00 2026 daemon.notice netifd: Network device 'eth1' link is down\n\
                    Mon Oct 19 00:00:01 2026 daemon.info dnsmasq-dhcp[1]: DHCPACK(br-lan.101) 192.168.1.5 aa:bb\n\
                    Mon Oct 19 00:00:02 2026 daemon.notice hostapd: phy0-ap0: AP-STA-CONNECTED aa:bb\n\
-                   Mon Oct 19 00:00:03 2026 user.warn startwrt-ctrld: liveness: the Core is unreachable\n";
+                   Mon Oct 19 00:00:03 2026 user.warn startwrt-ctrld: liveness: the main router is unreachable\n";
         let f = filter_log(log);
         assert!(f.contains("link is down"));
-        assert!(f.contains("Core is unreachable"));
+        assert!(f.contains("main router is unreachable"));
         assert!(!f.contains("DHCPACK"));
         assert!(!f.contains("AP-STA"));
     }
@@ -618,15 +622,15 @@ mod tests {
         let r = Reasons {
             uplink: "eth1".into(),
             uplink_link: false,
-            core_neighbour: false,
+            main_neighbour: false,
             handshake_age: Some(600),
             version: "1.3.0".into(),
-            core_version: "1.3.1".into(),
+            main_version: "1.3.1".into(),
             refused: Some("generation 4: bad".into()),
             needs_update: false,
         };
         let h = render("garage", &r, "x<y");
-        assert!(h.contains("<h1>Satellite garage — recovery mode</h1>"));
+        assert!(h.contains("<h1>Access point garage — recovery mode</h1>"));
         assert!(h.contains("check the cable"));
         assert!(h.contains("last handshake 10 min ago"));
         assert!(h.contains("update this access point"));
@@ -644,7 +648,7 @@ mod tests {
             "",
         );
         assert!(h.contains("need newer firmware") && !h.contains("lost its main router"));
-        // Newer than the Core is not flagged.
+        // Newer than the main router is not flagged.
         assert!(!h.contains("update this access point"));
     }
 

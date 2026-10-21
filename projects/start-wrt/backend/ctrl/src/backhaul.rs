@@ -1,9 +1,9 @@
-//! The trunk between a Core and its access points (design D25).
+//! The trunk between a main router and its access points (design D25).
 //!
-//! A trunk port on the Core carries every profile VLAN tagged and the backhaul
-//! VLAN untagged. The backhaul VLAN is not a profile: it carries IPv6
-//! link-local only, for adoption and each access point's management tunnel.
-//! An access point's uplink port is the mirror image, so both roles share the
+//! A trunk port on the main router carries every profile VLAN tagged and the
+//! backhaul VLAN untagged. The backhaul VLAN is not a profile: it carries IPv6
+//! link-local only, for adoption and each access point's management tunnel. An
+//! access point's uplink port is the mirror image, so both roles share the
 //! constants and the backhaul interface and zone here.
 
 use std::collections::BTreeSet;
@@ -30,8 +30,8 @@ pub fn backhaul_device(bridge: &str) -> String {
     format!("{bridge}.{BACKHAUL_VLAN}")
 }
 
-/// Ports that are PRIMARY on the backhaul VLAN of any bridge: the Core's trunk
-/// ports, or an access point's uplink.
+/// Ports that are PRIMARY on the backhaul VLAN of any bridge: the main router's
+/// trunk ports, or an access point's uplink.
 pub fn trunk_ports(cfgs: &Configs) -> BTreeSet<String> {
     cfgs["network"]
         .sections
@@ -236,9 +236,9 @@ pub fn ensure_icmpv6_rule(cfgs: &mut Configs, zone: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// The Core's backhaul: present while any trunk port exists, gone otherwise.
-/// Management tunnels keep their own accept rules on the zone.
-pub fn sync_core_backhaul(cfgs: &mut Configs, bridge: &str, has_trunk: bool) -> Result<(), Error> {
+/// The main router's backhaul: present while any trunk port exists, gone
+/// otherwise. Management tunnels keep their own accept rules on the zone.
+pub fn sync_main_backhaul(cfgs: &mut Configs, bridge: &str, has_trunk: bool) -> Result<(), Error> {
     if has_trunk {
         ensure_backhaul_interface(cfgs, bridge)?;
         ensure_zone(
@@ -292,15 +292,15 @@ config bridge-vlan\n\toption device 'br-lan'\n\toption vlan '4094'\n\tlist ports
     }
 
     #[tokio::test]
-    async fn core_backhaul_comes_and_goes_with_the_trunk() {
+    async fn main_backhaul_comes_and_goes_with_the_trunk() {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path()).await;
         let arena = Arena::new();
         let mut cfgs = parse_all(dir.path(), &arena, &["network", "firewall"])
             .await
             .unwrap();
-        sync_core_backhaul(&mut cfgs, "br-lan", true).unwrap();
-        sync_core_backhaul(&mut cfgs, "br-lan", true).unwrap();
+        sync_main_backhaul(&mut cfgs, "br-lan", true).unwrap();
+        sync_main_backhaul(&mut cfgs, "br-lan", true).unwrap();
         let ifaces: Vec<_> = cfgs["network"]
             .sections
             .iter()
@@ -333,7 +333,7 @@ config bridge-vlan\n\toption device 'br-lan'\n\toption vlan '4094'\n\tlist ports
                 .is_ok_and(|r| r.name == "Allow-ICMPv6-backhaul" && r.icmp_type.len() == 9)
         }));
 
-        sync_core_backhaul(&mut cfgs, "br-lan", false).unwrap();
+        sync_main_backhaul(&mut cfgs, "br-lan", false).unwrap();
         assert!(cfgs["network"]
             .sections
             .iter()

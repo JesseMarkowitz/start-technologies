@@ -17,25 +17,25 @@ export class AccessPointsService extends FormService<AccessPoint[]> {
 
   readonly candidates = signal<AccessPointCandidate[]>([])
   readonly profiles = signal<ProfileId[]>([])
-  /** The Core's own firmware version, which an access point should match. */
-  readonly coreVersion = signal('')
+  /** The main router's own firmware version, which an access point should match. */
+  readonly mainVersion = signal('')
 
   async load(): Promise<AccessPoint[]> {
     const [list, candidates, profiles, info] = await Promise.all([
-      this.api.satelliteList(),
-      this.api.satelliteCandidates().catch(() => []),
+      this.api.accessPointList(),
+      this.api.accessPointCandidates().catch(() => []),
       this.api.profilesList(),
       this.api.systemInfo().catch(() => null),
     ])
 
     this.candidates.set(candidates)
     this.profiles.set(profiles)
-    if (info) this.coreVersion.set(info.version)
+    if (info) this.mainVersion.set(info.version)
 
     return list
   }
 
-  /** Running older firmware than the Core, or unable to read its configuration. */
+  /** Running older firmware than the main router, or unable to read its configuration. */
   behind(item: AccessPoint): boolean {
     return item.needsUpdate || this.compare(item) < 0
   }
@@ -54,8 +54,8 @@ export class AccessPointsService extends FormService<AccessPoint[]> {
   }
 
   private compare(item: AccessPoint): number {
-    const core = this.coreVersion()
-    return item.version && core ? compareVersions(item.version, core) : 0
+    const main = this.mainVersion()
+    return item.version && main ? compareVersions(item.version, main) : 0
   }
 
   /** Names of access points out of contact: saved configurations a new
@@ -69,7 +69,7 @@ export class AccessPointsService extends FormService<AccessPoint[]> {
   adopt(params: AccessPointAdopt): Promise<boolean> {
     return this.actions.run(
       async () => {
-        await this.api.satelliteAdopt(params)
+        await this.api.accessPointAdopt(params)
         await this.refreshAndWait()
       },
       {
@@ -85,7 +85,7 @@ export class AccessPointsService extends FormService<AccessPoint[]> {
   ): Promise<boolean> {
     return this.actions.run(
       async () => {
-        await this.api.satelliteSetPorts({
+        await this.api.accessPointSetPorts({
           name,
           ports: Object.entries(ports).map(
             ([port, vlan]) => `${port}=${vlan === null ? 'off' : vlan}`,
@@ -97,21 +97,34 @@ export class AccessPointsService extends FormService<AccessPoint[]> {
     )
   }
 
-  /** Updates `names`, or every access point behind the Core, one at a time. */
+  /** Updates `names`, or every access point behind the main router, one at a time. */
   update(names: string[]): Promise<boolean> {
     return this.actions.run(
       async () => {
-        await this.api.satelliteUpdate({ names })
+        await this.api.accessPointUpdate({ names })
         await this.refreshAndWait()
       },
       { success: this.i18n.transform('Access point update started') },
     )
   }
 
+  /** Deletes saved configurations, revoking each one's key. */
+  removeSaved(names: string[]): Promise<boolean> {
+    return this.actions.run(
+      async () => {
+        for (const name of names) {
+          await this.api.accessPointUnpair({ name })
+        }
+        await this.refreshAndWait()
+      },
+      { success: this.i18n.transform('Saved configurations deleted') },
+    )
+  }
+
   remove(name: string): Promise<boolean> {
     return this.actions.run(
       async () => {
-        await this.api.satelliteUnpair({ name })
+        await this.api.accessPointUnpair({ name })
         await this.refreshAndWait()
       },
       { success: this.i18n.transform('Access point removed') },

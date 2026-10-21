@@ -1813,6 +1813,7 @@ export class MockApiService extends ApiService {
       version: '0.9.2',
       needsUpdate: false,
       recoverySsid: 'StartWRT-Recovery-5D09',
+      loopBlocked: [],
     },
     {
       name: 'shed',
@@ -1826,6 +1827,7 @@ export class MockApiService extends ApiService {
       plan: {},
       version: '0.9.2',
       needsUpdate: true,
+      loopBlocked: [],
     },
   ]
 
@@ -1833,19 +1835,19 @@ export class MockApiService extends ApiService {
     {
       address: 'fe80::fcfe:feff:fe82:5d08%br-lan.4094',
       interface: 'br-lan.4094',
-      satelliteKey: 'mock-candidate-key=',
+      accessPointKey: 'mock-candidate-key=',
       version: '1.3.0',
       hasSticker: false,
       lastSeenSecs: 2,
     },
   ]
 
-  async satelliteList(): Promise<AccessPoint[]> {
+  async accessPointList(): Promise<AccessPoint[]> {
     await pauseFor(250)
     return structuredClone(this.mockAccessPoints)
   }
 
-  async satelliteUnpair(params: { name: string }): Promise<null> {
+  async accessPointUnpair(params: { name: string }): Promise<null> {
     await pauseFor(250)
     this.mockAccessPoints = this.mockAccessPoints.filter(
       s => s.name !== params.name,
@@ -1853,10 +1855,10 @@ export class MockApiService extends ApiService {
     return null
   }
 
-  async satelliteSetPorts(params: AccessPointSetPorts): Promise<null> {
+  async accessPointSetPorts(params: AccessPointSetPorts): Promise<null> {
     await pauseFor(250)
     const ap = this.mockAccessPoints.find(s => s.name === params.name)
-    if (!ap) throw new Error(`no adopted satellite named '${params.name}'`)
+    if (!ap) throw new Error(`no adopted access point named '${params.name}'`)
     ap.ports = Object.fromEntries(
       params.ports.map(p => {
         const [port, vlan] = p.split('=')
@@ -1866,7 +1868,7 @@ export class MockApiService extends ApiService {
     return null
   }
 
-  async satelliteUpdate(params: AccessPointUpdate): Promise<string[]> {
+  async accessPointUpdate(params: AccessPointUpdate): Promise<string[]> {
     await pauseFor(250)
     const target = this.mockSystemInfo.version
     const queued = this.mockAccessPoints.filter(
@@ -1903,17 +1905,26 @@ export class MockApiService extends ApiService {
     this.mockFleetUpdating = false
   }
 
-  async satelliteCandidates(): Promise<AccessPointCandidate[]> {
+  async accessPointCandidates(): Promise<AccessPointCandidate[]> {
     await pauseFor(250)
     return structuredClone(this.mockCandidates)
   }
 
-  async satelliteAdoptionCode(): Promise<AdoptionCode> {
+  async accessPointAdoptionCode(): Promise<AdoptionCode> {
     await pauseFor(100)
-    return { waiting: false, hasSticker: false, code: null }
+    return {
+      waiting: false,
+      hasSticker: false,
+      code: null,
+      heardMain: false,
+      link: false,
+      internet: false,
+    }
   }
 
-  async satelliteAdopt(params: AccessPointAdopt): Promise<AccessPointAdopted> {
+  async accessPointAdopt(
+    params: AccessPointAdopt,
+  ): Promise<AccessPointAdopted> {
     await pauseFor(1500)
     const candidate = this.mockCandidates.find(
       c => c.address === params.address,
@@ -1924,7 +1935,7 @@ export class MockApiService extends ApiService {
       .filter(s => s.name !== params.name)
       .concat({
         name: params.name,
-        publicKey: candidate.satelliteKey,
+        publicKey: candidate.accessPointKey,
         mgmtAddress: `10.42.${this.mockAccessPoints.length + 2}.2`,
         generationApplied: 0,
         lastSeen: 0,
@@ -1934,11 +1945,12 @@ export class MockApiService extends ApiService {
         plan: {},
         version: '',
         needsUpdate: false,
+        loopBlocked: [],
       })
     return {
       name: params.name,
-      satelliteKey: candidate.satelliteKey,
-      interface: `sat_${params.name}`,
+      accessPointKey: candidate.accessPointKey,
+      interface: `ap_${params.name}`,
     }
   }
 

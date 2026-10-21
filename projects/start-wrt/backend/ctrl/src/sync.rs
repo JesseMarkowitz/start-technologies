@@ -1,12 +1,13 @@
-//! Config sync (design D5, D20): the Core builds each access point's payload
-//! from its own Wi-Fi, profiles and port assignments, numbers it, and pushes
-//! it over the tunnel whenever it changes or an access point falls behind.
+//! Config sync (design D5, D20): the main router builds each access point's
+//! payload from its own Wi-Fi, profiles and port assignments, numbers it, and
+//! pushes it over the tunnel whenever it changes or an access point falls
+//! behind.
 //!
-//! The payload is derived, never edited: every tick the Core rebuilds it from
-//! its configs and compares a digest with the last one, so a password, profile
-//! or port change reaches every access point within seconds with no hook in
-//! the code that made the change. The generation is a counter the Core keeps;
-//! an access point refuses anything older than what it applied.
+//! The payload is derived, never edited: every tick the main router rebuilds it
+//! from its configs and compares a digest with the last one, so a password,
+//! profile or port change reaches every access point within seconds with no
+//! hook in the code that made the change. The generation is a counter the main
+//! router keeps; an access point refuses anything older than what it applied.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -14,13 +15,13 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::access_points::{
+    AccessPoint, ApUpdateState, PasswordSpec, ProfileSpec, RadioInfo, RadioPlan, SyncSnapshot,
+    SYNC_FORMAT,
+};
 use crate::ap::ADMIN_VLAN;
 use crate::prelude::*;
 use crate::profiles::ProfileId;
-use crate::satellite::{
-    ApUpdateState, PairedSatellite, PasswordSpec, ProfileSpec, RadioInfo, RadioPlan, SyncSnapshot,
-    SYNC_FORMAT,
-};
 use crate::wifi::Wifi;
 use crate::ServerContext;
 
@@ -51,11 +52,10 @@ async fn save_state(state: &State) -> Result<(), Error> {
         .map_err(|e| Error::new(eyre!("write {STATE_PATH}: {e}"), ErrorKind::Filesystem))
 }
 
-/// The Core's side of every payload.
+/// The main router's side of every payload.
 pub struct Inputs {
     pub wifi: Wifi<ProfileId>,
     pub profiles: Vec<ProfileId>,
-    pub update_source: String,
 }
 
 async fn gather() -> Result<Inputs, Error> {
@@ -66,12 +66,7 @@ async fn gather() -> Result<Inputs, Error> {
         let cfgs = uciedit::parse_all("/etc/config", &arena, &["startwrt"]).await?;
         crate::profiles::list_config(ctx, &cfgs)?
     };
-    Ok(Inputs {
-        wifi,
-        profiles,
-        update_source: crate::system::read_registry_url()
-            .unwrap_or_else(|| crate::system::DEFAULT_REGISTRY_URL.to_string()),
-    })
+    Ok(Inputs { wifi, profiles })
 }
 
 // ── Channel plan (D20) ──────────────────────────────────────────────────────
@@ -88,9 +83,9 @@ fn band_channel(band: &str) -> Option<(&'static [u32], &'static str)> {
 }
 
 /// Picks a band and the least-used channel for each of an access point's
-/// radios. `taken` holds every (band, channel) already planned or in use on
-/// the Core and other access points. The first radio of a dual-band phy takes
-/// 2.4 GHz for reach; a second radio takes the other band.
+/// radios. `taken` holds every (band, channel) already planned or in use on the
+/// main router and other access points. The first radio of a dual-band phy
+/// takes 2.4 GHz for reach; a second radio takes the other band.
 pub fn plan(radios: &[RadioInfo], taken: &[(String, u32)]) -> BTreeMap<String, RadioPlan> {
     let mut out = BTreeMap::new();
     let mut used_bands: BTreeSet<&str> = BTreeSet::new();
@@ -128,8 +123,8 @@ pub fn plan(radios: &[RadioInfo], taken: &[(String, u32)]) -> BTreeMap<String, R
     out
 }
 
-/// What the Core's own radios occupy.
-fn core_channels(wifi: &Wifi<ProfileId>) -> Vec<(String, u32)> {
+/// What the main router's own radios occupy.
+fn main_channels(wifi: &Wifi<ProfileId>) -> Vec<(String, u32)> {
     wifi.radios
         .values()
         .filter(|r| r.enabled)
@@ -142,11 +137,11 @@ fn core_channels(wifi: &Wifi<ProfileId>) -> Vec<(String, u32)> {
 /// One access point's payload at `generation`.
 pub fn build(
     inputs: &Inputs,
-    sat: &PairedSatellite,
+    ap: &AccessPoint,
     radios: BTreeMap<String, RadioPlan>,
     generation: u64,
 ) -> SyncSnapshot {
-    let known_ports: Option<BTreeSet<&str>> = sat.inventory.as_ref().map(|i| {
+    let known_ports: Option<BTreeSet<&str>> = ap.inventory.as_ref().map(|i| {
         i.ports
             .iter()
             .filter(|p| !p.uplink)
@@ -179,7 +174,7 @@ pub fn build(
                 vlan_tag: p.profile.as_ref().map_or(ADMIN_VLAN, |pr| pr.vlan_tag),
             })
             .collect(),
-        ports: sat
+        ports: ap
             .ports
             .iter()
             .filter(|(name, _)| {
@@ -189,17 +184,16 @@ pub fn build(
             })
             .map(|(n, v)| (n.clone(), *v))
             .collect(),
-        update_source: Some(inputs.update_source.clone()),
     }
 }
 
 /// Every access point's payload, generation 0, and a digest over all of them.
-fn build_all(inputs: &Inputs, registry: &[PairedSatellite]) -> (Vec<SyncSnapshot>, String) {
-    let mut taken = core_channels(&inputs.wifi);
+fn build_all(inputs: &Inputs, registry: &[AccessPoint]) -> (Vec<SyncSnapshot>, String) {
+    let mut taken = main_channels(&inputs.wifi);
     let mut snapshots = Vec::new();
     let mut hasher = blake3::Hasher::new();
-    for sat in registry {
-        let radios = sat
+    for ap in registry {
+        let radios = ap
             .inventory
             .as_ref()
             .map(|i| plan(&i.radios, &taken))
@@ -207,38 +201,38 @@ fn build_all(inputs: &Inputs, registry: &[PairedSatellite]) -> (Vec<SyncSnapshot
         for p in radios.values() {
             taken.push((p.band.clone(), p.channel));
         }
-        let snapshot = build(inputs, sat, radios, 0);
-        hasher.update(sat.name.as_bytes());
+        let snapshot = build(inputs, ap, radios, 0);
+        hasher.update(ap.name.as_bytes());
         hasher.update(&serde_json::to_vec(&snapshot).expect("snapshot serializes"));
         snapshots.push(snapshot);
     }
     (snapshots, hasher.finalize().to_hex().to_string())
 }
 
-/// A generation never below what any access point has applied, so a Core
+/// A generation never below what any access point has applied, so a main router
 /// whose state file was lost does not push payloads they refuse as old.
-pub fn floor_generation(generation: u64, registry: &[PairedSatellite]) -> u64 {
+pub fn floor_generation(generation: u64, registry: &[AccessPoint]) -> u64 {
     registry
         .iter()
         .map(|s| s.generation_applied)
         .fold(generation, u64::max)
 }
 
-/// An access point reporting `format` reads the Core's payload; one reporting
-/// none predates the number and reads format 1.
+/// An access point reporting `format` reads the main router's payload; one
+/// reporting none predates the number and reads format 1.
 pub fn reads(format: u32) -> bool {
     format.max(1) >= SYNC_FORMAT
 }
 
 /// Drops a failed update's note once the access point no longer needs one.
-fn clear_stale_failure(sat: &mut PairedSatellite) -> bool {
-    let stale = sat
+fn clear_stale_failure(ap: &mut AccessPoint) -> bool {
+    let stale = ap
         .update
         .as_ref()
         .is_some_and(|u| u.state == ApUpdateState::Failed)
-        && !crate::fleet_update::behind(sat, env!("CARGO_PKG_VERSION"));
+        && !crate::fleet_update::behind(ap, env!("CARGO_PKG_VERSION"));
     if stale {
-        sat.update = None;
+        ap.update = None;
     }
     stale
 }
@@ -249,7 +243,7 @@ pub struct Pusher {
     last_attempt: BTreeMap<String, Instant>,
 }
 
-/// The current generation the Core announces, after this tick's rebuild.
+/// The current generation the main router announces, after this tick's rebuild.
 pub fn current_generation() -> u64 {
     load_state().generation
 }
@@ -258,7 +252,7 @@ pub fn current_generation() -> u64 {
 /// access point's status, and push to those behind. `live` names the access
 /// points whose tunnel is up. Returns whether the registry changed.
 pub async fn tick(
-    registry: &mut [PairedSatellite],
+    registry: &mut [AccessPoint],
     live: &BTreeSet<String>,
     pusher: &mut Pusher,
 ) -> Result<bool, Error> {
@@ -280,44 +274,48 @@ pub async fn tick(
     }
     let generation = state.generation;
     let mut changed = false;
-    for (sat, mut snapshot) in registry.iter_mut().zip(snapshots) {
-        if !live.contains(&sat.name) {
+    for (ap, mut snapshot) in registry.iter_mut().zip(snapshots) {
+        if !live.contains(&ap.name) {
             continue;
         }
-        let Ok(addr) = sat.mgmt_address.parse::<IpAddr>() else {
+        let Ok(addr) = ap.mgmt_address.parse::<IpAddr>() else {
             continue;
         };
-        match crate::control::status(addr, &sat.name, generation).await {
+        match crate::control::status(addr, &ap.name, generation).await {
             Ok(status) => {
-                if sat.generation_applied != status.generation {
-                    sat.generation_applied = status.generation;
+                if ap.generation_applied != status.generation {
+                    ap.generation_applied = status.generation;
                     changed = true;
                 }
-                if sat.inventory.as_ref() != Some(&status.inventory) {
-                    sat.inventory = Some(status.inventory);
+                if ap.inventory.as_ref() != Some(&status.inventory) {
+                    ap.inventory = Some(status.inventory);
                     changed = true;
                 }
-                if sat.clients != status.clients {
-                    sat.clients = status.clients;
+                if ap.clients != status.clients {
+                    ap.clients = status.clients;
                     changed = true;
                 }
-                if sat.plan != snapshot.radios {
-                    sat.plan = snapshot.radios.clone();
+                if ap.plan != snapshot.radios {
+                    ap.plan = snapshot.radios.clone();
                     changed = true;
                 }
-                if sat.version != status.version {
-                    sat.version = status.version;
+                if ap.version != status.version {
+                    ap.version = status.version;
                     changed = true;
                 }
-                if sat.recovery_ssid != status.recovery_ssid {
-                    sat.recovery_ssid = status.recovery_ssid;
+                if ap.recovery_ssid != status.recovery_ssid {
+                    ap.recovery_ssid = status.recovery_ssid;
                     changed = true;
                 }
-                if sat.needs_update != status.needs_update {
-                    sat.needs_update = status.needs_update;
+                if ap.needs_update != status.needs_update {
+                    ap.needs_update = status.needs_update;
                     changed = true;
                 }
-                if clear_stale_failure(sat) {
+                if ap.loop_blocked != status.loop_blocked {
+                    ap.loop_blocked = status.loop_blocked;
+                    changed = true;
+                }
+                if clear_stale_failure(ap) {
                     changed = true;
                 }
                 if !reads(status.format) {
@@ -325,48 +323,48 @@ pub async fn tick(
                 }
             }
             Err(e) => {
-                tracing::debug!("sync: status of '{}': {e}", sat.name);
+                tracing::debug!("sync: status of '{}': {e}", ap.name);
                 continue;
             }
         }
-        if sat.generation_applied >= generation {
+        if ap.generation_applied >= generation {
             continue;
         }
         let now = Instant::now();
         if pusher
             .last_attempt
-            .get(&sat.name)
+            .get(&ap.name)
             .is_some_and(|t| now.duration_since(*t) < RETRY_AFTER)
         {
             continue;
         }
-        pusher.last_attempt.insert(sat.name.clone(), now);
+        pusher.last_attempt.insert(ap.name.clone(), now);
         snapshot.generation = generation;
         match crate::control::push(addr, &snapshot).await {
             Ok(()) => {
-                pusher.last_attempt.remove(&sat.name);
-                sat.generation_applied = generation;
+                pusher.last_attempt.remove(&ap.name);
+                ap.generation_applied = generation;
                 changed = true;
                 crate::activity::log(
-                    "satellite",
+                    "access-point",
                     "synced",
                     true,
                     &format!(
-                        "Pushed configuration generation {generation} to satellite '{}'",
-                        sat.name
+                        "Pushed configuration generation {generation} to access point '{}'",
+                        ap.name
                     ),
                     None,
                 );
             }
             Err(e) => {
-                tracing::warn!("sync: push to '{}' failed: {e}", sat.name);
+                tracing::warn!("sync: push to '{}' failed: {e}", ap.name);
                 crate::activity::log(
-                    "satellite",
+                    "access-point",
                     "synced",
                     false,
                     &format!(
-                        "Configuration generation {generation} did not reach satellite '{}'",
-                        sat.name
+                        "Configuration generation {generation} did not reach access point '{}'",
+                        ap.name
                     ),
                     Some(&e.to_string()),
                 );
@@ -379,7 +377,7 @@ pub async fn tick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::satellite::{Inventory, PortInfo};
+    use crate::access_points::{Inventory, PortInfo};
     use crate::wifi::{Password, WifiRadio};
 
     fn radio(name: &str, bands: &[&str]) -> RadioInfo {
@@ -392,7 +390,7 @@ mod tests {
 
     #[test]
     fn generation_never_falls_below_an_applied_one() {
-        let mut s = sat();
+        let mut s = ap();
         s.generation_applied = 11;
         assert_eq!(floor_generation(0, &[s.clone()]), 11);
         assert_eq!(floor_generation(12, &[s]), 12);
@@ -408,12 +406,12 @@ mod tests {
 
     #[test]
     fn a_failed_update_clears_once_nothing_is_behind() {
-        let failed = Some(crate::satellite::ApUpdate {
+        let failed = Some(crate::access_points::ApUpdate {
             target: env!("CARGO_PKG_VERSION").into(),
             state: ApUpdateState::Failed,
             message: Some("x".into()),
         });
-        let mut s = sat();
+        let mut s = ap();
         s.version = env!("CARGO_PKG_VERSION").into();
         s.update = failed.clone();
         s.needs_update = true;
@@ -492,12 +490,11 @@ mod tests {
                 passwords,
             },
             profiles: vec![admin, guest],
-            update_source: "https://registry.example.com".into(),
         }
     }
 
-    fn sat() -> PairedSatellite {
-        PairedSatellite {
+    fn ap() -> AccessPoint {
+        AccessPoint {
             name: "s1".into(),
             public_key: "k".into(),
             mgmt_address: "10.42.1.2".into(),
@@ -523,7 +520,7 @@ mod tests {
 
     #[test]
     fn payload_carries_every_password_with_its_vlan_and_only_known_ports() {
-        let (snaps, digest) = build_all(&inputs(), &[sat()]);
+        let (snaps, digest) = build_all(&inputs(), &[ap()]);
         let s = &snaps[0];
         assert_eq!(s.generation, 0);
         assert_eq!(s.profiles.len(), 2);
@@ -542,21 +539,18 @@ mod tests {
             ]
         );
         assert_eq!(s.ports, BTreeMap::from([("eth0".to_string(), Some(101))]));
-        // The Core sits on 2.4 GHz channel 1, so the access point gets channel 6.
+        // The main router sits on 2.4 GHz channel 1, so the access point gets
+        // channel 6.
         assert_eq!(
             (s.radios["radio0"].band.as_str(), s.radios["radio0"].channel),
             ("2g", 6)
         );
-        assert_eq!(
-            s.update_source.as_deref(),
-            Some("https://registry.example.com")
-        );
         assert_eq!(digest.len(), 64);
         // Same inputs, same digest; a changed password, a new one.
-        let (_, again) = build_all(&inputs(), &[sat()]);
+        let (_, again) = build_all(&inputs(), &[ap()]);
         assert_eq!(digest, again);
         let mut i2 = inputs();
         i2.wifi.ssid = "Other".into();
-        assert_ne!(build_all(&i2, &[sat()]).1, digest);
+        assert_ne!(build_all(&i2, &[ap()]).1, digest);
     }
 }

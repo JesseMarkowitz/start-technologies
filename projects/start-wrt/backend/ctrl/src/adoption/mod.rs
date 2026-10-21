@@ -1,16 +1,17 @@
-//! Satellite adoption over the backhaul (design D21, D24).
+//! Access point adoption over the backhaul (design D21, D24).
 //!
-//! A Core announces itself on the backhaul VLAN of its trunk ports with an
-//! IPv6 link-local multicast. A candidate — a router in the `satellite` role
-//! that has not yet pinned a Core — answers with its identity on its WAN port,
-//! or on its backhaul VLAN once it has been an access point, which puts it on
-//! the Core's candidate list. The admin then picks it and types its secret at
-//! the Core; the [`proof`] exchange runs over the same link-local segment and,
-//! on success, both sides provision the tunnel the Core dictated with the keys
-//! the exchange pinned and the pre-shared key it derived. Nothing here crosses a
-//! router: link-local traffic is confined to one segment.
+//! A main router announces itself on the backhaul VLAN of its trunk ports with
+//! an IPv6 link-local multicast. A candidate — a router in the access point role
+//! that has not yet pinned a main router — answers with its identity on its WAN
+//! port, or on its backhaul VLAN once it has been an access point, which puts it
+//! on the main router's candidate list. The admin then picks it and types its
+//! secret at the main router; the [`proof`] exchange runs over the same
+//! link-local segment and, on success, both sides provision the tunnel the main
+//! router dictated with the keys the exchange pinned and the pre-shared key it
+//! derived. Nothing here crosses a router: link-local traffic is confined to one
+//! segment.
 //!
-//! The candidate accepts datagrams from that one port; the Core accepts
+//! The candidate accepts datagrams from that one port; the main router accepts
 //! offers only from a candidate it has sent a hello to.
 
 mod proof;
@@ -30,9 +31,9 @@ use tokio::sync::oneshot;
 use uciedit::openwrt::{FirewallRule, FirewallTarget, NetworkInterface};
 use uciedit::{dump_all, parse_all, Arena, Configs};
 
+use crate::access_points::{self, AccessPoint, RouterRole};
 use crate::backhaul::backhaul_device;
 use crate::prelude::*;
-use crate::satellite::{self, PairedSatellite, RouterRole};
 use crate::utils::HandlerExtSerde;
 use crate::wg::WgKey;
 use crate::{CliContext, CtrlContext, ServerContext};
@@ -62,34 +63,35 @@ enum Message {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Present {
-    satellite_key: String,
+    access_point_key: String,
     version: String,
     has_sticker: bool,
 }
 
-// ── Core side ───────────────────────────────────────────────────────────────
+// ── Main router side ────────────────────────────────────────────────────────
 
 struct Seen {
     present: Present,
     at: Instant,
 }
 
-struct CoreLink {
+struct MainLink {
     socket: UdpSocket,
     candidates: Mutex<BTreeMap<SocketAddrV6, Seen>>,
     pending: Mutex<HashMap<SocketAddrV6, oneshot::Sender<Message>>>,
     guards: Mutex<HashMap<Ipv6Addr, AttemptGuard>>,
 }
 
-static CORE: OnceLock<Arc<CoreLink>> = OnceLock::new();
+static MAIN_LINK: OnceLock<Arc<MainLink>> = OnceLock::new();
 
-/// Starts the side of adoption this router's role calls for. A Core announces
-/// and listens for candidates; an unadopted satellite waits to be adopted, and
-/// so does a router with no password yet (design §19: a fresh or reset router
-/// that hears a Core on its uplink joins it instead of becoming one).
+/// Starts the side of adoption this router's role calls for. A main router
+/// announces and listens for candidates; an unadopted access point waits to be
+/// adopted, and so does a router with no password yet (design §19: a fresh or
+/// reset router that hears a main router on its uplink joins it instead of
+/// becoming one).
 pub fn start() {
-    let role = satellite::load_role();
-    let fresh = role.role == RouterRole::Core
+    let role = access_points::load_role();
+    let fresh = role.role == RouterRole::Main
         && std::thread::spawn(|| {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -103,18 +105,18 @@ pub fn start() {
         .join()
         .unwrap_or(false);
     match role.role {
-        RouterRole::Core => {
+        RouterRole::Main => {
             tokio::spawn(async {
-                if let Err(e) = run_core().await {
-                    tracing::error!("adoption: Core listener failed: {e}");
+                if let Err(e) = run_main().await {
+                    tracing::error!("adoption: main router listener failed: {e}");
                 }
             });
             if fresh {
                 start_candidate();
             }
         }
-        RouterRole::Satellite if role.core_key.is_none() => start_candidate(),
-        RouterRole::Satellite => {}
+        RouterRole::AccessPoint if role.main_key.is_none() => start_candidate(),
+        RouterRole::AccessPoint => {}
     }
 }
 
@@ -171,8 +173,8 @@ fn if_name(index: u32) -> Option<String> {
     })
 }
 
-/// The Core announces on the backhaul VLAN of its LAN bridge alone: a router
-/// on a profile port is a client, not a candidate.
+/// The main router announces on the backhaul VLAN of its LAN bridge alone: a
+/// router on a profile port is a client, not a candidate.
 fn backhaul_interfaces() -> Vec<String> {
     std::fs::read_dir("/sys/class/net")
         .map(|d| {
@@ -186,17 +188,17 @@ fn backhaul_interfaces() -> Vec<String> {
         .unwrap_or_default()
 }
 
-async fn run_core() -> Result<(), Error> {
-    let link = Arc::new(CoreLink {
+async fn run_main() -> Result<(), Error> {
+    let link = Arc::new(MainLink {
         socket: bind().await?,
         candidates: Mutex::new(BTreeMap::new()),
         pending: Mutex::new(HashMap::new()),
         guards: Mutex::new(HashMap::new()),
     });
-    if CORE.set(link.clone()).is_err() {
+    if MAIN_LINK.set(link.clone()).is_err() {
         return Ok(());
     }
-    tracing::info!("adoption: Core announcing on the backhaul, port {PORT}");
+    tracing::info!("adoption: main router announcing on the backhaul, port {PORT}");
     let announce = encode(&Message::Announce);
     let mut tick = tokio::time::interval(ANNOUNCE_EVERY);
     let mut buf = vec![0u8; MAX_DATAGRAM];
@@ -233,22 +235,22 @@ async fn run_core() -> Result<(), Error> {
     }
 }
 
-/// A router waiting to be adopted, as the Core sees it.
+/// A router waiting to be adopted, as the main router sees it.
 #[derive(Clone, Debug, Serialize, Deserialize, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 pub struct Candidate {
     /// Link-local address with its interface, e.g. `fe80::1%br-lan.1`.
     pub address: String,
     pub interface: String,
-    pub satellite_key: String,
+    pub access_point_key: String,
     pub version: String,
     pub has_sticker: bool,
     pub last_seen_secs: u64,
 }
 rpc_toolkit::reflect_ts!(Candidate);
 
-fn core_link() -> Result<Arc<CoreLink>, Error> {
-    CORE.get().cloned().ok_or_else(|| {
+fn main_link() -> Result<Arc<MainLink>, Error> {
+    MAIN_LINK.get().cloned().ok_or_else(|| {
         Error::new(
             eyre!("adoption listener is not running on this router"),
             ErrorKind::Uninitialized,
@@ -280,8 +282,8 @@ pub fn adoption<C: CtrlContext>() -> ParentHandler<C> {
 
 #[instrument(skip_all)]
 pub async fn candidates(_ctx: ServerContext) -> Result<Vec<Candidate>, Error> {
-    satellite::ensure_core()?;
-    let link = core_link()?;
+    access_points::ensure_main()?;
+    let link = main_link()?;
     let now = Instant::now();
     let mut seen = link.candidates.lock().unwrap();
     seen.retain(|_, s| now.duration_since(s.at) < CANDIDATE_TTL);
@@ -292,7 +294,7 @@ pub async fn candidates(_ctx: ServerContext) -> Result<Vec<Candidate>, Error> {
             Candidate {
                 address: format!("{}%{}", addr.ip(), interface),
                 interface,
-                satellite_key: s.present.satellite_key.clone(),
+                access_point_key: s.present.access_point_key.clone(),
                 version: s.present.version.clone(),
                 has_sticker: s.present.has_sticker,
                 last_seen_secs: now.duration_since(s.at).as_secs(),
@@ -307,16 +309,17 @@ pub async fn candidates(_ctx: ServerContext) -> Result<Vec<Candidate>, Error> {
 pub struct AdoptParams {
     /// A candidate's address as `candidates` lists it.
     address: String,
-    /// The satellite's registry name. An existing entry of that name is
-    /// replaced: a satellite re-adopted after a factory reset keeps its name.
+    /// The access point's registry name. An existing entry of that name is
+    /// replaced: an access point re-adopted after a factory reset keeps its
+    /// name.
     name: String,
     /// The candidate's sticker Wi-Fi password, or its adoption code.
     #[clap(long)]
     secret: String,
     #[clap(long)]
-    core_tunnel_addr: Option<String>,
+    main_tunnel_addr: Option<String>,
     #[clap(long)]
-    satellite_tunnel_addr: Option<String>,
+    access_point_tunnel_addr: Option<String>,
     #[clap(long)]
     listen_port: Option<u16>,
 }
@@ -326,7 +329,7 @@ rpc_toolkit::reflect_ts!(AdoptParams);
 #[serde(rename_all = "camelCase")]
 pub struct AdoptResponse {
     pub name: String,
-    pub satellite_key: String,
+    pub access_point_key: String,
     pub interface: String,
 }
 rpc_toolkit::reflect_ts!(AdoptResponse);
@@ -359,9 +362,10 @@ fn next_free_listen_port(cfgs: &Configs<'_>, base: u16) -> u16 {
         .unwrap_or(base)
 }
 
-/// The Core's tunnel address and listen port for `satellite`, if provisioned.
-fn existing_core_end(cfgs: &Configs<'_>, satellite: &str) -> Option<(String, u16)> {
-    let interface = crate::mgmt_tunnel::core_interface_name(satellite);
+/// The main router's tunnel address and listen port for one access point, if
+/// provisioned.
+fn existing_main_end(cfgs: &Configs<'_>, access_point: &str) -> Option<(String, u16)> {
+    let interface = crate::mgmt_tunnel::ap_interface_name(access_point);
     let wg = cfgs["network"]
         .sections
         .iter()
@@ -371,11 +375,11 @@ fn existing_core_end(cfgs: &Configs<'_>, satellite: &str) -> Option<(String, u16
     Some((addr, wg.listen_port?))
 }
 
-fn next_transit_index(registry: &[PairedSatellite]) -> u8 {
+fn next_transit_index(registry: &[AccessPoint]) -> u8 {
     registry
         .iter()
         .filter_map(|s| s.mgmt_address.parse::<std::net::Ipv4Addr>().ok())
-        .filter(|a| a.octets()[..2] == satellite::TRANSIT_BASE)
+        .filter(|a| a.octets()[..2] == access_points::TRANSIT_BASE)
         .map(|a| a.octets()[2])
         .max()
         .map_or(1, |n| n.saturating_add(1))
@@ -383,8 +387,8 @@ fn next_transit_index(registry: &[PairedSatellite]) -> u8 {
 
 #[instrument(skip_all)]
 pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse, Error> {
-    satellite::ensure_core()?;
-    let link = core_link()?;
+    access_points::ensure_main()?;
+    let link = main_link()?;
     let target = parse_candidate_address(&p.address)?;
     let iface = if_name(target.scope_id()).unwrap_or_default();
     {
@@ -398,47 +402,47 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
         }
     }
 
-    // D20: the country is the Core's and travels in the payload.
+    // D20: the country is the main router's and travels in the payload.
     if crate::wifi::get(ServerContext::default())
         .await
         .map(|w| w.country.is_none())
         .unwrap_or(false)
     {
         return Err(Error::new(
-            eyre!("set the Core's Wi-Fi country before adopting an access point"),
+            eyre!("set the main router's Wi-Fi country before adopting an access point"),
             ErrorKind::InvalidRequest,
         ));
     }
-    let registry_guard = satellite::REGISTRY_LOCK.lock().await;
-    let registry = satellite::load_registry();
+    let registry_guard = access_points::REGISTRY_LOCK.lock().await;
+    let registry = access_points::load_registry();
     // A same-name re-adoption keeps the tunnel's addresses and port.
     let existing = registry.iter().find(|s| s.name == p.name);
-    let (listen_port, core_existing) = {
+    let (listen_port, main_existing) = {
         let arena = Arena::new();
         let cfgs = parse_all("/etc/config", &arena, &["network"]).await?;
-        let current = existing.and_then(|_| existing_core_end(&cfgs, &p.name));
+        let current = existing.and_then(|_| existing_main_end(&cfgs, &p.name));
         let port = p
             .listen_port
             .or_else(|| current.as_ref().map(|c| c.1))
             .unwrap_or_else(|| next_free_listen_port(&cfgs, LISTEN_PORT_BASE));
         (port, current.map(|c| c.0))
     };
-    let (core_default, sat_default) = match (existing, core_existing) {
-        (Some(e), Some(core)) => (core, e.mgmt_address.clone()),
+    let (main_default, ap_default) = match (existing, main_existing) {
+        (Some(e), Some(addr)) => (addr, e.mgmt_address.clone()),
         _ => {
-            let (c, s) = satellite::transit_addrs(next_transit_index(&registry));
-            (c.to_string(), s.to_string())
+            let (m, a) = access_points::transit_addrs(next_transit_index(&registry));
+            (m.to_string(), a.to_string())
         }
     };
     let tunnel = TunnelSpec {
-        satellite: p.name.clone(),
-        core_listen_port: listen_port,
-        core_tunnel_addr: p.core_tunnel_addr.clone().unwrap_or(core_default),
-        satellite_tunnel_addr: p.satellite_tunnel_addr.clone().unwrap_or(sat_default),
+        access_point: p.name.clone(),
+        main_listen_port: listen_port,
+        main_tunnel_addr: p.main_tunnel_addr.clone().unwrap_or(main_default),
+        access_point_tunnel_addr: p.access_point_tunnel_addr.clone().unwrap_or(ap_default),
     };
 
-    let core_key = WgKey::generate();
-    let mut adopter = Adopter::new(Secret::new(p.secret), core_key.public_key());
+    let main_key = WgKey::generate();
+    let mut adopter = Adopter::new(Secret::new(p.secret), main_key.public_key());
     let (tx, rx) = oneshot::channel();
     link.pending.lock().unwrap().insert(target, tx);
     link.socket
@@ -481,7 +485,7 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
                 .send_to(&encode(&Message::Reject(r.clone())), target)
                 .await;
             crate::activity::log(
-                "satellite",
+                "access-point",
                 "adopt",
                 false,
                 &format!("Adoption of '{}' refused: {r}", p.name),
@@ -499,29 +503,28 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
         .await
         .with_kind(ErrorKind::Network)?;
 
-    let satellite_key = b64(adopted.satellite_key.as_bytes());
+    let access_point_key = b64(adopted.access_point_key.as_bytes());
     let preshared_key = b64(&adopted.preshared_key);
-    let core_private_key = b64(core_key.as_ref());
-    let core_addr = parse_ip(&tunnel.core_tunnel_addr)?;
-    let satellite_addr = parse_ip(&tunnel.satellite_tunnel_addr)?;
+    let main_private_key = b64(main_key.as_ref());
+    let main_addr = parse_ip(&tunnel.main_tunnel_addr)?;
+    let access_point_addr = parse_ip(&tunnel.access_point_tunnel_addr)?;
     {
         let arena = Arena::new();
         let mut cfgs = parse_all("/etc/config", &arena, &["network", "firewall", "system"]).await?;
-        crate::mgmt_tunnel::provision_core_end(
+        crate::mgmt_tunnel::provision_main_end(
             &mut cfgs,
             &arena,
-            &crate::mgmt_tunnel::CoreEnd {
-                satellite: &p.name,
-                core_addr,
-                satellite_addr,
-                satellite_public_key: &satellite_key,
+            &crate::mgmt_tunnel::MainEnd {
+                access_point: &p.name,
+                main_addr,
+                access_point_addr,
+                access_point_public_key: &access_point_key,
                 preshared_key: &preshared_key,
                 listen_port,
-                core_private_key: &core_private_key,
+                main_private_key: &main_private_key,
             },
         )?;
-        crate::mgmt_tunnel::ensure_core_ntp_server(&mut cfgs)?;
-        crate::update_reach::ensure_rules(&mut cfgs)?;
+        crate::mgmt_tunnel::ensure_main_ntp_server(&mut cfgs)?;
         dump_all("/etc/config", cfgs).await?;
     }
     for (service, action) in [
@@ -542,30 +545,30 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
         .find(|s| s.name == p.name)
         .map(|s| s.ports.clone())
         .unwrap_or_default();
-    satellite::remove_satellite(&mut registry, &p.name);
-    satellite::add_satellite(
+    access_points::remove_access_point(&mut registry, &p.name);
+    access_points::add_access_point(
         &mut registry,
-        PairedSatellite {
+        AccessPoint {
             name: p.name.clone(),
-            public_key: satellite_key.clone(),
-            mgmt_address: tunnel.satellite_tunnel_addr.clone(),
+            public_key: access_point_key.clone(),
+            mgmt_address: tunnel.access_point_tunnel_addr.clone(),
             ports: saved_ports,
             ..Default::default()
         },
     )?;
-    satellite::persist_registry(&registry).await?;
+    access_points::persist_registry(&registry).await?;
     drop(registry_guard);
     crate::activity::log(
-        "satellite",
+        "access-point",
         "adopt",
         true,
-        &format!("Adopted satellite '{}' on {iface}", p.name),
+        &format!("Adopted access point '{}' on {iface}", p.name),
         None,
     );
     Ok(AdoptResponse {
         name: p.name,
-        satellite_key,
-        interface: crate::mgmt_tunnel::core_interface_name(&tunnel.satellite),
+        access_point_key,
+        interface: crate::mgmt_tunnel::ap_interface_name(&tunnel.access_point),
     })
 }
 
@@ -574,7 +577,12 @@ pub async fn adopt(_ctx: ServerContext, p: AdoptParams) -> Result<AdoptResponse,
 struct CandidateState {
     code: Option<String>,
     has_sticker: bool,
+    device: String,
+    heard: Option<Instant>,
 }
+
+/// A main router announcing within this long ago is still there.
+const HEARD_FRESH: Duration = Duration::from_secs(15);
 
 static CANDIDATE: Mutex<Option<CandidateState>> = Mutex::new(None);
 
@@ -582,29 +590,74 @@ static CANDIDATE: Mutex<Option<CandidateState>> = Mutex::new(None);
 #[derive(Debug, Serialize, Deserialize, visit_rs::VisitFields)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeResponse {
-    /// Listening for a Core.
+    /// Listening for a main router.
     pub waiting: bool,
     /// The sticker Wi-Fi password is the secret; no code is shown.
     pub has_sticker: bool,
     pub code: Option<String>,
+    /// A main router announced itself on the port it listens on.
+    pub heard_main: bool,
+    /// A cable with a link is in that port.
+    pub link: bool,
+    /// The router has a default route.
+    pub internet: bool,
 }
 rpc_toolkit::reflect_ts!(CodeResponse);
 
 #[instrument(skip_all)]
 pub async fn code(_ctx: ServerContext) -> Result<CodeResponse, Error> {
-    let adopted = satellite::load_role().core_key.is_some();
-    Ok(match &*CANDIDATE.lock().unwrap() {
-        Some(s) if !adopted => CodeResponse {
+    let adopted = access_points::load_role().main_key.is_some();
+    let state = CANDIDATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|_| !adopted)
+        .map(|s| {
+            (
+                s.has_sticker,
+                s.code.clone(),
+                s.device.clone(),
+                s.heard.is_some_and(|t| t.elapsed() < HEARD_FRESH),
+            )
+        });
+    Ok(match state {
+        Some((has_sticker, code, device, heard_main)) => CodeResponse {
             waiting: true,
-            has_sticker: s.has_sticker,
-            code: s.code.clone(),
+            has_sticker,
+            code,
+            heard_main,
+            link: carrier(&device),
+            internet: default_route().await,
         },
-        _ => CodeResponse {
+        None => CodeResponse {
             waiting: false,
             has_sticker: false,
             code: None,
+            heard_main: false,
+            link: false,
+            internet: false,
         },
     })
+}
+
+fn carrier(device: &str) -> bool {
+    std::fs::read_to_string(format!("/sys/class/net/{device}/carrier"))
+        .is_ok_and(|c| c.trim() == "1")
+}
+
+async fn default_route() -> bool {
+    for family in ["-4", "-6"] {
+        let out = tokio::process::Command::new("ip")
+            .args([family, "route", "show", "default"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await;
+        if out.is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn wan_device(cfgs: &Configs<'_>) -> Option<String> {
@@ -693,12 +746,17 @@ async fn run_candidate() -> Result<(), Error> {
     let mut responder = Responder::new(secret, key.public_key());
     let mut guard = AttemptGuard::default();
     let present = Present {
-        satellite_key: b64(key.public_key().as_bytes()),
+        access_point_key: b64(key.public_key().as_bytes()),
         version: env!("CARGO_PKG_VERSION").to_string(),
         has_sticker,
     };
-    *CANDIDATE.lock().unwrap() = Some(CandidateState { code, has_sticker });
-    tracing::info!("adoption: waiting for a Core on {wan}, port {PORT}");
+    *CANDIDATE.lock().unwrap() = Some(CandidateState {
+        code,
+        has_sticker,
+        device: wan.clone(),
+        heard: None,
+    });
+    tracing::info!("adoption: waiting for a main router on {wan}, port {PORT}");
 
     let mut buf = vec![0u8; MAX_DATAGRAM];
     loop {
@@ -713,7 +771,12 @@ async fn run_candidate() -> Result<(), Error> {
         };
         let now = Instant::now();
         let reply = match msg {
-            Message::Announce => Message::Present(present.clone()),
+            Message::Announce => {
+                if let Some(s) = CANDIDATE.lock().unwrap().as_mut() {
+                    s.heard = Some(now);
+                }
+                Message::Present(present.clone())
+            }
             Message::Hello(h) => match responder.respond(&h, &mut guard, now) {
                 Ok(o) => Message::Offer(o),
                 Err(r) => Message::Reject(r),
@@ -724,12 +787,12 @@ async fn run_candidate() -> Result<(), Error> {
                     match adopt_self(&key, &by, src.ip()).await {
                         Ok(()) => {
                             crate::activity::log(
-                                "satellite",
+                                "access-point",
                                 "adopted",
                                 true,
                                 &format!(
-                                    "Adopted by the Core at {endpoint} as '{}'",
-                                    by.tunnel.satellite
+                                    "Adopted by the main router at {endpoint} as '{}'",
+                                    by.tunnel.access_point
                                 ),
                                 None,
                             );
@@ -739,7 +802,7 @@ async fn run_candidate() -> Result<(), Error> {
                         Err(e) => {
                             tracing::error!("adoption: provisioning after adoption failed: {e}");
                             crate::activity::log(
-                                "satellite",
+                                "access-point",
                                 "adopted",
                                 false,
                                 "Adoption succeeded but provisioning failed",
@@ -750,7 +813,7 @@ async fn run_candidate() -> Result<(), Error> {
                     }
                 }
                 Err(r) => {
-                    tracing::warn!("adoption: refused a Core at {}: {r}", src.ip());
+                    tracing::warn!("adoption: refused a main router at {}: {r}", src.ip());
                     Message::Reject(r)
                 }
             },
@@ -771,10 +834,10 @@ fn parse_ip(s: &str) -> Result<std::net::IpAddr, Error> {
     })
 }
 
-/// Becoming an access point: the uplink joins the bridge, the Core's
+/// Becoming an access point: the uplink joins the bridge, the main router's
 /// link-local endpoint is reached through the backhaul VLAN from here on, and
 /// the management tunnel dials it.
-async fn adopt_self(key: &WgKey, by: &proof::AdoptedBy, core_ip: &Ipv6Addr) -> Result<(), Error> {
+async fn adopt_self(key: &WgKey, by: &proof::AdoptedBy, main_ip: &Ipv6Addr) -> Result<(), Error> {
     let t = &by.tunnel;
     let endpoint;
     let uplink;
@@ -788,37 +851,37 @@ async fn adopt_self(key: &WgKey, by: &proof::AdoptedBy, core_ip: &Ipv6Addr) -> R
         .await?;
         // A released access point has no WAN; its uplink is on record.
         uplink = crate::ap::uplink_from_wan(&cfgs)
-            .or_else(|| satellite::load_role().uplink)
+            .or_else(|| access_points::load_role().uplink)
             .ok_or_else(|| Error::new(eyre!("no uplink port known"), ErrorKind::Network))?;
         crate::ap::write_base_layout(&mut cfgs, &uplink)?;
         let bridge = crate::ethernet::find_lan_bridge(&cfgs)?
             .map(|d| d.name)
             .unwrap_or_else(|| crate::ethernet::DEFAULT_LAN_BRIDGE.to_string());
-        endpoint = format!("{core_ip}%{}", backhaul_device(&bridge));
+        endpoint = format!("{main_ip}%{}", backhaul_device(&bridge));
         crate::mgmt_tunnel::provision_ap_end(
             &mut cfgs,
             &arena,
             &crate::mgmt_tunnel::ApEnd {
-                satellite_addr: parse_ip(&t.satellite_tunnel_addr)?,
-                core_addr: parse_ip(&t.core_tunnel_addr)?,
-                core_public_key: &b64(by.core_key.as_bytes()),
-                core_endpoint_host: &endpoint,
-                core_endpoint_port: t.core_listen_port,
+                access_point_addr: parse_ip(&t.access_point_tunnel_addr)?,
+                main_addr: parse_ip(&t.main_tunnel_addr)?,
+                main_public_key: &b64(by.main_key.as_bytes()),
+                main_endpoint_host: &endpoint,
+                main_endpoint_port: t.main_listen_port,
                 preshared_key: &b64(&by.preshared_key),
                 private_key: &b64(key.as_ref()),
             },
         )?;
         dump_all("/etc/config", cfgs).await?;
     }
-    let mut role = satellite::load_role();
-    role.role = RouterRole::Satellite;
-    role.core_endpoint = Some(endpoint);
-    role.core_key = Some(b64(by.core_key.as_bytes()));
-    role.core_address = Some(t.core_tunnel_addr.clone());
-    role.name = Some(t.satellite.clone());
+    let mut role = access_points::load_role();
+    role.role = RouterRole::AccessPoint;
+    role.main_endpoint = Some(endpoint);
+    role.main_key = Some(b64(by.main_key.as_bytes()));
+    role.main_address = Some(t.main_tunnel_addr.clone());
+    role.name = Some(t.access_point.clone());
     role.uplink = Some(uplink.clone());
     role.generation = 0;
-    satellite::persist_role(&role).await?;
+    access_points::persist_role(&role).await?;
     if let Err(e) = crate::bridge_filters::sync_ap(&uplink).await {
         tracing::error!("adoption: bridge filters not written: {e}");
     }
@@ -835,8 +898,8 @@ async fn adopt_self(key: &WgKey, by: &proof::AdoptedBy, core_ip: &Ipv6Addr) -> R
 mod tests {
     use super::*;
 
-    fn sat(addr: &str) -> PairedSatellite {
-        PairedSatellite {
+    fn ap(addr: &str) -> AccessPoint {
+        AccessPoint {
             name: "s".into(),
             public_key: "k".into(),
             mgmt_address: addr.into(),
@@ -847,9 +910,9 @@ mod tests {
     #[test]
     fn transit_index_follows_the_registry() {
         assert_eq!(next_transit_index(&[]), 1);
-        assert_eq!(next_transit_index(&[sat("10.42.1.2")]), 2);
-        assert_eq!(next_transit_index(&[sat("10.42.3.2"), sat("10.42.1.2")]), 4);
-        assert_eq!(next_transit_index(&[sat("192.168.130.2")]), 1);
+        assert_eq!(next_transit_index(&[ap("10.42.1.2")]), 2);
+        assert_eq!(next_transit_index(&[ap("10.42.3.2"), ap("10.42.1.2")]), 4);
+        assert_eq!(next_transit_index(&[ap("192.168.130.2")]), 1);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { Component, inject } from '@angular/core'
+import { Component, inject, signal } from '@angular/core'
 import {
   NonNullableFormBuilder,
   ReactiveFormsModule,
@@ -7,6 +7,7 @@ import {
 import { tuiMarkControlAsTouchedAndValidate } from '@taiga-ui/cdk'
 import {
   TuiButton,
+  TuiCheckbox,
   TuiDialogContext,
   TuiError,
   TuiIcon,
@@ -23,10 +24,9 @@ import { i18nPipe } from 'src/app/i18n/i18n.pipe'
 import { provideTranslatedValidationErrors } from 'src/app/i18n/validation-errors'
 import { AccessPointCandidate } from 'src/app/services/api/api.service'
 
-export interface AdoptResult {
-  name: string
-  secret: string
-}
+export type AdoptResult =
+  | { name: string; secret: string }
+  | { remove: string[] }
 
 export interface AdoptData {
   candidate: AccessPointCandidate
@@ -69,6 +69,30 @@ export interface AdoptData {
             </button>
           }
         </p>
+        <fieldset>
+          <legend>{{ 'Delete saved configurations' | i18n }}</legend>
+          @for (name of context.data.saved; track name) {
+            <label tuiLabel>
+              <input
+                type="checkbox"
+                tuiCheckbox
+                [checked]="selected().includes(name)"
+                (change)="toggle(name)"
+              />
+              {{ name }}
+            </label>
+          }
+          <button
+            tuiButton
+            type="button"
+            size="s"
+            appearance="secondary-destructive"
+            [disabled]="!selected().length"
+            (click)="context.completeWith({ remove: selected() })"
+          >
+            {{ 'Delete selected' | i18n }}
+          </button>
+        </fieldset>
       }
       <tui-textfield>
         <label tuiLabel>
@@ -122,6 +146,7 @@ export interface AdoptData {
     TuiIcon,
     TuiPassword,
     TuiButton,
+    TuiCheckbox,
     TuiLink,
     i18nPipe,
   ],
@@ -130,10 +155,18 @@ export class AdoptDialog {
   protected readonly context =
     injectContext<TuiDialogContext<AdoptResult, AdoptData>>()
 
+  protected readonly selected = signal<string[]>([])
+
   protected readonly form = inject(NonNullableFormBuilder).group({
     name: ['', [Validators.required, Validators.pattern(/^[a-z0-9-]{1,11}$/)]],
     secret: ['', Validators.required],
   })
+
+  toggle(name: string) {
+    this.selected.update(s =>
+      s.includes(name) ? s.filter(n => n !== name) : [...s, name],
+    )
+  }
 
   adopt() {
     tuiMarkControlAsTouchedAndValidate(this.form)

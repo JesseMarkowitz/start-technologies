@@ -2,6 +2,7 @@ pub mod error;
 pub mod invoke;
 pub mod prelude;
 
+pub mod access_points;
 pub mod activity;
 pub mod adoption;
 pub mod ap;
@@ -34,6 +35,7 @@ pub mod ipv6_tracker;
 pub mod lan;
 pub mod liveness;
 pub mod logs;
+pub mod loop_guard;
 pub mod luci_proxy;
 pub mod mgmt_tunnel;
 pub mod middleware;
@@ -43,7 +45,6 @@ pub mod progress;
 pub mod published_ports;
 pub mod recovery;
 pub mod registry;
-pub mod satellite;
 pub mod setup;
 pub mod sign;
 pub mod ssh_keys;
@@ -52,7 +53,6 @@ pub mod sync;
 pub mod system;
 pub mod uci;
 pub mod update;
-pub mod update_reach;
 pub mod utils;
 pub mod verify;
 pub mod vpn_client;
@@ -495,7 +495,7 @@ pub fn main_api<C: CtrlContext + Clone>() -> ParentHandler<C> {
         .subcommand("lan", lan::lan::<C>())
         .subcommand("published-ports", published_ports::published_ports::<C>())
         .subcommand("ssh-keys", ssh_keys::ssh_keys::<C>())
-        .subcommand("satellite", satellite::satellite::<C>())
+        .subcommand("access-point", access_points::access_point::<C>())
         .subcommand("activity", activity::activity::<C>())
         .subcommand("backup", backup::backup::<C>())
         .subcommand("diagnostics", diagnostics::diagnostics::<C>())
