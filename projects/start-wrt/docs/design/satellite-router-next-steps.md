@@ -231,7 +231,24 @@ in a network namespace on a veth port of the AP's bridge, on the same profile VL
 second namespace. The client leased from the Core every time; the rogue's offers and its NAKs of the
 Core's lease all landed on the guard's drop counter and none reached the client. With the guard
 table deleted the client still took the Core's offer, which arrived first, so the control shows the
-race and not a poisoning. Still not driven: a managed switch on the trunk.
+race and not a poisoning.
+
+**Bench record, 2026-10-21, managed switch.** An eight-port 802.1Q switch sits between the Core's
+trunk port and the AP: the backhaul VLAN untagged on both router ports with it as their PVID, Admin
+and every profile VLAN tagged on both, and each device port untagged in one profile's VLAN with that
+VLAN as its PVID. The switch refuses to take a port out of the VLAN its PVID names and turns the
+request into untagged membership instead, so a port is assigned by setting its PVID first and
+removing it from VLAN 1 after; the switch's own management address stays on VLAN 1, which is Admin.
+A laptop on a profile port leased from the Core in that profile, and the Devices list showed it as
+Ethernet with the right profile, following the cable from one profile port to another (the old
+entry lingers until its neighbour entry expires). A profile created on the Core while the switch was
+live reached the AP over sync, and its VLAN was then added on the switch. The gating check: the AP
+unplugged at the switch, the Core marked it out of contact and closed the trunk 62 s later, and the
+laptop on the switch lost the Core at that moment; the AP plugged back in, in contact 1 s after its
+tunnel returned, and the laptop back 2 s later. The switch's own loop prevention was off for the
+loop-guard runs. The consequence §21 predicts held: on a Core whose only LAN port is the trunk,
+every wired device on the switch loses the network whenever the AP is down, which is why a
+general-purpose switch trunk is a separate decision.
 
 ## Batch three — config sync (D5)
 

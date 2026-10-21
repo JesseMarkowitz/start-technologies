@@ -408,31 +408,138 @@ fn usable_block(
 }
 
 fn band_channels(iw: &str) -> BTreeMap<String, BandChannels> {
-    parse_iw_channels(iw)
+    blocks_from_iw(iw)
         .into_iter()
-        .map(|(band, channels)| {
+        .map(|(band, blocks)| {
             let mut result = BandChannels::default();
-            for &channel in channels.keys() {
-                let widths: Vec<u32> = WIDTHS
-                    .into_iter()
-                    .filter(|&w| usable_block(&channels, band, channel, w).is_some())
-                    .collect();
-                if !widths.is_empty() {
-                    result.channels.push(ApChannel { channel, widths });
+            for block in &blocks {
+                match result
+                    .channels
+                    .iter_mut()
+                    .find(|c| c.channel == block.primary)
+                {
+                    Some(c) => c.widths.push(block.width),
+                    None => result.channels.push(ApChannel {
+                        channel: block.primary,
+                        widths: vec![block.width],
+                    }),
                 }
             }
             result.auto_widths = WIDTHS
                 .into_iter()
-                .filter(|&w| {
-                    channels.keys().any(|&ch| {
-                        usable_block(&channels, band, ch, w)
-                            .is_some_and(|block| block.iter().all(|b| !channels[b].radar))
-                    })
-                })
+                .filter(|&w| blocks.iter().any(|b| b.width == w && !b.radar))
                 .collect();
-            (band.to_string(), result)
+            (band, result)
         })
         .collect()
+}
+
+/// A channel a radio can be planned on: its primary, width, the 20 MHz
+/// channels it occupies, and whether one of them needs radar detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelBlock {
+    pub band: String,
+    pub primary: u32,
+    pub width: u32,
+    pub channels: Vec<u32>,
+    pub radar: bool,
+}
+
+/// Every usable channel and width per band under the applied regulatory
+/// domain.
+pub(crate) async fn channel_blocks() -> Result<BTreeMap<String, Vec<ChannelBlock>>, Error> {
+    Ok(blocks_from_iw(&iw_channels().await?))
+}
+
+pub(crate) fn blocks_from_iw(iw: &str) -> BTreeMap<String, Vec<ChannelBlock>> {
+    let mut out = BTreeMap::new();
+    for (band, channels) in parse_iw_channels(iw) {
+        let mut blocks = Vec::new();
+        for &primary in channels.keys() {
+            for width in WIDTHS {
+                if let Some(block) = usable_block(&channels, band, primary, width) {
+                    blocks.push(ChannelBlock {
+                        band: band.to_string(),
+                        primary,
+                        width,
+                        radar: block.iter().any(|ch| channels[ch].radar),
+                        channels: block,
+                    });
+                }
+            }
+        }
+        out.insert(band.to_string(), blocks);
+    }
+    out
+}
+
+/// The block a radio occupies at a channel and width; none when the pair is
+/// not a valid bond.
+pub(crate) fn block_of(band: &str, primary: u32, width: u32) -> Option<ChannelBlock> {
+    Some(ChannelBlock {
+        band: band.to_string(),
+        primary,
+        width,
+        channels: bonded_channels(band, primary, width)?,
+        radar: false,
+    })
+}
+
+/// Centre frequency of a 20 MHz channel.
+pub(crate) fn channel_mhz(band: &str, channel: u32) -> Option<u32> {
+    match band {
+        "2g" if channel == 14 => Some(2484),
+        "2g" => Some(2407 + 5 * channel),
+        "5g" => Some(5000 + 5 * channel),
+        "6g" => Some(5950 + 5 * channel),
+        _ => None,
+    }
+}
+
+/// (band, channel, width) of every access-point interface on the air.
+pub(crate) async fn operating_channels() -> Vec<(String, u32, u32)> {
+    match tokio::process::Command::new("iw").arg("dev").output().await {
+        Ok(out) => parse_iw_dev(&String::from_utf8_lossy(&out.stdout)),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Reads the `channel 149 (5745 MHz), width: 80 MHz, …` line of each AP
+/// interface in `iw dev` output.
+fn parse_iw_dev(out: &str) -> Vec<(String, u32, u32)> {
+    let mut found = Vec::new();
+    let mut is_ap = false;
+    for line in out.lines().map(str::trim) {
+        if line.starts_with("Interface ") {
+            is_ap = false;
+        } else if line == "type AP" {
+            is_ap = true;
+        } else if let Some(rest) = line.strip_prefix("channel ").filter(|_| is_ap) {
+            let Some((channel, rest)) = rest.split_once(" (") else {
+                continue;
+            };
+            let Some((mhz, rest)) = rest.split_once(" MHz)") else {
+                continue;
+            };
+            let width = rest
+                .split_once("width: ")
+                .and_then(|(_, w)| w.split_once(' '))
+                .and_then(|(w, _)| w.parse().ok());
+            let (Ok(channel), Ok(mhz), Some(width)) =
+                (channel.parse::<u32>(), mhz.parse::<u64>(), width)
+            else {
+                continue;
+            };
+            let Some(band) = frequency_band(mhz) else {
+                continue;
+            };
+            let entry = (band.to_string(), channel, width);
+            if !found.contains(&entry) {
+                found.push(entry);
+            }
+        }
+    }
+    found
 }
 
 /// Splits an htmode into its PHY prefix and width: `HT40+` is (`HT`, 40).
@@ -2072,6 +2179,9 @@ fn windows_contain_now(windows: &[(String, String, [bool; 7])], day: usize, minu
         },
     )
 }
+
+#[cfg(test)]
+pub(crate) use tests::IW_CHANNELS_US;
 
 #[cfg(test)]
 mod tests {
@@ -3781,7 +3891,7 @@ config wifi-iface 'default_radio1'
     }
 
     /// `iw phy <phy> channels` on the K1 bench's MT7916 under US rules, trimmed.
-    const IW_CHANNELS_US: &str = "\
+    pub(crate) const IW_CHANNELS_US: &str = "\
 Band 1:
 \t* 2412 MHz [1] 
 \t  Maximum TX power: 17.0 dBm
@@ -3862,6 +3972,65 @@ Band 2:
             .iter()
             .map(|c| (c.channel, c.widths.clone()))
             .collect()
+    }
+
+    #[test]
+    fn blocks_carry_their_bonded_channels_and_radar() {
+        let blocks = blocks_from_iw(IW_CHANNELS_US);
+        let b5 = &blocks["5g"];
+        let at = |primary, width| {
+            b5.iter()
+                .find(|b| b.primary == primary && b.width == width)
+                .unwrap()
+        };
+        assert_eq!(at(36, 80).channels, [36, 40, 44, 48]);
+        assert!(!at(36, 80).radar);
+        assert_eq!(at(161, 80).channels, [149, 153, 157, 161]);
+        assert!(at(52, 80).radar);
+        assert_eq!(at(165, 20).channels, [165]);
+        // 165 at 40 MHz would bond 169, which is No IR.
+        assert!(!b5.iter().any(|b| b.primary == 165 && b.width == 40));
+        assert_eq!(at(36, 160).channels, [36, 40, 44, 48, 52, 56, 60, 64]);
+        assert!(at(36, 160).radar);
+        assert!(blocks["2g"].iter().all(|b| b.width <= 40 && !b.radar));
+    }
+
+    #[test]
+    fn iw_dev_reports_each_ap_interface_once() {
+        let out = "\
+phy#1
+\tInterface phy1-ap0-guest
+\t\tifindex 21
+\t\ttype AP
+\t\tchannel 149 (5745 MHz), width: 80 MHz, center1: 5775 MHz
+\tInterface phy1-ap0
+\t\ttype AP
+\t\tchannel 149 (5745 MHz), width: 80 MHz, center1: 5775 MHz
+phy#0
+\tInterface phy0-ap0
+\t\ttype AP
+\t\tchannel 6 (2437 MHz), width: 20 MHz (no HT), center1: 2437 MHz
+\tInterface phy0-sta0
+\t\ttype managed
+\t\tchannel 11 (2462 MHz), width: 20 MHz, center1: 2462 MHz
+\tInterface phy0-ap1
+\t\ttype AP
+";
+        assert_eq!(
+            parse_iw_dev(out),
+            [("5g".to_string(), 149, 80), ("2g".to_string(), 6, 20)]
+        );
+    }
+
+    #[test]
+    fn channel_centres_follow_each_band() {
+        assert_eq!(channel_mhz("2g", 1), Some(2412));
+        assert_eq!(channel_mhz("2g", 14), Some(2484));
+        assert_eq!(channel_mhz("5g", 36), Some(5180));
+        assert_eq!(channel_mhz("6g", 1), Some(5955));
+        assert_eq!(channel_mhz("60g", 1), None);
+        assert_eq!(block_of("5g", 36, 80).unwrap().channels, [36, 40, 44, 48]);
+        assert!(block_of("5g", 38, 80).is_none());
     }
 
     #[test]

@@ -2128,9 +2128,10 @@ struct InjectedDnsRecord {
 
 Router **role**, the main router's **access-point registry**, adoption, and the sync payload an
 access point applies. A StartWRT router can be configured as a StartWRT-AP (the role is a setting,
-not a different product). See `docs/design/satellite-router.md` (D25): an access point is thin,
-on a tagged trunk from the main router, with one WireGuard management tunnel. A trunk port is set
-on the Ethernet page (`ethernet.set` with `trunk: true`, §6).
+not a different product). See `docs/design/satellite-router.md` (D25): an access point is thin and
+holds nothing the main router has not pushed, on a tagged trunk from the main router, with one
+WireGuard management tunnel. A trunk port is set on the Ethernet page (`ethernet.set` with
+`trunk: true`, §6).
 
 The daemon keeps both ends honest (D18): the main router passes profile VLANs on a trunk port only
 while an adopted access point's tunnel is receiving traffic through it (a bridge-family
@@ -2143,12 +2144,14 @@ not that WireGuard's keepalive scheduling fell silent on one side.
 **Config sync (D5, D20).** Every 5 s the main router rebuilds each access point's payload from its own
 Wi-Fi settings (SSID, country, every password with the VLAN of its profile), its profiles, the
 port assignments set with `access-point.set-ports`, a channel plan for the access point's reported
-radios (2.4 GHz channels 1/6/11 at HE20, 5 GHz 36–48 at HE80, the least used across the main router
-and every access point; a dual-band phy takes 2.4 GHz first). A digest of all payloads decides whether the generation advances (`/etc/startwrt/sync.json`), so a
+radios (from the channels and widths the country allows: the widest block clear of the main router's
+radios and of every access point planned before it, narrower before shared, never a radar-detection
+channel; 2.4 GHz at 20 MHz, 5 GHz up to 80; a dual-band phy takes 2.4 GHz first). A digest of all payloads decides whether the generation advances (`/etc/startwrt/sync.json`), so a
 change anywhere reaches every live access point within seconds with no hook in the code that
-made it. An access point behind the current generation is pushed to over the tunnel; one that
-fails is retried after 30 s. An access point that is dark reopens only once it has applied the
-main router's current generation (D18).
+made it. An access point behind the current generation is pushed to over the tunnel. A push whose
+request fails is confirmed by the access point's next status report if it applied the payload
+anyway; otherwise it is reported as failed and retried after 30 s. An access point that is dark
+reopens only once it has applied the main router's current generation (D18).
 
 **Tunnel API.** An adopted access point serves JSON-RPC at `http://<its tunnel address>:8720/rpc`
 and answers only the main router's tunnel address. Methods: `apply` (params: a `SyncSnapshot`; refuses a

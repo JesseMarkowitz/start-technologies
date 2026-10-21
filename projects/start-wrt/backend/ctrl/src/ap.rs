@@ -1,9 +1,11 @@
 //! What an access point writes to its own configs (design D25).
 //!
 //! An access point bridges its uplink, its Wi-Fi passwords and its access ports
-//! onto the main router's profile VLANs and routes nothing. The base layout is
-//! written at adoption; the sync payload adds profiles, passwords and port
-//! assignments.
+//! onto the main router's profile VLANs and routes nothing. It holds no setting
+//! of its own: the base layout is written at adoption, and every profile,
+//! password, port assignment, country and channel is the main router's last
+//! payload. An interface, VLAN or Wi-Fi network the payload did not name is
+//! removed on apply.
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -22,7 +23,7 @@ use crate::access_points::{
 use crate::ap::ADMIN_VLAN;
 use crate::prelude::*;
 use crate::profiles::ProfileId;
-use crate::wifi::Wifi;
+use crate::wifi::{ChannelBlock, Wifi};
 use crate::ServerContext;
 
 const STATE_PATH: &str = "/etc/startwrt/sync.json";
@@ -56,6 +57,10 @@ async fn save_state(state: &State) -> Result<(), Error> {
 pub struct Inputs {
     pub wifi: Wifi<ProfileId>,
     pub profiles: Vec<ProfileId>,
+    /// What the regulatory domain allows, per band.
+    pub blocks: BTreeMap<String, Vec<ChannelBlock>>,
+    /// (band, channel, width) of the main router's radios on the air.
+    pub operating: Vec<(String, u32, u32)>,
 }
 
 async fn gather() -> Result<Inputs, Error> {
@@ -66,30 +71,84 @@ async fn gather() -> Result<Inputs, Error> {
         let cfgs = uciedit::parse_all("/etc/config", &arena, &["startwrt"]).await?;
         crate::profiles::list_config(ctx, &cfgs)?
     };
-    Ok(Inputs { wifi, profiles })
+    let bands = wifi
+        .radios
+        .values()
+        .filter(|r| r.enabled)
+        .map(|r| r.band.clone())
+        .collect();
+    let operating = remember_operating(crate::wifi::operating_channels().await, &bands);
+    let blocks = regulatory_blocks(wifi.country.as_deref()).await?;
+    Ok(Inputs {
+        wifi,
+        profiles,
+        blocks,
+        operating,
+    })
 }
 
 // ── Channel plan (D20) ──────────────────────────────────────────────────────
 
-const CHANNELS_2G: [u32; 3] = [1, 6, 11];
-const CHANNELS_5G: [u32; 4] = [36, 40, 44, 48];
-
-fn band_channel(band: &str) -> Option<(&'static [u32], &'static str)> {
-    match band {
-        "2g" => Some((&CHANNELS_2G, "HE20")),
-        "5g" => Some((&CHANNELS_5G, "HE80")),
-        _ => None,
+/// The widest channel an access point's radio is planned at.
+fn planned_max_width(band: &str) -> u32 {
+    if band == "2g" {
+        20
+    } else {
+        80
     }
 }
 
-/// Picks a band and the least-used channel for each of an access point's
-/// radios. `taken` holds every (band, channel) already planned or in use on the
-/// main router and other access points. The first radio of a dual-band phy
-/// takes 2.4 GHz for reach; a second radio takes the other band.
-pub fn plan(radios: &[RadioInfo], taken: &[(String, u32)]) -> BTreeMap<String, RadioPlan> {
+/// The frequencies a block occupies; a 2.4 GHz channel is 22 MHz wide.
+fn span(block: &ChannelBlock) -> Option<(u32, u32)> {
+    let half = if block.band == "2g" { 11 } else { 10 };
+    let lo = crate::wifi::channel_mhz(&block.band, *block.channels.first()?)?;
+    let hi = crate::wifi::channel_mhz(&block.band, *block.channels.last()?)?;
+    Some((lo - half, hi + half))
+}
+
+fn overlaps(a: &ChannelBlock, b: &ChannelBlock) -> bool {
+    a.band == b.band
+        && matches!(
+            (span(a), span(b)),
+            (Some((al, ah)), Some((bl, bh))) if al < bh && bl < ah
+        )
+}
+
+/// The widest block clear of every taken one, else the least shared block at
+/// the widest width. A radar-detection channel is never chosen.
+fn choose(band: &str, blocks: &[ChannelBlock], taken: &[ChannelBlock]) -> Option<ChannelBlock> {
+    let allowed = |b: &&ChannelBlock| !b.radar && b.width <= planned_max_width(band);
+    let mut widths: Vec<u32> = blocks.iter().filter(allowed).map(|b| b.width).collect();
+    widths.sort_unstable_by(|a, b| b.cmp(a));
+    widths.dedup();
+    let at = |width: u32| {
+        blocks
+            .iter()
+            .filter(allowed)
+            .filter(move |b| b.width == width)
+    };
+    for &width in &widths {
+        if let Some(free) = at(width).find(|b| !taken.iter().any(|t| overlaps(b, t))) {
+            return Some(free.clone());
+        }
+    }
+    at(*widths.first()?)
+        .min_by_key(|b| taken.iter().filter(|t| overlaps(b, t)).count())
+        .cloned()
+}
+
+/// Picks a band, channel and width for each of an access point's radios.
+/// `blocks` is what the regulatory domain allows per band; `taken` is every
+/// block in use on the main router and on access points planned before this
+/// one, and gains this one's. The first radio of a dual-band phy takes 2.4 GHz
+/// for reach; a second radio takes the other band.
+pub fn plan(
+    radios: &[RadioInfo],
+    blocks: &BTreeMap<String, Vec<ChannelBlock>>,
+    taken: &mut Vec<ChannelBlock>,
+) -> BTreeMap<String, RadioPlan> {
     let mut out = BTreeMap::new();
     let mut used_bands: BTreeSet<&str> = BTreeSet::new();
-    let mut taken: Vec<(String, u32)> = taken.to_vec();
     for radio in radios {
         let band = ["2g", "5g", "6g"]
             .into_iter()
@@ -102,33 +161,78 @@ pub fn plan(radios: &[RadioInfo], taken: &[(String, u32)]) -> BTreeMap<String, R
                 })
             });
         let Some(band) = band else { continue };
-        let Some((channels, htmode)) = band_channel(band) else {
+        let Some(block) = blocks
+            .get(band)
+            .and_then(|options| choose(band, options, taken))
+        else {
             continue;
         };
         used_bands.insert(band);
-        let channel = *channels
-            .iter()
-            .min_by_key(|c| taken.iter().filter(|(b, ch)| b == band && ch == *c).count())
-            .expect("channel list is not empty");
-        taken.push((band.to_string(), channel));
         out.insert(
             radio.name.clone(),
             RadioPlan {
                 band: band.to_string(),
-                channel,
-                htmode: htmode.to_string(),
+                channel: block.primary,
+                htmode: format!("HE{}", block.width),
             },
         );
+        taken.push(block);
     }
     out
 }
 
-/// What the main router's own radios occupy.
-fn main_channels(wifi: &Wifi<ProfileId>) -> Vec<(String, u32)> {
-    wifi.radios
-        .values()
-        .filter(|r| r.enabled)
-        .filter_map(|r| Some((r.band.clone(), r.channel.parse().ok()?)))
+/// What the main router's own radios occupy: as seen on the air, else as
+/// configured.
+fn main_blocks(wifi: &Wifi<ProfileId>, operating: &[(String, u32, u32)]) -> Vec<ChannelBlock> {
+    let mut out: Vec<ChannelBlock> = operating
+        .iter()
+        .filter_map(|(band, channel, width)| crate::wifi::block_of(band, *channel, *width))
+        .collect();
+    for radio in wifi.radios.values().filter(|r| r.enabled) {
+        if out.iter().any(|b| b.band == radio.band) {
+            continue;
+        }
+        let Ok(channel) = radio.channel.parse() else {
+            continue;
+        };
+        if let Some(block) = crate::wifi::block_of(&radio.band, channel, radio.width.unwrap_or(20))
+        {
+            out.push(block);
+        }
+    }
+    out
+}
+
+/// The regulatory channel set changes only with the country.
+async fn regulatory_blocks(
+    country: Option<&str>,
+) -> Result<BTreeMap<String, Vec<ChannelBlock>>, Error> {
+    type Cached = Option<(Option<String>, BTreeMap<String, Vec<ChannelBlock>>)>;
+    static CACHE: Mutex<Cached> = Mutex::new(None);
+    if let Some((cached, blocks)) = &*CACHE.lock().unwrap() {
+        if cached.as_deref() == country {
+            return Ok(blocks.clone());
+        }
+    }
+    let blocks = crate::wifi::channel_blocks().await?;
+    *CACHE.lock().unwrap() = Some((country.map(str::to_string), blocks.clone()));
+    Ok(blocks)
+}
+
+/// A radio that is off keeps its last channel in the plan, so a blackout
+/// window moves no access point. `bands` are those with an enabled radio.
+fn remember_operating(
+    now: Vec<(String, u32, u32)>,
+    bands: &BTreeSet<String>,
+) -> Vec<(String, u32, u32)> {
+    static LAST: Mutex<BTreeMap<String, (u32, u32)>> = Mutex::new(BTreeMap::new());
+    let mut last = LAST.lock().unwrap();
+    last.retain(|band, _| bands.contains(band));
+    for (band, channel, width) in now {
+        last.insert(band, (channel, width));
+    }
+    last.iter()
+        .map(|(band, (channel, width))| (band.clone(), *channel, *width))
         .collect()
 }
 
@@ -189,18 +293,15 @@ pub fn build(
 
 /// Every access point's payload, generation 0, and a digest over all of them.
 fn build_all(inputs: &Inputs, registry: &[AccessPoint]) -> (Vec<SyncSnapshot>, String) {
-    let mut taken = main_channels(&inputs.wifi);
+    let mut taken = main_blocks(&inputs.wifi, &inputs.operating);
     let mut snapshots = Vec::new();
     let mut hasher = blake3::Hasher::new();
     for ap in registry {
         let radios = ap
             .inventory
             .as_ref()
-            .map(|i| plan(&i.radios, &taken))
+            .map(|i| plan(&i.radios, &inputs.blocks, &mut taken))
             .unwrap_or_default();
-        for p in radios.values() {
-            taken.push((p.band.clone(), p.channel));
-        }
         let snapshot = build(inputs, ap, radios, 0);
         hasher.update(ap.name.as_bytes());
         hasher.update(&serde_json::to_vec(&snapshot).expect("snapshot serializes"));
@@ -237,10 +338,71 @@ fn clear_stale_failure(ap: &mut AccessPoint) -> bool {
     stale
 }
 
+/// A push whose request failed; the access point may have applied it anyway.
+struct Unconfirmed {
+    generation: u64,
+    error: String,
+}
+
 /// Per-access-point push bookkeeping across ticks.
 #[derive(Default)]
 pub struct Pusher {
     last_attempt: BTreeMap<String, Instant>,
+    unconfirmed: BTreeMap<String, Unconfirmed>,
+}
+
+impl Pusher {
+    /// Whether the last attempt is still within the retry delay.
+    fn waiting(&self, name: &str, now: Instant) -> bool {
+        self.last_attempt
+            .get(name)
+            .is_some_and(|t| now.duration_since(*t) < RETRY_AFTER)
+    }
+
+    fn failed(&mut self, name: &str, generation: u64, error: String) {
+        self.unconfirmed
+            .insert(name.to_string(), Unconfirmed { generation, error });
+    }
+
+    fn succeeded(&mut self, name: &str) {
+        self.last_attempt.remove(name);
+        self.unconfirmed.remove(name);
+    }
+
+    /// The generation an unconfirmed push turns out to have delivered.
+    fn confirmed(&mut self, name: &str, applied: u64) -> Option<u64> {
+        let generation = self.unconfirmed.get(name)?.generation;
+        (applied >= generation).then(|| {
+            self.succeeded(name);
+            generation
+        })
+    }
+
+    /// An unconfirmed push, taken back to be reported as failed.
+    fn give_up(&mut self, name: &str) -> Option<Unconfirmed> {
+        self.unconfirmed.remove(name)
+    }
+}
+
+fn log_pushed(name: &str, generation: u64) {
+    crate::activity::log(
+        "access-point",
+        "synced",
+        true,
+        &format!("Pushed configuration generation {generation} to access point '{name}'"),
+        None,
+    );
+}
+
+fn log_unreached(name: &str, generation: u64, error: &str) {
+    tracing::warn!("sync: push to '{name}' failed: {error}");
+    crate::activity::log(
+        "access-point",
+        "synced",
+        false,
+        &format!("Configuration generation {generation} did not reach access point '{name}'"),
+        Some(error),
+    );
 }
 
 /// The current generation the main router announces, after this tick's rebuild.
@@ -318,6 +480,9 @@ pub async fn tick(
                 if clear_stale_failure(ap) {
                     changed = true;
                 }
+                if let Some(delivered) = pusher.confirmed(&ap.name, ap.generation_applied) {
+                    log_pushed(&ap.name, delivered);
+                }
                 if !reads(status.format) {
                     continue;
                 }
@@ -331,43 +496,24 @@ pub async fn tick(
             continue;
         }
         let now = Instant::now();
-        if pusher
-            .last_attempt
-            .get(&ap.name)
-            .is_some_and(|t| now.duration_since(*t) < RETRY_AFTER)
-        {
+        if pusher.waiting(&ap.name, now) {
             continue;
+        }
+        if let Some(lost) = pusher.give_up(&ap.name) {
+            log_unreached(&ap.name, lost.generation, &lost.error);
         }
         pusher.last_attempt.insert(ap.name.clone(), now);
         snapshot.generation = generation;
         match crate::control::push(addr, &snapshot).await {
             Ok(()) => {
-                pusher.last_attempt.remove(&ap.name);
+                pusher.succeeded(&ap.name);
                 ap.generation_applied = generation;
                 changed = true;
-                crate::activity::log(
-                    "access-point",
-                    "synced",
-                    true,
-                    &format!(
-                        "Pushed configuration generation {generation} to access point '{}'",
-                        ap.name
-                    ),
-                    None,
-                );
+                log_pushed(&ap.name, generation);
             }
             Err(e) => {
-                tracing::warn!("sync: push to '{}' failed: {e}", ap.name);
-                crate::activity::log(
-                    "access-point",
-                    "synced",
-                    false,
-                    &format!(
-                        "Configuration generation {generation} did not reach access point '{}'",
-                        ap.name
-                    ),
-                    Some(&e.to_string()),
-                );
+                tracing::debug!("sync: push to '{}' unconfirmed: {e}", ap.name);
+                pusher.failed(&ap.name, generation, e.to_string());
             }
         }
     }
@@ -424,23 +570,140 @@ mod tests {
         assert!(!clear_stale_failure(&mut s));
     }
 
+    fn us_blocks() -> BTreeMap<String, Vec<ChannelBlock>> {
+        crate::wifi::blocks_from_iw(crate::wifi::IW_CHANNELS_US)
+    }
+
+    fn block(band: &str, primary: u32, width: u32) -> ChannelBlock {
+        crate::wifi::block_of(band, primary, width).unwrap()
+    }
+
+    fn pick(p: &BTreeMap<String, RadioPlan>, radio: &str) -> (u32, String) {
+        (p[radio].channel, p[radio].htmode.clone())
+    }
+
     #[test]
-    fn plan_spreads_bands_and_avoids_taken_channels() {
-        let taken = vec![("2g".to_string(), 1), ("5g".to_string(), 36)];
+    fn plan_takes_a_free_block_before_sharing_one() {
+        let blocks = us_blocks();
+        // The main router: 2.4 GHz channel 1, 5 GHz 36 at 80 MHz (36–48).
+        let mut taken = vec![block("2g", 1, 20), block("5g", 36, 80)];
         let p = plan(
             &[radio("radio0", &["2g"]), radio("radio1", &["5g"])],
-            &taken,
+            &blocks,
+            &mut taken,
         );
-        assert_eq!((p["radio0"].band.as_str(), p["radio0"].channel), ("2g", 6));
-        assert_eq!((p["radio1"].band.as_str(), p["radio1"].channel), ("5g", 40));
-        assert_eq!(p["radio1"].htmode, "HE80");
-        // One dual-band phy takes 2.4 GHz; a second radio on it takes 5 GHz.
-        let p = plan(&[radio("radio0", &["2g", "5g"])], &[]);
+        assert_eq!(pick(&p, "radio0"), (7, "HE20".into()));
+        assert_eq!(pick(&p, "radio1"), (149, "HE80".into()));
+        assert_eq!(taken.len(), 4);
+        // No 80 or 40 MHz block is clear of 36–48 and 149–161; 165 at 20 MHz is.
+        let p = plan(&[radio("r", &["5g"])], &blocks, &mut taken);
+        assert_eq!(pick(&p, "r"), (165, "HE20".into()));
+        // Nothing is clear at any width: the least shared 80 MHz block, lowest first.
+        let p = plan(&[radio("r", &["5g"])], &blocks, &mut taken);
+        assert_eq!(pick(&p, "r"), (36, "HE80".into()));
+    }
+
+    #[test]
+    fn plan_narrows_rather_than_share_and_skips_radar() {
+        let blocks = us_blocks();
+        // 52–64 is clear at 80 MHz but needs radar detection; 44–48 is clear at 40.
+        let mut taken = vec![block("5g", 36, 40), block("5g", 149, 80)];
+        let p = plan(&[radio("r", &["5g"])], &blocks, &mut taken);
+        assert_eq!(pick(&p, "r"), (44, "HE40".into()));
+    }
+
+    #[test]
+    fn plan_spreads_a_dual_band_phy_and_skips_unknown_bands() {
+        let blocks = us_blocks();
+        let p = plan(&[radio("radio0", &["2g", "5g"])], &blocks, &mut vec![]);
         assert_eq!(p["radio0"].band, "2g");
-        let p = plan(&[radio("a", &["2g", "5g"]), radio("b", &["2g", "5g"])], &[]);
+        let p = plan(
+            &[radio("a", &["2g", "5g"]), radio("b", &["2g", "5g"])],
+            &blocks,
+            &mut vec![],
+        );
         assert_eq!((p["a"].band.as_str(), p["b"].band.as_str()), ("2g", "5g"));
-        // A radio with no known band gets no plan.
-        assert!(plan(&[radio("x", &[])], &[]).is_empty());
+        assert!(plan(&[radio("x", &[])], &blocks, &mut vec![]).is_empty());
+        assert!(plan(&[radio("x", &["6g"])], &blocks, &mut vec![]).is_empty());
+    }
+
+    #[test]
+    fn two_point_four_ghz_plans_on_non_overlapping_channels() {
+        let iw: String = std::iter::once("Band 1:\n".to_string())
+            .chain((1..=11).map(|ch| {
+                format!(
+                    "\t* {} MHz [{ch}] \n\t  Channel widths: 20MHz\n",
+                    2407 + 5 * ch
+                )
+            }))
+            .collect();
+        let blocks = crate::wifi::blocks_from_iw(&iw);
+        let mut taken = Vec::new();
+        let picks: Vec<u32> = (0..4)
+            .map(|i| {
+                let name = format!("r{i}");
+                plan(&[radio(&name, &["2g"])], &blocks, &mut taken)[&name].channel
+            })
+            .collect();
+        assert_eq!(picks, [1, 6, 11, 1]);
+    }
+
+    #[test]
+    fn main_router_blocks_prefer_what_is_on_the_air() {
+        let mut wifi = inputs().wifi;
+        wifi.radios.insert(
+            "radio1".into(),
+            WifiRadio {
+                band: "5g".into(),
+                channel: "auto".into(),
+                width: Some(80),
+                enabled: true,
+                broadcast: true,
+            },
+        );
+        let seen = |blocks: Vec<ChannelBlock>| {
+            blocks
+                .iter()
+                .map(|b| (b.band.clone(), b.primary, b.width))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            seen(main_blocks(&wifi, &[("5g".into(), 149, 80)])),
+            [("5g".into(), 149, 80), ("2g".into(), 1, 20)]
+        );
+        // A radio on automatic selection that is not on the air occupies nothing.
+        assert_eq!(
+            seen(main_blocks(&wifi, &[("2g".into(), 6, 20)])),
+            [("2g".into(), 6, 20)]
+        );
+    }
+
+    #[test]
+    fn a_radio_that_is_off_keeps_its_last_channel() {
+        let bands: BTreeSet<String> = ["2g", "5g"].into_iter().map(String::from).collect();
+        let seen = vec![("5g".to_string(), 149, 80)];
+        assert_eq!(remember_operating(seen.clone(), &bands), seen);
+        assert_eq!(remember_operating(vec![], &bands), seen);
+        let only_2g: BTreeSet<String> = ["2g".to_string()].into();
+        assert!(remember_operating(vec![], &only_2g).is_empty());
+    }
+
+    #[test]
+    fn a_failed_push_is_confirmed_by_status_or_given_up_after_the_delay() {
+        let mut p = Pusher::default();
+        let t0 = Instant::now();
+        p.last_attempt.insert("s1".into(), t0);
+        p.failed("s1", 7, "timeout".into());
+        assert!(p.waiting("s1", t0 + Duration::from_secs(5)));
+        assert_eq!(p.confirmed("s1", 6), None);
+        assert_eq!(p.confirmed("s1", 7), Some(7));
+        assert!(!p.waiting("s1", t0 + Duration::from_secs(5)));
+        assert!(p.give_up("s1").is_none());
+        p.last_attempt.insert("s1".into(), t0);
+        p.failed("s1", 8, "timeout".into());
+        assert!(!p.waiting("s1", t0 + RETRY_AFTER));
+        let lost = p.give_up("s1").unwrap();
+        assert_eq!((lost.generation, lost.error.as_str()), (8, "timeout"));
     }
 
     fn inputs() -> Inputs {
@@ -490,6 +753,8 @@ mod tests {
                 passwords,
             },
             profiles: vec![admin, guest],
+            blocks: us_blocks(),
+            operating: Vec::new(),
         }
     }
 
@@ -539,11 +804,11 @@ mod tests {
             ]
         );
         assert_eq!(s.ports, BTreeMap::from([("eth0".to_string(), Some(101))]));
-        // The main router sits on 2.4 GHz channel 1, so the access point gets
-        // channel 6.
+        // The main router sits on 2.4 GHz channel 1; 7 is the first channel in
+        // the fixture clear of it.
         assert_eq!(
             (s.radios["radio0"].band.as_str(), s.radios["radio0"].channel),
-            ("2g", 6)
+            ("2g", 7)
         );
         assert_eq!(digest.len(), 64);
         // Same inputs, same digest; a changed password, a new one.

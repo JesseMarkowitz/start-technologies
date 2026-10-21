@@ -775,6 +775,18 @@ Core decides a channel and a width, and pushes them in the payload as `radios` (
 channel, `htmode`). Once a Core has a satellite, its own radios are planned by the same planner
 instead of by hostapd; a Core with none behaves exactly as today.
 
+**As built (2026-10-21).** The planner (`sync.rs`) takes its candidates from the regulatory data
+`wifi.regulatory` already derives for the UI — every channel and width the applied country allows,
+with the 20 MHz channels each bonds and whether any needs radar detection — and compares blocks in
+MHz, a 2.4 GHz channel counting as 22 MHz wide. For each AP radio it takes the widest block clear
+of everything taken (the Core's radios and the APs planned before it), narrows before it shares,
+never chooses a radar channel, and shares the least-used block at the widest width only when
+nothing is clear. 2.4 GHz is planned at 20 MHz, the other bands at up to 80. The Core's own radios
+are not planned: their channels are read off the air (`iw dev`), which is what a radio on automatic
+selection actually sits on, with the configured channel as the fallback and the last seen channel
+kept while a radio is off for a blackout. Scans, pins and the on-request re-plan above are not
+built; the plan is recomputed every tick and changes only when its inputs do.
+
 - **Inputs.** Each satellite reports its radio inventory at pairing (names, bands, the widths it
   supports) and scan results on request: the networks it hears on each channel and their signal,
   and each channel's busy time. The scans include the other StartWRT routers, which tells the Core
@@ -1085,6 +1097,16 @@ the role keeps that name until Start9 settles one. This also settles D14: one pr
 broadcast domain again, so mDNS, SSDP and `.local` names work across every AP, and a device keeps
 its address when it roams between them.
 
+**Zero-knowledge access point.** An AP knows nothing the Core has not pushed. It has no country,
+channel, password or profile of its own; every setting on it is a projection of the last payload it
+applied, and applying a payload removes any interface, VLAN or Wi-Fi network the payload did not
+name (`ap.rs`). Its own page is read-only and points at the Core. Cut off from its Core it goes dark
+(D18), offers recovery (D22) and, factory-reset, waits to be adopted again. The one thing it keeps
+of its own is what it needs to reach the Core at all: its role, its uplink, its tunnel key and the
+Core's key, written at adoption. This is deliberately stricter than StartWRT's rule for a main
+router, which keeps configuration it does not recognise (#3678): on an AP there is nothing to
+recognise.
+
 **The trunk.**
 
 - The Core port D19 dedicates to satellites becomes a trunk. Every profile's VLAN crosses it
@@ -1115,8 +1137,8 @@ and its port closes, so a laptop on that cable reaches nothing, as D19 intends.
   matter, outside this design. MACsec on the trunk would close it and is deferred.
 - **A managed switch on the trunk (accepted 2026-10-18).** Until hardware with more ports exists, a
   managed switch can sit between the Core's trunk port and an AP and give wired devices profile
-  VLANs on its own ports. Traced through the gating rule (nothing is built yet; the bench confirms
-  it once it is), this is what those devices see:
+  VLANs on its own ports. Traced through the gating rule and confirmed on the bench on 2026-10-21
+  (next-steps, batch two), this is what those devices see:
   - The Core cannot tell an AP behind a switch from devices beside it, and its port keeps link
     while the switch has power. It gates on the AP's tunnel, never on link.
   - When the AP stops — unplugged, powered off, rebooting or failed — the Core closes the port

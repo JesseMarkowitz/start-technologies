@@ -166,6 +166,8 @@ The binary is self-contained — the web UI is embedded via `include_dir`. Facto
 
 6. **Single binary.** `startwrt` is symlinked as `startwrt-ctrld` (daemon) and `startwrt-cli` (CLI). Both share handler code via the `CtrlContext` trait.
 
+7. **Thin access points.** A second StartWRT router adopted by a main router becomes an access point: it bridges its Wi-Fi passwords and ports onto the main router's profile VLANs over a tagged trunk and routes nothing. It holds no setting of its own — everything it runs is the main router's last payload, pushed over a WireGuard management tunnel — and it goes dark when that tunnel is lost. See `docs/design/satellite-router.md` (D25) and `API_CONTRACT.md` §18.
+
 ## Further Reading
 
 - [backend/ARCHITECTURE.md](backend/ARCHITECTURE.md) — Rust backend internals
