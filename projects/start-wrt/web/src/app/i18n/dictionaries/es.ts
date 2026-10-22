@@ -554,4 +554,9 @@ export default {
   582: 'Resolutores a los que acceden a través del túnel los perfiles que usan esta VPN sin DNS propio. Sepárelos con comas.',
   583: 'Introduzca direcciones IP separadas por comas',
   580: 'Sistema (fuera de la VPN)',
+  585: 'Switch gestionado',
+  586: 'Conectar un switch gestionado',
+  587: 'Cada perfil de seguridad se envía a este puerto como una VLAN etiquetada, y el switch decide a qué perfil pertenece cada uno de sus propios puertos. Cualquiera que pueda iniciar sesión en el switch puede acceder a todos los perfiles, así que proteja su contraseña y termine de configurar sus VLAN antes de conectarlo.',
+  588: 'Confiar en este switch',
+  589: 'IDs de VLAN',
 } satisfies i18n

@@ -62,6 +62,7 @@ pub enum ErrorKind {
     SubnetCollision = 1024,
     PublishedPortsUseIpv6 = 1025,
     VpnDisabled = 1026,
+    InvalidTrunkPort = 1027,
 }
 
 impl From<ErrorKind> for startos::ErrorKind {
@@ -124,6 +125,7 @@ impl ErrorKind {
             SubnetCollision => "Subnet Collision",
             PublishedPortsUseIpv6 => "Published Ports Use IPv6",
             VpnDisabled => "Outbound VPN Disabled",
+            InvalidTrunkPort => "Invalid Trunk Port",
         }
     }
 }

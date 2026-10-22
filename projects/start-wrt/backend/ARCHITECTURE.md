@@ -151,7 +151,11 @@ Creates `WifiStation` (password entries) and `WifiVlan` (VLAN mapping) sections 
 
 ### ethernet.rs — Ethernet Port Assignment
 
-Maps physical ports to profiles via bridge VLAN assignments on the LAN bridge (`br-lan`). Also manages WAN port designation (which port is the uplink). Reads/writes `NetworkBridgeVlan` and `NetworkVlanPort` in the `network` UCI config.
+Maps physical ports to profiles via bridge VLAN assignments on the LAN bridge (`br-lan`). Also manages WAN port designation (which port is the uplink). Reads/writes `NetworkBridgeVlan` and `NetworkVlanPort` in the `network` UCI config. A port can instead be a trunk, tagged in every profile's VLAN for a managed switch downstream.
+
+### trunk.rs — Trunk Ports
+
+Recognises a trunk (a port whose every VLAN membership is tagged) and builds a port's membership in a profile's VLAN. Shared by `ethernet.rs`, which reads and writes trunks, and `profiles.rs`, which tags trunks into each new profile's VLAN.
 
 ### vpn_server.rs / vpn_client.rs — VPN Management
 
@@ -299,7 +303,7 @@ Shared, OpenWrt-native typed sections live in `uciedit/src/openwrt.rs`; feature-
 - Infrastructure errors: `MissingLanBridge`, `MissingWanInterface`, `MissingLanInterface`, `MissingFirewallZone`
 - WiFi errors: `CorruptedWifi`, `UnnamedWirelessInterface`, `UnnamedWirelessDevice`
 - VPN errors: `VpnHasDependents`, `VpnChainCycle`, `VpnPeersWouldBreak`, `MissingDeviceAddress`
-- Validation: `InvalidValue`, `WanPortWithProfile`, `DhcpStaticHostsInSubnet`, `SubnetCollision`
+- Validation: `InvalidValue`, `WanPortWithProfile`, `InvalidTrunkPort`, `DhcpStaticHostsInSubnet`, `SubnetCollision`
 - UCI shell-out: `UciEdit` (failed `uci` CLI invocation)
 
 An RPC error carries its `ErrorKind` value as `code` and the kind's name as `message`. Code 34 (authorization) triggers frontend logout.

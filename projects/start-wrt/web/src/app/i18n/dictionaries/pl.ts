@@ -554,4 +554,9 @@ export default {
   582: 'Serwery, z którymi profile korzystające z tej sieci VPN bez własnego DNS łączą się przez tunel. Oddziel przecinkami.',
   583: 'Wprowadź adresy IP oddzielone przecinkami',
   580: 'System (poza VPN)',
+  585: 'Przełącznik zarządzalny',
+  586: 'Podłącz przełącznik zarządzalny',
+  587: 'Każdy profil bezpieczeństwa jest wysyłany na ten port jako tagowany VLAN, a przełącznik decyduje, do którego profilu należy każdy z jego własnych portów. Każdy, kto może zalogować się do przełącznika, ma dostęp do wszystkich profili, dlatego chroń jego hasło i dokończ konfigurację VLAN, zanim go podłączysz.',
+  588: 'Zaufaj temu przełącznikowi',
+  589: 'Identyfikatory VLAN',
 } satisfies i18n

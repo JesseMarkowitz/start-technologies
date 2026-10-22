@@ -1,0 +1,1 @@
+- An Ethernet port can be set to "Managed switch": it carries every security profile as a tagged VLAN, so a managed switch behind it can put each of its own ports on a different profile. The Ethernet page lists each profile's VLAN ID under such a port. Devices behind the switch still appear in the Devices list under the profile they land in.

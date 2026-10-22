@@ -554,4 +554,9 @@ export default {
   582: 'Résolveurs joints via le tunnel par les profils utilisant ce VPN sans DNS propre. Séparez-les par des virgules.',
   583: 'Saisissez des adresses IP séparées par des virgules',
   580: 'Système (hors VPN)',
+  585: 'Switch administrable',
+  586: 'Connecter un switch administrable',
+  587: 'Chaque profil de sécurité est envoyé à ce port sous forme de VLAN étiqueté, et le switch décide à quel profil appartient chacun de ses propres ports. Quiconque peut se connecter au switch peut atteindre tous les profils : protégez son mot de passe et terminez la configuration de ses VLAN avant de le brancher.',
+  588: 'Faire confiance à ce switch',
+  589: 'ID de VLAN',
 } satisfies i18n

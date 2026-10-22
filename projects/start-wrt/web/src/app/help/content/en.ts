@@ -57,6 +57,10 @@ The physical Ethernet port identifier (e.g., eth0, eth1).
 
 The default security profile assigned to devices connected via the specified Ethernet port.
 
+### Managed switch
+
+Instead of a profile, a port can feed a managed switch. The port then carries every security profile as a tagged VLAN, and the switch's own configuration decides which profile each of its ports belongs to, so the switch and whoever administers it are trusted. The VLAN ID of each profile is listed under the port; Admin is always VLAN 1. Traffic that reaches the port without a VLAN tag gets no access.
+
 ### WAN
 
 The Wide Area Network (WAN) port connects to your ISP modem or upstream network. Only one Ethernet port can be designated as WAN at a time.

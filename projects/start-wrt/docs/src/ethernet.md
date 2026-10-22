@@ -1,6 +1,6 @@
 # Ethernet
 
-Each physical Ethernet port on the StartWRT router maps to a [Security Profile](security-profiles.md). The port a device plugs into determines its profile — no manual configuration is needed on the device itself.
+Each physical Ethernet port on the StartWRT router maps to a [Security Profile](security-profiles.md). The port a device plugs into determines its profile — no manual configuration is needed on the device itself. A port can instead feed a [managed switch](managed-switch.md), which then assigns a profile to each of its own ports.
 
 ## How It Works
 
@@ -16,7 +16,7 @@ One Ethernet port is designated as the WAN port, which connects to your ISP mode
 
 1. Navigate to `Points of Entry > Ethernet`.
 
-1. For each non-WAN port, select the desired Security Profile from the dropdown. There is no separate save step — the change is applied as soon as you select a profile.
+1. For each non-WAN port, select the desired Security Profile from the dropdown. There is no separate save step — the change is applied as soon as you select a profile. The last entry, **Managed switch**, hands the choice of profile to a switch connected to that port; see [Connecting a Managed Switch](managed-switch.md).
 
 1. If reassigning the port would break any [Published Ports](published-ports.md) rules (the devices on that port move to a new subnet), a confirmation dialog lists the affected rules first. Nothing is applied until you confirm; canceling leaves the port unchanged.
 
@@ -24,7 +24,7 @@ One Ethernet port is designated as the WAN port, which connects to your ISP mode
 > Changes take effect immediately. A device currently plugged into a port will be reassigned to the new profile without needing to unplug and replug.
 
 > [!NOTE]
-> If you connect a network switch to an Ethernet port, all devices on that switch share the same Security Profile. StartWRT cannot differentiate between devices beyond its onboard Ethernet ports. Those devices still appear individually in the [Devices](devices.md) list — including hosts with static IPs or only IPv6 addresses — because the router learns them from the bridge forwarding table even without a DHCP lease.
+> If you connect an ordinary (unmanaged) switch to an Ethernet port, all devices on that switch share the port's Security Profile: StartWRT cannot differentiate between devices beyond its onboard Ethernet ports. Those devices still appear individually in the [Devices](devices.md) list — including hosts with static IPs or only IPv6 addresses — because the router learns them from the bridge forwarding table even without a DHCP lease. To give devices behind a switch different profiles, use a [managed switch](managed-switch.md).
 
 ## Changing the WAN Port
 
@@ -43,9 +43,10 @@ If you need to use a different physical port for your ISP connection:
 
 ## Example
 
-| Port   | Profile | Use Case                                           |
-| ------ | ------- | -------------------------------------------------- |
-| Port 1 | _(WAN)_ | Connected to ISP modem                             |
-| Port 2 | Admin   | Desktop computer with full LAN and Internet access |
-| Port 3 | Admin   | StartOS server with full LAN and Internet access   |
-| Port 4 | Guest   | Guest-accessible Ethernet jack in the living room  |
+| Port   | Profile            | Use Case                                           |
+| ------ | ------------------ | -------------------------------------------------- |
+| Port 1 | _(WAN)_            | Connected to ISP modem                             |
+| Port 2 | Admin              | Desktop computer with full LAN and Internet access |
+| Port 3 | Admin              | StartOS server with full LAN and Internet access   |
+| Port 4 | Guest              | Guest-accessible Ethernet jack in the living room  |
+| Port 5 | _(Managed switch)_ | Switch in the office, one profile per switch port  |

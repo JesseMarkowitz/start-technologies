@@ -554,4 +554,9 @@ export default {
   582: 'Resolver, die Profile mit diesem VPN ohne eigenes DNS durch den Tunnel erreichen. Durch Kommas trennen.',
   583: 'IP-Adressen durch Kommas getrennt eingeben',
   580: 'System (außerhalb des VPN)',
+  585: 'Managed Switch',
+  586: 'Managed Switch anschließen',
+  587: 'Jedes Sicherheitsprofil wird an diesen Port als getaggtes VLAN gesendet, und der Switch entscheidet, zu welchem Profil jeder seiner eigenen Ports gehört. Wer sich am Switch anmelden kann, erreicht jedes Profil. Schützen Sie daher sein Passwort und schließen Sie seine VLAN-Einrichtung ab, bevor Sie ihn anschließen.',
+  588: 'Diesem Switch vertrauen',
+  589: 'VLAN-IDs',
 } satisfies i18n

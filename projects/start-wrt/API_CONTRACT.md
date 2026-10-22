@@ -696,8 +696,12 @@ struct LanIpv6SetRequest {
 
 #[derive(Serialize, Deserialize)]
 struct Port<Id = ProfileId> {
-    /// Security profile assigned to this port, if any
+    /// Security profile assigned to this port, if any. Always `None` on a trunk.
     profile: Option<Id>,
+    /// Trunk: the port carries every profile as a tagged VLAN and no untagged
+    /// traffic, for a managed switch that assigns its own ports to profiles.
+    /// Defaults to `false` when omitted in a request.
+    trunk: bool,
 }
 
 #[derive(Serialize)]
@@ -748,6 +752,13 @@ struct EthernetSetResult {
 // and returns them; with confirmation it deletes those published ports (firewall
 // rules + stale DHCP reservations) atomically with the bridge-VLAN/WAN update,
 // then reloads network + firewall.
+//
+// Trunks: a port with `trunk: true` joins every profile's bridge VLAN tagged,
+// including Admin's, and a profile created later joins it too. A trunk turns
+// on bridge VLAN filtering even when Admin is the only profile. A port becoming
+// a trunk is not a profile change (its devices keep the VLAN the switch gives
+// them), so no published ports are deleted; a trunk returning to a profile is.
+// Errors: `InvalidTrunkPort` (1027) for a trunk with a profile or on the WAN port.
 ```
 
 Note: `ProfileId` and `ProfileIdOpt` are shared types defined at the top of the contract.

@@ -13,6 +13,7 @@ export interface EthernetPortView {
   name: string
   profile: ProfileId | null
   profileName: string
+  trunk: boolean
   wan: boolean
 }
 
@@ -73,7 +74,10 @@ export class EthernetService extends FormService<EthernetPortView[]> {
       wan_ipv6: this.wanIpv6,
       wan_port: wanPort,
       ports: Object.fromEntries(
-        items.map(p => [p.name, { profile: p.wan ? null : p.profile }]),
+        items.map(p => [
+          p.name,
+          { profile: p.wan || p.trunk ? null : p.profile, trunk: p.trunk },
+        ]),
       ),
       confirm_published_port_deletion: confirm,
     }
@@ -84,7 +88,10 @@ export class EthernetService extends FormService<EthernetPortView[]> {
       .map(([name, port]) => ({
         name,
         profile: port.profile,
-        profileName: port.profile?.fullname ?? 'Admin',
+        profileName: port.trunk
+          ? this.i18n.transform('Managed switch')
+          : (port.profile?.fullname ?? 'Admin'),
+        trunk: port.trunk,
         wan: name === ethernet.wan_port,
       }))
       .sort((a, b) => a.name.localeCompare(b.name))

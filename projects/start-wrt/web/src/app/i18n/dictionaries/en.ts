@@ -559,4 +559,9 @@ export const ENGLISH: Record<string, number> = {
   'Resolvers reached through the tunnel by profiles using this VPN that have no DNS of their own. Separate with commas.': 582,
   'Enter IP addresses separated by commas': 583,
   'System (outside VPN)': 580,
+  'Managed switch': 585,
+  'Connect a managed switch': 586,
+  'Every security profile is sent to this port as a tagged VLAN, and the switch decides which profile each of its own ports belongs to. Anyone who can log in to the switch can reach every profile, so protect its password and finish its VLAN setup before connecting it.': 587,
+  'Trust this switch': 588,
+  'VLAN IDs': 589,
 }
