@@ -231,6 +231,21 @@ pub async fn get_label<P: AsRef<Path>>(path: P) -> Result<Option<String>, Error>
     Ok(if label.is_empty() { None } else { Some(label) })
 }
 
+/// `lsblk`'s device type: `disk`, `part`, `rom`, `loop`, `lvm`, `crypt`, …
+#[instrument(skip_all)]
+pub async fn get_type<P: AsRef<Path>>(path: P) -> Result<String, Error> {
+    Ok(String::from_utf8(
+        Command::new("lsblk")
+            .arg("-ndo")
+            .arg("type")
+            .arg(path.as_ref())
+            .invoke(crate::ErrorKind::BlockDevice)
+            .await?,
+    )?
+    .trim()
+    .to_owned())
+}
+
 #[instrument(skip_all)]
 pub async fn get_part_type<P: AsRef<Path>>(path: P) -> Result<Option<String>, Error> {
     let part_type = String::from_utf8(
@@ -303,6 +318,11 @@ pub async fn get_percentage<P: AsRef<Path>>(path: P) -> Result<u64, Error> {
     .strip_suffix("%")
     .unwrap()
     .parse::<u64>()?)
+}
+
+/// Whether an LVM volume group name is one StartOS created for its data pool.
+pub fn is_startos_pool_guid(guid: &str) -> bool {
+    guid.starts_with("EMBASSY_") || guid.starts_with("STARTOS_")
 }
 
 #[instrument(skip_all)]
@@ -463,6 +483,9 @@ pub async fn list(os: &OsPartitionInfo, server_id: Option<&str>) -> Result<Vec<D
 
     let mut res = Vec::with_capacity(disks.len());
     for (disk, index) in disks {
+        if matches!(get_type(&disk).await.as_deref(), Ok("rom")) {
+            continue;
+        }
         if index.internal {
             for (part, stable_part_path) in index.parts {
                 let mut disk_info = disk_info(disk.clone(), index.stable_path.clone()).await;

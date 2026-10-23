@@ -12,22 +12,12 @@ const ROOT_TARGET_BYTES: u64 = 14 * 1024 * 1024 * 1024;
 /// Floor for elastic-root shrink when a protected partition is in the way.
 const ROOT_MIN_BYTES: u64 = 12 * 1024 * 1024 * 1024;
 /// 1 MiB at 512-byte sectors.
-const PARTITION_ALIGNMENT_LBA: u64 = 2048;
+pub(crate) const PARTITION_ALIGNMENT_LBA: u64 = 2048;
 
-/// Synchronous core of `partition()`: writes a fresh GPT to `device` placing
-/// efi/bios + boot + root, then either re-creates the protected data partition
-/// at its existing LBAs or fills the trailing free space with a new one.
-///
-/// Split out so unit tests can drive it against a sparse file without going
-/// through `quiesce_disk` / `partx --update`, which need a real block device.
-fn build_gpt_layout(
-    device: Box<dyn gpt::DiskDevice + Send>,
-    capacity: u64,
-    disk_path: &Path,
-    protected_partition_info: Option<(u64, u64, PathBuf)>,
-    use_efi: bool,
-) -> Result<(bool, Option<PathBuf>), Error> {
-    let mut device = device;
+pub(crate) type Device = Box<dyn gpt::DiskDevice + Send>;
+
+/// A protective MBR and an empty GPT, written over whatever the device held.
+pub(crate) fn fresh_gpt(mut device: Device, capacity: u64) -> Result<gpt::GptDisk<Device>, Error> {
     let mbr = gpt::mbr::ProtectiveMBR::with_lb_size(
         u32::try_from((capacity / 512) - 1).unwrap_or(0xFF_FF_FF_FF),
     );
@@ -36,8 +26,44 @@ fn build_gpt_layout(
         .writable(true)
         .logical_block_size(LogicalBlockSize::Lb512)
         .create_from_device(device, None)?;
-
     gpt.update_partitions(Default::default())?;
+    Ok(gpt)
+}
+
+/// Bytes an aligned partition can take in the largest free region.
+pub(crate) fn largest_aligned_free_bytes(gpt: &gpt::GptDisk<Device>) -> Result<u64, Error> {
+    let lb_size_bytes: u64 = (*gpt.logical_block_size()).into();
+    gpt.find_free_sectors()
+        .iter()
+        .map(|(start, length_lba)| {
+            let alignment_offset = (PARTITION_ALIGNMENT_LBA - (start % PARTITION_ALIGNMENT_LBA))
+                % PARTITION_ALIGNMENT_LBA;
+            length_lba.saturating_sub(alignment_offset) * lb_size_bytes
+        })
+        .max()
+        .filter(|s| *s > 0)
+        .ok_or_else(|| {
+            Error::new(
+                eyre!("No free space left on device"),
+                crate::ErrorKind::BlockDevice,
+            )
+        })
+}
+
+/// Synchronous core of `partition()`: writes a fresh GPT to `device` placing
+/// efi/bios + boot + root, then either re-creates the protected data partition
+/// at its existing LBAs or fills the trailing free space with a new one.
+///
+/// Split out so unit tests can drive it against a sparse file without going
+/// through `quiesce_disk` / `partx --update`, which need a real block device.
+fn build_gpt_layout(
+    device: Device,
+    capacity: u64,
+    disk_path: &Path,
+    protected_partition_info: Option<(u64, u64, PathBuf)>,
+    use_efi: bool,
+) -> Result<(bool, Option<PathBuf>), Error> {
+    let mut gpt = fresh_gpt(device, capacity)?;
 
     let efi = if use_efi {
         gpt.add_partition(
@@ -139,29 +165,9 @@ fn build_gpt_layout(
         )?;
         Some(path)
     } else {
-        // Account for alignment offset so add_partition's length check passes
-        // when the largest free block isn't already 2048-aligned.
-        let lb_size_bytes: u64 = (*gpt.logical_block_size()).into();
-        let data_size_bytes = gpt
-            .find_free_sectors()
-            .iter()
-            .map(|(start, length_lba)| {
-                let alignment_offset = (PARTITION_ALIGNMENT_LBA
-                    - (start % PARTITION_ALIGNMENT_LBA))
-                    % PARTITION_ALIGNMENT_LBA;
-                length_lba.saturating_sub(alignment_offset) * lb_size_bytes
-            })
-            .max()
-            .filter(|s| *s > 0)
-            .ok_or_else(|| {
-                Error::new(
-                    eyre!("No free space left on device"),
-                    crate::ErrorKind::BlockDevice,
-                )
-            })?;
         gpt.add_partition(
             "data",
-            data_size_bytes,
+            largest_aligned_free_bytes(&gpt)?,
             gpt::partition_types::LINUX_LVM,
             0,
             Some(PARTITION_ALIGNMENT_LBA),
