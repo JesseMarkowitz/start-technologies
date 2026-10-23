@@ -1,0 +1,1 @@
+- Add `disk format` to erase a drive and prepare it as a single ext4 partition for StartOS backups.

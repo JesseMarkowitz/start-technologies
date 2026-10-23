@@ -693,7 +693,7 @@ Disable kiosk mode.
 
 ## Disks
 
-List and repair storage devices.
+List, repair, and format storage devices.
 
 ### `start-cli disk list`
 
@@ -705,6 +705,12 @@ partitions are omitted.
 ### `start-cli disk repair`
 
 Repair filesystem issues on the data partition.
+
+### `start-cli disk format <DISK>`
+
+Erase a whole drive and leave it with a single ext4 partition ready for backups, then print the new partition. The drive holding StartOS or its data, the live boot medium, and anything mounted are refused.
+
+- `--label <LABEL>` — Volume label, at most 16 bytes (default `StartOS Backups`)
 
 ## Diagnostics
 
