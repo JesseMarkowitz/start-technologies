@@ -268,7 +268,7 @@ fn display_disk_info(params: WithIoFormat<Empty>, args: Vec<DiskInfo>) -> Result
                 } else {
                     "N/A"
                 },
-                part.capacity,
+                &format!("{:.2} GiB", part.capacity as f64 / 1024.0 / 1024.0 / 1024.0),
                 &if let Some(used) = part
                     .used
                     .map(|u| format!("{:.2} GiB", u as f64 / 1024.0 / 1024.0 / 1024.0))
