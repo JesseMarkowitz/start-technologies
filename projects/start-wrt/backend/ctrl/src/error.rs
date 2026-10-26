@@ -65,6 +65,14 @@ pub enum ErrorKind {
     InvalidTrunkPort = 1027,
 }
 
+impl From<Error> for startos::Error {
+    fn from(e: Error) -> Self {
+        let mut res = startos::Error::new(e.source, e.kind.into());
+        res.info = e.info;
+        res
+    }
+}
+
 impl From<ErrorKind> for startos::ErrorKind {
     fn from(k: ErrorKind) -> Self {
         // Matching numeric code where possible (generic variants have the same
