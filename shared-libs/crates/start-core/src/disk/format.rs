@@ -23,8 +23,11 @@ use crate::util::io::read_file_to_string;
 use crate::util::serde::{WithIoFormat, display_serializable};
 
 pub const DEFAULT_LABEL: &str = "StartOS Backups";
-/// ext4 stores the volume label in 16 bytes.
-const MAX_LABEL_BYTES: usize = 16;
+/// Btrfs labels reserve the final byte for NUL.
+const MAX_LABEL_BYTES: usize = 255;
+/// `mkfs.btrfs` refuses devices under about 109 MiB and recommends its mixed
+/// mode below 1 GiB, so smaller drives are refused before anything is erased.
+const MIN_CAPACITY_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Deserialize, Serialize, Parser, VisitFields)]
 #[group(skip)]
@@ -39,7 +42,7 @@ pub struct FormatDiskParams {
 
 rpc_toolkit::reflect_ts!(FormatDiskParams);
 
-/// Erases a whole drive into one ext4 partition and returns that partition's node.
+/// Erases a whole drive into one Btrfs partition and returns that partition's node.
 pub async fn format(
     ctx: RpcContext,
     FormatDiskParams { disk, label }: FormatDiskParams,
@@ -49,6 +52,7 @@ pub async fn format(
     let disk = whole_drive(&disk).await?;
     refuse_protected(&ctx.os_partitions, &disk).await?;
     let capacity = get_capacity(&disk).await?;
+    check_capacity(&disk, capacity)?;
     let sector_size = get_logical_block_size(&disk).await?;
     let block_size = LogicalBlockSize::try_from(sector_size).map_err(|_| {
         refused(t!(
@@ -95,19 +99,24 @@ async fn erase_and_partition(
         .arg(&partition)
         .invoke(ErrorKind::DiskManagement)
         .await?;
-    Command::new("mkfs.ext4")
-        .arg("-q")
-        .arg("-F")
-        .arg("-L")
-        .arg(&label)
-        .arg(&partition)
-        .invoke(ErrorKind::DiskManagement)
-        .await?;
+    create_backup_filesystem(&partition, &label).await?;
     Command::new("udevadm")
         .arg("settle")
         .invoke(ErrorKind::DiskManagement)
         .await?;
     Ok(partition)
+}
+
+async fn create_backup_filesystem(partition: &Path, label: &str) -> Result<(), Error> {
+    Command::new("mkfs.btrfs")
+        .arg("-q")
+        .arg("-f")
+        .arg("-L")
+        .arg(label)
+        .arg(partition)
+        .invoke(ErrorKind::DiskManagement)
+        .await?;
+    Ok(())
 }
 
 pub fn display_formatted(
@@ -149,6 +158,13 @@ fn validate_label(label: &str) -> Result<(), Error> {
     }
     if label.chars().any(char::is_control) {
         return Err(refused(t!("disk.format.label-control-characters")));
+    }
+    Ok(())
+}
+
+fn check_capacity(disk: &Path, capacity: u64) -> Result<(), Error> {
+    if capacity < MIN_CAPACITY_BYTES {
+        return Err(refused(t!("disk.format.too-small", disk = disk.display())));
     }
     Ok(())
 }
@@ -266,14 +282,16 @@ mod tests {
             "1234567890123456",
             "éééééééé",
             "Mum’s Backups!",
+            "Family’s Backups",
+            &"a".repeat(255),
+            &format!("{}a", "é".repeat(127)),
         ] {
             assert!(validate_label(label).is_ok(), "{label:?}");
         }
         for label in [
             "",
-            "12345678901234567",
-            "ééééééééé",
-            "Family’s Backups",
+            &"a".repeat(256),
+            &"é".repeat(128),
             "bad\0label",
             "bad\nlabel",
             "bad\tlabel",
@@ -282,6 +300,44 @@ mod tests {
         ] {
             assert!(validate_label(label).is_err(), "{label:?}");
         }
+    }
+
+    #[test]
+    fn drives_under_one_gib_are_refused() {
+        let disk = Path::new("/dev/sdz");
+        for capacity in [0, 114_294_784, MIN_CAPACITY_BYTES - 1] {
+            assert!(check_capacity(disk, capacity).is_err(), "{capacity}");
+        }
+        for capacity in [MIN_CAPACITY_BYTES, 8 * MIN_CAPACITY_BYTES] {
+            assert!(check_capacity(disk, capacity).is_ok(), "{capacity}");
+        }
+    }
+
+    #[tokio::test]
+    async fn backup_filesystem_is_btrfs_with_the_requested_label() {
+        let image = tempfile::NamedTempFile::new().unwrap();
+        image.as_file().set_len(256 * 1024 * 1024).unwrap();
+        let label = format!("{}a", "é".repeat(127));
+        validate_label(&label).unwrap();
+        create_backup_filesystem(image.path(), &label)
+            .await
+            .unwrap();
+
+        Command::new("btrfs")
+            .arg("check")
+            .arg("--readonly")
+            .arg(image.path())
+            .invoke(ErrorKind::DiskManagement)
+            .await
+            .unwrap();
+        let actual_label = Command::new("btrfs")
+            .arg("filesystem")
+            .arg("label")
+            .arg(image.path())
+            .invoke(ErrorKind::DiskManagement)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(actual_label).unwrap().trim(), label);
     }
 
     #[test]

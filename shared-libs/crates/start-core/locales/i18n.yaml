@@ -1367,6 +1367,13 @@ disk.format.system-drive:
   fr_FR: "%{disk} contient le système StartOS"
   pl_PL: "%{disk} zawiera system StartOS"
 
+disk.format.too-small:
+  en_US: "%{disk} is too small for backups; choose a drive of at least 1 GiB"
+  de_DE: "%{disk} ist zu klein für Sicherungen; wählen Sie ein Laufwerk mit mindestens 1 GiB"
+  es_ES: "%{disk} es demasiado pequeña para copias de seguridad; elija una unidad de al menos 1 GiB"
+  fr_FR: "%{disk} est trop petit pour les sauvegardes ; choisissez un disque d’au moins 1 Gio"
+  pl_PL: "%{disk} jest za mały na kopie zapasowe; wybierz dysk o pojemności co najmniej 1 GiB"
+
 disk.format.unsupported-sector-size:
   en_US: "This drive uses an unsupported sector size (%{size} bytes); StartOS can format drives with 512- or 4096-byte sectors"
   de_DE: "Dieses Laufwerk verwendet eine nicht unterstützte Sektorgröße (%{size} Bytes); StartOS kann Laufwerke mit 512- oder 4096-Byte-Sektoren formatieren"
@@ -3957,11 +3964,11 @@ help.arg.format-disk:
   pl_PL: "Dysk do wymazania, np. /dev/sdb"
 
 help.arg.format-label:
-  en_US: "Filesystem label of at most 16 bytes (default: StartOS Backups)"
-  de_DE: "Dateisystembezeichnung mit höchstens 16 Bytes (Standard: StartOS Backups)"
-  es_ES: "Etiqueta del sistema de archivos de como máximo 16 bytes (predeterminado: StartOS Backups)"
-  fr_FR: "Étiquette du système de fichiers de 16 octets au plus (par défaut : StartOS Backups)"
-  pl_PL: "Etykieta systemu plików o długości najwyżej 16 bajtów (domyślnie: StartOS Backups)"
+  en_US: "Filesystem label of at most 255 bytes (default: StartOS Backups)"
+  de_DE: "Dateisystembezeichnung mit höchstens 255 Bytes (Standard: StartOS Backups)"
+  es_ES: "Etiqueta del sistema de archivos de como máximo 255 bytes (predeterminado: StartOS Backups)"
+  fr_FR: "Étiquette du système de fichiers de 255 octets au plus (par défaut : StartOS Backups)"
+  pl_PL: "Etykieta systemu plików o długości najwyżej 255 bajtów (domyślnie: StartOS Backups)"
 
 help.arg.from-registry-url:
   en_US: "Source registry URL to promote from"
@@ -6117,11 +6124,11 @@ about.forget-disconnected-gateway:
   pl_PL: "Zapomnij odłączoną bramę"
 
 about.format-disk:
-  en_US: "Erase a drive and format it as one ext4 partition"
-  de_DE: "Ein Laufwerk löschen und als eine ext4-Partition formatieren"
-  es_ES: "Borrar una unidad y formatearla como una única partición ext4"
-  fr_FR: "Effacer un disque et le formater en une seule partition ext4"
-  pl_PL: "Wymaż dysk i sformatuj go jako jedną partycję ext4"
+  en_US: "Erase a drive and format it as one Btrfs partition"
+  de_DE: "Ein Laufwerk löschen und als eine Btrfs-Partition formatieren"
+  es_ES: "Borrar una unidad y formatearla como una única partición Btrfs"
+  fr_FR: "Effacer un disque et le formater en une seule partition Btrfs"
+  pl_PL: "Wymaż dysk i sformatuj go jako jedną partycję Btrfs"
 
 about.generate-certificate-for-webserver:
   en_US: "Generate a certificate for the webserver"
