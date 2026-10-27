@@ -7819,14 +7819,14 @@ dependencies = [
 
 [[package]]
 name = "start-registry"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "start-core",
 ]
 
 [[package]]
 name = "start-tunnel"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "include_dir",
  "start-core",
