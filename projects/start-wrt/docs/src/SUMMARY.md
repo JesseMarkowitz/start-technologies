@@ -46,6 +46,7 @@
 
 - [Ethernet](ethernet.md)
 - [Connecting a Managed Switch](managed-switch.md)
+- [Walkthrough: TP-Link Easy Smart Switches](managed-switch-tp-link.md)
 - [Wi-Fi](wifi.md)
 - [Wi-Fi Blackout](wifi-schedules.md)
 - [Inbound VPNs](inbound-vpn.md)
