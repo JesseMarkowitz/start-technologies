@@ -39,6 +39,7 @@ pub mod sign;
 pub mod ssh_keys;
 pub mod ssl;
 pub mod system;
+pub mod tls;
 pub mod trunk;
 pub mod uci;
 pub mod update;
