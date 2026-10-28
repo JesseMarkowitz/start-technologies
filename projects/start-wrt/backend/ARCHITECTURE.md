@@ -306,7 +306,7 @@ Shared, OpenWrt-native typed sections live in `uciedit/src/openwrt.rs`; feature-
 
 `ErrorKind` enum covers IO, UCI parse/write errors, and domain errors:
 
-- Config errors: `InterfaceNameConflict`, `DuplicateVlanTag`, `DuplicatePassword`, `DuplicatePasswordLabel`, `DuplicateFullname`
+- Config errors: `InterfaceNameConflict`, `DuplicateVlanTag`, `ReservedVlanTag`, `DuplicatePassword`, `DuplicatePasswordLabel`, `DuplicateFullname`
 - Profile errors: `MissingProfile`, `CorruptedProfile`, `LanOwnerExists`, `CannotDeleteLanOwner`
 - Infrastructure errors: `MissingLanBridge`, `MissingWanInterface`, `MissingLanInterface`, `MissingFirewallZone`
 - WiFi errors: `CorruptedWifi`, `UnnamedWirelessInterface`, `UnnamedWirelessDevice`

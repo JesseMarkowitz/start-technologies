@@ -1,1 +1,5 @@
+---
+user-facing: true
+---
+
 - Full-size packets now pass on an Ethernet port that carries VLAN-tagged traffic, such as a port connected to a managed switch. The K1's Ethernet controller had been dropping any tagged frame over 1518 bytes, so pings and small requests worked while downloads, uploads and secure connections stalled.

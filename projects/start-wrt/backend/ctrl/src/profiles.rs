@@ -1878,11 +1878,23 @@ fn create_config(
             _ => (),
         }
     }
+    // A profile whose VLAN has no bridge-vlan section — Admin on a bridge
+    // without VLAN filtering — still owns its tag.
+    for id in list_config(ctx.clone(), cfgs)? {
+        existing_tags.insert(id.vlan_tag);
+    }
     let found_bridge = find_lan_bridge(cfgs)?
         .map(|dev| dev.name)
         .ok_or_else(|| Error::new(eyre!("missing LAN bridge"), ErrorKind::MissingLanBridge))?;
     let vlan_tag = match profile.id.vlan_tag {
         Some(chosen_tag) => {
+            // 802.1Q reserves 0 and 4095.
+            if chosen_tag == 0 || chosen_tag >= 4095 {
+                return Err(Error::new(
+                    eyre!("VLAN tag out of range: {chosen_tag}"),
+                    ErrorKind::ReservedVlanTag,
+                ));
+            }
             if existing_tags.contains(&chosen_tag) {
                 return Err(Error::new(
                     eyre!("duplicate VLAN tag: {chosen_tag}"),
@@ -1891,7 +1903,7 @@ fn create_config(
             }
             chosen_tag
         }
-        None => (101..2_u16.pow(12))
+        None => (101..4095_u16)
             .find(|t| !existing_tags.contains(t))
             .expect("we somehow exausted all vlan tags, that should be impossible"),
     };
@@ -7841,6 +7853,99 @@ config dhcp 'guest'
             "non-admin profiles are still gated on the outbound"
         );
         assert_eq!(guest.dhcpv6.as_deref(), Some("disabled"));
+    }
+
+    fn profile_with_tag(tag: Option<u16>) -> Profile<ProfileIdOpt> {
+        Profile {
+            id: ProfileIdOpt {
+                fullname: Some("Third".into()),
+                interface: None,
+                vlan_tag: tag,
+            },
+            gateway_ip: Ipv4Addr::new(192, 168, 102, 1),
+            outbound: "wan".into(),
+            lan_access: LanAccess::SameProfile,
+            wan_access: WanAccess::All,
+            dns_override: Vec::new(),
+            dns_source: String::new(),
+            access_to_new_profiles: false,
+            owns_lan: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_admin_tag_on_flat_bridge() {
+        // Without VLAN filtering, Admin's VLAN has no bridge-vlan section;
+        // its tag is still taken.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = TestContext(dir.path().to_path_buf());
+        setup_configs(dir.path());
+        let network = std::fs::read_to_string(dir.path().join("network"))
+            .unwrap()
+            .replace(
+                "config bridge-vlan\n\toption device 'br-lan'\n\toption vlan '99'\n\n",
+                "",
+            )
+            .replace(
+                "\toption device 'br-lan.99'\n",
+                "\toption device 'br-lan'\n",
+            );
+        assert!(
+            !network.contains("vlan '99'"),
+            "fixture must drop Admin's bridge-vlan"
+        );
+        std::fs::write(dir.path().join("network"), network).unwrap();
+        let arena = Arena::new();
+        let mut cfgs = parse_all(
+            ctx.uci_root(),
+            &arena,
+            &["startwrt", "network", "firewall", "dhcp", "wireless"],
+        )
+        .await
+        .unwrap();
+
+        let err = create_config(
+            ctx.clone(),
+            &mut cfgs,
+            &profile_with_tag(Some(99)),
+            Some("third".into()),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DuplicateVlanTag);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_reserved_tags_and_accepts_the_last_usable_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = TestContext(dir.path().to_path_buf());
+        setup_configs(dir.path());
+        let arena = Arena::new();
+        let mut cfgs = parse_all(
+            ctx.uci_root(),
+            &arena,
+            &["startwrt", "network", "firewall", "dhcp", "wireless"],
+        )
+        .await
+        .unwrap();
+
+        for tag in [0, 4095, u16::MAX] {
+            let err = create_config(
+                ctx.clone(),
+                &mut cfgs,
+                &profile_with_tag(Some(tag)),
+                Some("third".into()),
+            )
+            .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::ReservedVlanTag, "tag {tag}");
+        }
+        let id = create_config(
+            ctx.clone(),
+            &mut cfgs,
+            &profile_with_tag(Some(4094)),
+            Some("third".into()),
+        )
+        .unwrap();
+        assert_eq!(id.vlan_tag, 4094);
     }
 
     #[tokio::test]

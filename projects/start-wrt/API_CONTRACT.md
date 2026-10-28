@@ -1922,6 +1922,8 @@ struct Profile<ProfileIdOpt> {
     dns_source: String,
 }
 // Response: ProfileId
+// Errors: `ReservedVlanTag` (1028) for a vlan_tag of 0 or 4095 and above,
+//   `DuplicateVlanTag` for one another profile holds, Admin's included.
 // Validation: gateway_ip must stay inside the LAN network block (see
 //   lan.ipv4-set). owns_lan profiles must be a valid RFC 1918 selection;
 //   others must share the admin LAN's first two octets, else InvalidRequest.

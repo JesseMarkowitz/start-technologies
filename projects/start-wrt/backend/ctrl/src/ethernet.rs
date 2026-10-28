@@ -2090,6 +2090,96 @@ config interface 'guest'
     }
 
     #[tokio::test]
+    async fn get_reports_port_with_untagged_membership_as_not_trunk() {
+        // Tagged in every VLAN but untagged in one: that port delivers one
+        // profile's frames untagged, so it is that profile's port, not a trunk.
+        let dir = tempfile::tempdir().unwrap();
+        setup_basic(dir.path());
+        std::fs::write(
+            dir.path().join("network"),
+            "\
+config device
+\toption name 'br-lan'
+\toption type 'bridge'
+\tlist ports 'eth0'
+\tlist ports 'eth1'
+
+config bridge-vlan
+\toption device 'br-lan'
+\toption vlan '1'
+\tlist ports 'eth0:t'
+\tlist ports 'eth1:u*'
+
+config bridge-vlan
+\toption device 'br-lan'
+\toption vlan '3'
+\tlist ports 'eth0:u*'
+
+config interface 'lan'
+\toption device 'br-lan.1'
+\toption proto 'static'
+\toption ipaddr '192.168.1.1'
+\toption netmask '255.255.255.0'
+
+config interface 'guest'
+\toption device 'br-lan.3'
+\toption proto 'static'
+\toption ipaddr '192.168.3.1'
+\toption netmask '255.255.255.0'
+",
+        )
+        .unwrap();
+        let ctx = TestContext(dir.path().to_path_buf());
+
+        let result = get(ctx).await.unwrap();
+        assert!(!result.ports["eth0"].trunk);
+        assert_eq!(result.ports["eth0"].profile.as_ref().unwrap().vlan_tag, 3);
+    }
+
+    #[tokio::test]
+    async fn set_trunk_port_has_no_untagged_membership() {
+        // Across a trunk being set and the other port moving between profiles,
+        // every membership the trunk holds is tagged and it is in every VLAN.
+        let dir = tempfile::tempdir().unwrap();
+        setup_basic(dir.path());
+        let ctx = TestContext(dir.path().to_path_buf());
+
+        let ethernet = |eth1: Option<ProfileIdOpt>| {
+            DeserializeStdin(Ethernet {
+                wan_ipv6: false,
+                wan_port: None,
+                ports: BTreeMap::from([
+                    (
+                        "eth0".into(),
+                        Port {
+                            profile: None,
+                            trunk: true,
+                        },
+                    ),
+                    (
+                        "eth1".into(),
+                        Port {
+                            profile: eth1,
+                            trunk: false,
+                        },
+                    ),
+                ]),
+            })
+        };
+
+        for eth1 in [Some(guest()), None, Some(guest())] {
+            set(ctx.clone(), ethernet(eth1)).await.unwrap();
+            let vlans = vlan_members(&ctx).await;
+            assert_eq!(vlans.len(), 2, "both profiles keep a VLAN");
+            for (vlan, members) in &vlans {
+                let eth0: Vec<_> = members.iter().filter(|m| m.starts_with("eth0")).collect();
+                assert_eq!(eth0, vec!["eth0:t"], "trunk membership in VLAN {vlan}");
+            }
+            assert!(get(ctx.clone()).await.unwrap().ports["eth0"].trunk);
+        }
+    }
+
+    #[tokio::test]
     async fn set_trunk_port_joins_every_vlan_tagged() {
         let dir = tempfile::tempdir().unwrap();
         setup_basic(dir.path());
